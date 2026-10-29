@@ -1,0 +1,3 @@
+# Example config for jobsctl. Location: ~/.config/jobsctl/config.yaml (drop-ins: config.d/*.yaml).
+# Keys are defined in docs/interface.md once designed.
+hooks: {}
