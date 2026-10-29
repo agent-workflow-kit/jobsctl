@@ -1,6 +1,6 @@
 [project]
 name = "jobsctl"
-version = "0.0.0"
+version = "0.0.1"
 description = "Generic job queue with concurrency caps, ordering and held jobs"
 readme = "README.md"
 requires-python = ">=3.12"
