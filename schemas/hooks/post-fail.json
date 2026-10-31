@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/hooks/post-fail.json",
+  "title": "jobsctl post-fail hook payload",
+  "description": "Built on payload.json.",
+  "$ref": "payload.json",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "jobsctl"
+    },
+    "hook": {
+      "const": "post-fail"
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique per event; the same on redelivery. pre-start (not an outbox event): <claim_id>:pre-start:<hook index>."
+    },
+    "object_type": {
+      "const": "job"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/job_id"
+    },
+    "repo": {
+      "type": "null",
+      "description": "Always null: jobsctl has no repo notion; policies match on labels."
+    },
+    "labels": {
+      "$ref": "../defs.json#/$defs/labels"
+    },
+    "previous_status": {
+      "enum": [
+        "starting",
+        "running",
+        "held"
+      ],
+      "description": "The status before this transition."
+    },
+    "job": {
+      "$ref": "../defs.json#/$defs/hook_job",
+      "properties": {
+        "status": {
+          "enum": [
+            "failed",
+            "queued"
+          ]
+        }
+      }
+    },
+    "attempt": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/attempt"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The attempt the event concerns (post-fail: the failed attempt); null when the transition involved no attempt."
+    },
+    "output_available": {
+      "type": "boolean",
+      "description": "true whenever the attempt's job process ran and a tail exists."
+    },
+    "output_tail": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 262144,
+      "x-untrusted": true,
+      "description": "Untrusted: the final masked, sanitized output tail, only for a hook with include_output: true when output_available; else null. Notification templates should leave it out."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tool",
+    "hook",
+    "event_id",
+    "object_type",
+    "object_id",
+    "repo",
+    "labels",
+    "previous_status",
+    "job",
+    "attempt",
+    "output_available",
+    "output_tail"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "job": {
+            "properties": {
+              "status": {
+                "const": "queued"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "attempt": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "failed"
+              },
+              "reason": {
+                "enum": [
+                  "exit",
+                  "signaled",
+                  "timeout",
+                  "terminated",
+                  "lost",
+                  "spawn_failed",
+                  "missing_env"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "output_available": {
+            "const": false
+          }
+        },
+        "required": [
+          "output_available"
+        ]
+      },
+      "then": {
+        "properties": {
+          "output_tail": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "attempt": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "exit": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "const": "spawn_failed"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "required": [
+          "attempt"
+        ]
+      },
+      "then": {
+        "properties": {
+          "output_available": {
+            "const": false
+          }
+        }
+      }
+    }
+  ]
+}

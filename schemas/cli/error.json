@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/cli/error.json",
+  "title": "jobsctl error output (--json, non-zero exit)",
+  "description": "Every non-zero exit except the wait outcomes (12, 13, 20, 22 and 130: wait prints show.json, add --wait prints add.json) and cancel with selectors and --all exiting 20 (which prints cancel.json).",
+  "type": "object",
+  "properties": {
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "../defs.json#/$defs/error_code"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "$ref": "../defs.json#/$defs/refusal_reason",
+          "description": "With code refused only."
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "../defs.json#/$defs/job_id"
+          },
+          "minItems": 2,
+          "description": "With code ambiguous only: the matching job ids."
+        },
+        "details": {
+          "type": "object",
+          "properties": {
+            "job_id": {
+              "$ref": "../defs.json#/$defs/job_id"
+            },
+            "status": {
+              "$ref": "../defs.json#/$defs/status"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "code": {
+              "enum": [
+                "secret_in_argv",
+                "secret_in_env"
+              ],
+              "description": "usage from add: secret_in_argv (with index) or secret_in_env (with variable)."
+            },
+            "index": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "secret_in_argv: the index of the argv element; never its value."
+            },
+            "variable": {
+              "$ref": "../defs.json#/$defs/env_name",
+              "description": "secret_in_env: the --env name; never its value."
+            }
+          },
+          "additionalProperties": {},
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "code": {
+                    "const": "secret_in_argv"
+                  }
+                },
+                "required": [
+                  "code"
+                ]
+              },
+              "then": {
+                "required": [
+                  "index"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "code": {
+                    "const": "secret_in_env"
+                  }
+                },
+                "required": [
+                  "code"
+                ]
+              },
+              "then": {
+                "required": [
+                  "variable"
+                ]
+              }
+            }
+          ],
+          "description": "Optional, code-specific (e.g. job_id for duplicate_key and cancel_pending, status for not_held from resolve, limit for the label limit, code for a secret refused by add)."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "refused"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "reason"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "ambiguous"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "candidates"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "candidates"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "duplicate_key"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "required": [
+                  "job_id"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "cancel_pending"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "required": [
+                  "job_id"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "details": {
+                "required": [
+                  "code"
+                ]
+              }
+            },
+            "required": [
+              "details"
+            ]
+          },
+          "then": {
+            "properties": {
+              "code": {
+                "const": "usage"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "error"
+  ]
+}

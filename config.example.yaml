@@ -1,3 +1,125 @@
-# Example config for jobsctl. Location: ~/.config/jobsctl/config.yaml (drop-ins: config.d/*.yaml).
-# Keys are defined in docs/interface.md once designed.
+# Example config for jobsctl: every key with its default.
+# Location: ~/.config/jobsctl/config.yaml (respecting XDG_CONFIG_HOME), plus config.d/*.yaml
+# drop-ins in lexical order (maps merged, hook lists appended). Schema: schemas/config.json.
+# Rules: docs/interface.md, section Config.
+# Precedence: flags > queues.<name> > this file > defaults. Config comes only from files (there are
+# no JOBSCTL_<KEY> environment variables).
+# Durations: <integer><unit>, unit s, m, h or d (e.g. 30s, 10m, 2h, 30d).
+
+# Cap of a queue with no configured cap; null = unbounded.
+default_cap: 1
+# Total running (starting + running) jobs across all queues; null = no global limit.
+global_cap: null
+# true: `add` to a queue that is neither configured nor already known exits 10 (unknown_queue).
+# Affects add only; a hook selector naming such a queue is always just a warning.
+strict_queues: false
+# Request a `jobsctl run` pass after add, a job's end, cancel of a starting job, release and
+# retry, so work starts without waiting for cron.
+auto_run: true
+# Interval of `jobsctl run --loop`.
+run_interval: 10s
+# Wait per step of the signal sequence (cancel --force, timeouts, SIGTERM); per queue overridable.
+kill_grace: 30s
+# Output tail kept per attempt: the smaller of tail_bytes (max 262144) and tail_lines.
+tail_bytes: 16384
+tail_lines: 200
+# How often a running job's tail is written to the database.
+tail_flush_interval: 5s
+# Variables whose values are masked as *** in output tails and hook output, besides every
+# --pass-env and env_file variable (values under 8 characters are not masked). `add` refuses
+# these names with --env, and argv or --env values containing a masked value.
+mask_env: []
+# Terminal jobs whose end (ended_at) is older than this are pruned by each pass (never while
+# hook events are undelivered); null keeps them. Diagnostics files are deleted after 7 days.
+retention: 30d
+
+# The job environment is built from scratch (docs/interface.md, Job environment).
+env:
+  # Variables kept in the canonical environment of passes, shims and hooks, and given to jobs:
+  # exact names or a prefix ending in *. TMUX, TMUX_PANE and SSH_AUTH_SOCK are not inherited
+  # unless listed. Inherited values come from whatever started the chain (cron or your shell);
+  # empty, relative, missing and temporary PATH entries are dropped.
+  inherit:
+    - PATH
+    - HOME
+    - USER
+    - LOGNAME
+    - SHELL
+    - LANG
+    - LC_*
+    - TZ
+    - TERM
+    - XDG_CONFIG_HOME
+    - XDG_STATE_HOME
+    - XDG_DATA_HOME
+    - XDG_CACHE_HOME
+    - XDG_RUNTIME_DIR
+    - TMPDIR
+  # Fixed, non-secret values for jobs, e.g. {CI: "1"}. Setting PATH here is recommended: it then
+  # replaces the inherited PATH for jobs, hooks and jobsctl's own processes, so it does not depend
+  # on what triggered the pass (an inherited PATH can hold agent-writable entries such as a
+  # worktree's node_modules/.bin), e.g. {PATH: "/usr/local/bin:/usr/bin:/bin"}.
+  set: {}
+  # Absolute directories (~/ allowed) put in front of PATH (jobs, hooks and jobsctl's own
+  # processes), in order.
+  path_prepend: []
+
+# Optional NAME=value file of secrets, added to every hook's environment (never to jobsctl's
+# own environment); the only source of --pass-env values. Every value in it is treated as a
+# secret (masked, and refused by `add` in argv and --env); put non-secret fixed values in
+# env.set. A trust anchor: whoever can write it runs code as you, so keep it where no agent
+# session can write, e.g. ~/.config/jobsctl/env. Must be a regular file of at most 1 MiB (not a
+# symlink) owned by you with no group or other permissions, in directories owned by you or root
+# that only their owner can write; otherwise it is ignored and jobs that need --pass-env wait.
+# Format: one NAME=value per line, # comments, no quoting or expansion; a trailing CR is
+# stripped. PATH, HOME, XDG_CONFIG_HOME, XDG_STATE_HOME, JOBSCTL_*, LD_*, DYLD_*, PYTHON*,
+# BASH_ENV, ENV, SHELLOPTS, BASHOPTS and IFS lines are not added to hook environments
+# (--pass-env can still pass them to a job). Values are masked in tails and never logged.
+env_file: null
+
+# Hooks: lists of {name, cmd, timeout, async, include_output, queues, exclude_queues, labels};
+# cmd runs via /bin/sh -c in its own process group (killed on timeout: SIGTERM, 5 s, SIGKILL).
+# name (optional) is the hook's identity, else cmd; timeout is a duration (default 30s); async
+# and include_output (post hooks only) default to false; at most 8 async hooks run at once, one
+# per job; include_output puts the (untrusted) output tail into the payload; queues null means
+# every queue; labels are key=value pairs that must all match. Hook output is not stored or
+# logged (only a vetoing or escalating pre-start hook's stderr is kept on the attempt).
 hooks: {}
+# hooks:
+#   pre-start:
+#     - name: gate-start
+#       cmd: "gatectl check start-work --timeout 540"
+#       timeout: 10m
+#       queues: [tickets, reviews]
+#   post-fail:
+#     - name: notify
+#       cmd: "notice-route send --stdin-json"
+#       async: true
+#       exclude_queues: [respond]
+# Hook names: pre-start, post-start, post-finish, post-fail, post-held, post-cancel.
+# Variables removed from hook environments (env_file variables are not removed otherwise).
+hooks_strip_env: []
+
+# SQLite busy timeout.
+busy_timeout: 5s
+
+me:
+  # For the default actor human:<name>; null = the OS user name.
+  name: null
+
+# Per-queue settings; a queue not listed here is created on first use with default_cap.
+queues: {}
+# queues:
+#   tickets:
+#     cap: 2            # integer >= 0 or null (unbounded); 0 holds the queue
+#     priority: 10      # -1000..1000; selection across queues, highest first (default 0)
+#     timeout: 2h       # job timeout; default null (none)
+#     max_retries: 2    # automatic retries, 0..100 (default 0: off)
+#     retry_delay: 60s  # a failed job waits this long, queued, before its retry
+#     kill_grace: 1m    # default: the global value
+#     tail_bytes: 16384 # default: the global value
+#     tail_lines: 200   # default: the global value
+#   reviews:
+#     cap: 3
+#   respond:
+#     cap: null

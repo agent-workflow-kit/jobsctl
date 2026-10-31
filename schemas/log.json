@@ -1,33 +1,547 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "jobsctl/log",
+  "$id": "jobsctl/log.json",
   "title": "jobsctl log.jsonl record",
+  "description": "Every status transition, reorder and label change, queue creation, shim event, warning, hook run, reconcile finding and pass that changed something. Secret values are masked; masking is best-effort (interface: Residual risks).",
   "type": "object",
   "properties": {
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "From a per-file counter in state.db; records appear in file order; gaps only after a crash."
+    },
     "ts": {
-      "type": "string",
-      "format": "date-time"
+      "$ref": "defs.json#/$defs/ts"
     },
     "level": {
-      "type": "string",
       "enum": [
-        "debug",
         "info",
         "warn",
         "error"
       ]
     },
     "event": {
-      "type": "string"
+      "enum": [
+        "transition",
+        "reorder",
+        "label",
+        "queue_created",
+        "shim_spawned",
+        "shim_spawn_failed",
+        "shim_lost",
+        "leftovers",
+        "short_secret_not_masked",
+        "env_file_unsafe",
+        "env_file_line_ignored",
+        "env_file_line_invalid",
+        "path_entry_dropped",
+        "pass_env_undefined",
+        "missing_env",
+        "unique_key_reused",
+        "hook_ran",
+        "invalid_decision_id",
+        "unknown_queue_selector",
+        "config_invalid",
+        "runner_stuck",
+        "reconcile",
+        "pass"
+      ]
+    },
+    "job_id": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/job_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "queue": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/queue"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "attempt": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "transition: the job's attempt."
+    },
+    "from": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/status"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "transition: the previous status."
+    },
+    "to": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/status"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "transition: the new status."
+    },
+    "reason": {
+      "enum": [
+        "exit",
+        "resolved",
+        "signaled",
+        "timeout",
+        "terminated",
+        "lost",
+        "spawn_failed",
+        "missing_env",
+        "cwd_missing",
+        "canceled",
+        "forced",
+        "vetoed",
+        null
+      ],
+      "description": "transition: the new reason."
+    },
+    "hold_reason": {
+      "enum": [
+        "manual",
+        "escalated",
+        "exit_13",
+        null
+      ],
+      "description": "transition: the new hold reason."
+    },
+    "actor": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/actor"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "decision_ids": {
+      "$ref": "defs.json#/$defs/decision_ids",
+      "description": "transition, reorder, label: the command's --decision-id values; hook_ran: the decision ids the hook printed."
+    },
+    "attempt_status": {
+      "enum": [
+        "held",
+        "done",
+        "failed",
+        "canceled"
+      ],
+      "description": "transition, whenever it changes an attempt's status (an attempt ends, or resolve or cancel of an escalated or exit_13 hold): the attempt's new status."
+    },
+    "attempt_reason": {
+      "enum": [
+        "exit",
+        "resolved",
+        "signaled",
+        "timeout",
+        "terminated",
+        "lost",
+        "spawn_failed",
+        "missing_env",
+        "cwd_missing",
+        "canceled",
+        "forced",
+        "vetoed",
+        null
+      ],
+      "description": "transition, with attempt_status: the attempt's reason (null for a hold)."
+    },
+    "retry_pending": {
+      "type": "boolean",
+      "description": "transition, with attempt_status: true when the job was requeued for an automatic retry."
+    },
+    "hook": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/hook_name"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "hook_ran: the hook name."
+    },
+    "hook_id": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/hook_id"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "hook_ran: the hook's identity."
+    },
+    "outcome": {
+      "enum": [
+        "allow",
+        "escalate",
+        "veto",
+        "failed",
+        "timeout",
+        null
+      ],
+      "description": "hook_ran: allow, escalate, veto (pre-start), failed or timeout."
+    },
+    "exit": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 255,
+      "description": "hook_ran: the hook's exit status; null on timeout or a signal."
+    },
+    "stderr": {
+      "type": "string",
+      "maxLength": 2048,
+      "x-untrusted": true,
+      "description": "Untrusted: hook_ran on failure, timeout, veto or escalation only: at most 2 KiB of the hook's masked, sanitized stderr (maxLength approximates the byte limit)."
+    },
+    "finding": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/finding_name"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "reconcile: the finding."
+    },
+    "action": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/finding_action"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "reconcile: the action taken."
     },
     "message": {
       "type": "string"
+    },
+    "details": {
+      "type": "object",
+      "x-untrusted": true,
+      "description": "Untrusted: event-specific context (e.g. a variable name or a line number). Never holds a --pass-env, env_file or --env value, argv, hook output or an output tail; masking of other text is best-effort."
     }
   },
+  "additionalProperties": false,
   "required": [
+    "seq",
     "ts",
     "level",
     "event"
   ],
-  "additionalProperties": true
+  "dependentRequired": {
+    "attempt_status": [
+      "attempt_reason",
+      "retry_pending"
+    ],
+    "attempt_reason": [
+      "attempt_status"
+    ],
+    "retry_pending": [
+      "attempt_status"
+    ]
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "transition"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "job_id",
+          "queue",
+          "from",
+          "to",
+          "reason",
+          "hold_reason",
+          "attempt",
+          "actor",
+          "decision_ids"
+        ],
+        "properties": {
+          "job_id": {
+            "$ref": "defs.json#/$defs/job_id"
+          },
+          "queue": {
+            "$ref": "defs.json#/$defs/queue"
+          },
+          "from": {
+            "$ref": "defs.json#/$defs/status"
+          },
+          "to": {
+            "$ref": "defs.json#/$defs/status"
+          },
+          "attempt": {
+            "type": "integer"
+          },
+          "actor": {
+            "$ref": "defs.json#/$defs/actor"
+          }
+        }
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "attempt_status"
+              ]
+            },
+            {
+              "required": [
+                "attempt_reason"
+              ]
+            },
+            {
+              "required": [
+                "retry_pending"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "retry_pending": {
+            "const": true
+          }
+        },
+        "required": [
+          "retry_pending"
+        ]
+      },
+      "then": {
+        "properties": {
+          "to": {
+            "const": "queued"
+          },
+          "attempt_status": {
+            "const": "failed"
+          },
+          "attempt_reason": {
+            "enum": [
+              "exit",
+              "signaled",
+              "timeout",
+              "terminated",
+              "lost",
+              "spawn_failed",
+              "missing_env"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "enum": [
+              "reorder",
+              "label"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "job_id",
+          "queue",
+          "actor",
+          "decision_ids"
+        ],
+        "properties": {
+          "job_id": {
+            "$ref": "defs.json#/$defs/job_id"
+          },
+          "queue": {
+            "$ref": "defs.json#/$defs/queue"
+          },
+          "actor": {
+            "$ref": "defs.json#/$defs/actor"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "hook_ran"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "job_id",
+          "hook",
+          "hook_id",
+          "outcome",
+          "exit",
+          "decision_ids"
+        ],
+        "properties": {
+          "job_id": {
+            "$ref": "defs.json#/$defs/job_id"
+          },
+          "hook": {
+            "$ref": "defs.json#/$defs/hook_name"
+          },
+          "hook_id": {
+            "$ref": "defs.json#/$defs/hook_id"
+          },
+          "outcome": {
+            "enum": [
+              "allow",
+              "escalate",
+              "veto",
+              "failed",
+              "timeout"
+            ]
+          }
+        }
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "hook"
+              ]
+            },
+            {
+              "required": [
+                "hook_id"
+              ]
+            },
+            {
+              "required": [
+                "outcome"
+              ]
+            },
+            {
+              "required": [
+                "exit"
+              ]
+            },
+            {
+              "required": [
+                "stderr"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "allow"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "not": {
+          "required": [
+            "stderr"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "timeout"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "reconcile"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "job_id",
+          "finding",
+          "action"
+        ],
+        "properties": {
+          "finding": {
+            "$ref": "defs.json#/$defs/finding_name"
+          },
+          "action": {
+            "$ref": "defs.json#/$defs/finding_action"
+          }
+        }
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "finding"
+              ]
+            },
+            {
+              "required": [
+                "action"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
 }

@@ -1,47 +1,220 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "jobsctl/audit",
+  "$id": "jobsctl/audit.json",
   "title": "jobsctl audit.jsonl record",
-  "description": "Audit record for jobsctl. Whether this tool writes audit records is decided in its design session (architecture §14).",
+  "description": "Written for cancel --force, cancel of a held job, release --override-escalation, resolve, retry (also from an exit-13 hold; with the changed overrides) and prune (one record per pruned batch).",
   "type": "object",
   "properties": {
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "From a per-file counter in state.db; records appear in file order; gaps only after a crash."
+    },
     "ts": {
-      "type": "string",
-      "format": "date-time"
+      "$ref": "defs.json#/$defs/ts"
     },
     "actor": {
-      "type": "string"
+      "$ref": "defs.json#/$defs/actor"
     },
     "decision_id": {
-      "oneOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      ]
+      "type": "array",
+      "items": {
+        "$ref": "defs.json#/$defs/decision_id"
+      },
+      "description": "From --decision-id and hooks."
     },
     "target": {
-      "type": "string"
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/job_id"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The job id; null for prune, which records the pruned ids in inputs."
     },
     "action": {
-      "type": "string"
+      "enum": [
+        "cancel_force",
+        "cancel_held",
+        "release_override",
+        "resolve",
+        "retry",
+        "prune"
+      ]
     },
     "inputs": {
       "type": "object"
     },
-    "result": {}
+    "result": {
+      "enum": [
+        "queued",
+        "starting",
+        "running",
+        "held",
+        "done",
+        "failed",
+        "canceled",
+        "deleted"
+      ],
+      "description": "The job's resulting status; deleted for prune."
+    }
   },
+  "additionalProperties": false,
   "required": [
+    "seq",
     "ts",
     "actor",
+    "decision_id",
     "target",
     "action",
+    "inputs",
     "result"
   ],
-  "additionalProperties": true
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "prune"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "type": "null"
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "ids": {
+                "type": "array",
+                "items": {
+                  "$ref": "defs.json#/$defs/job_id"
+                },
+                "minItems": 1
+              },
+              "older_than": {
+                "$ref": "defs.json#/$defs/seconds",
+                "description": "The cutoff age in seconds (--older-than or retention)."
+              },
+              "trigger": {
+                "enum": [
+                  "command",
+                  "retention"
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "ids",
+              "older_than",
+              "trigger"
+            ]
+          },
+          "result": {
+            "const": "deleted"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "target": {
+            "$ref": "defs.json#/$defs/job_id"
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "argv_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "SHA-256 over each argv element in UTF-8 followed by a NUL byte."
+              },
+              "attempt": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "unique_key": {
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/unique_key"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "queue": {
+                "$ref": "defs.json#/$defs/queue"
+              },
+              "overrides": {
+                "type": "object",
+                "properties": {
+                  "timeout": {
+                    "oneOf": [
+                      {
+                        "$ref": "defs.json#/$defs/seconds"
+                      },
+                      {
+                        "const": "none"
+                      }
+                    ],
+                    "description": "--timeout (add or retry) in seconds, or none (no timeout, overriding the queue's)."
+                  },
+                  "max_retries": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "--max-retries (add or retry)."
+                  },
+                  "kill_grace": {
+                    "$ref": "defs.json#/$defs/seconds",
+                    "description": "--kill-grace (add or retry) in seconds."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [],
+                "description": "retry only, when its flags changed the job's overrides: the overrides after the change.",
+                "minProperties": 1
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "argv_sha256",
+              "attempt",
+              "unique_key",
+              "queue"
+            ]
+          },
+          "result": {
+            "$ref": "defs.json#/$defs/status"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "not": {
+              "const": "retry"
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "inputs": {
+            "not": {
+              "required": [
+                "overrides"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
 }

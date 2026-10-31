@@ -1,12 +1,480 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "jobsctl/config",
+  "$id": "jobsctl/config.json",
   "title": "jobsctl config",
   "type": "object",
   "properties": {
+    "default_cap": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "default": 1,
+      "description": "Cap of a queue with no configured cap; null: unbounded."
+    },
+    "global_cap": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "default": null,
+      "description": "Total running jobs across queues; null: none."
+    },
+    "strict_queues": {
+      "type": "boolean",
+      "default": false,
+      "description": "true: add to a queue that is neither configured nor known exits 10 (unknown_queue). Affects add only; an unknown queue in a hook selector is always only a warning."
+    },
+    "auto_run": {
+      "type": "boolean",
+      "default": true,
+      "description": "Start triggers: request a pass after add, a job's end, cancel of a starting job, release and retry."
+    },
+    "run_interval": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*[smhd]$",
+      "description": "run --loop interval.",
+      "default": "10s"
+    },
+    "kill_grace": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*[smhd]$",
+      "description": "Wait per step of the signal sequence.",
+      "default": "30s"
+    },
+    "tail_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 262144,
+      "default": 16384
+    },
+    "tail_lines": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 200
+    },
+    "tail_flush_interval": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*[smhd]$",
+      "description": "DURATION: a positive integer and a unit (s, m, h, d).",
+      "default": "5s"
+    },
+    "mask_env": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/env_name"
+      },
+      "uniqueItems": true,
+      "default": [],
+      "description": "Variables whose values are masked in output tails and hook output (besides --pass-env and env_file variables); --env refuses these names."
+    },
+    "retention": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/duration"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "30d",
+      "description": "Terminal jobs whose ended_at is older than this are pruned by each pass; null keeps them."
+    },
+    "env": {
+      "type": "object",
+      "properties": {
+        "inherit": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}\\*?$"
+          },
+          "uniqueItems": true,
+          "default": [
+            "PATH",
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "SHELL",
+            "LANG",
+            "LC_*",
+            "TZ",
+            "TERM",
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_RUNTIME_DIR",
+            "TMPDIR"
+          ],
+          "description": "Exact names, or a prefix ending in * (e.g. LC_*), taken into the canonical environment and the job's base environment."
+        },
+        "set": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/env_name"
+          },
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Fixed, non-secret values for jobs. PATH set here also replaces the inherited PATH in the canonical environment (hooks and jobsctl's own processes); recommended, since an inherited PATH comes from the process that started the chain."
+        },
+        "path_prepend": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/config_path"
+          },
+          "default": [],
+          "description": "Absolute directories (~/ allowed) put in front of PATH (jobs, hooks and jobsctl's own processes), in order. With set.PATH, the trigger-independent source of PATH."
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "default": {
+        "inherit": [
+          "PATH",
+          "HOME",
+          "USER",
+          "LOGNAME",
+          "SHELL",
+          "LANG",
+          "LC_*",
+          "TZ",
+          "TERM",
+          "XDG_CONFIG_HOME",
+          "XDG_STATE_HOME",
+          "XDG_DATA_HOME",
+          "XDG_CACHE_HOME",
+          "XDG_RUNTIME_DIR",
+          "TMPDIR"
+        ],
+        "set": {},
+        "path_prepend": []
+      },
+      "description": "The job environment (interface: Job environment)."
+    },
+    "env_file": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/config_path"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Path of a NAME=value file of secrets (every value is treated as a secret: masked, and refused in argv and --env; non-secret values go in env.set), added to hook environments and, through --pass-env, to jobs, never to the canonical environment (a trust anchor: whoever can write it runs code as you); available only as a regular file of at most 1 MiB (not a symlink) owned by the user, not readable or writable by group or others, whose every ancestor directory is owned by the user or root, not group- or other-writable and not a symlink. Recommended: $XDG_CONFIG_HOME/jobsctl/env."
+    },
     "hooks": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "pre-start": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pre_hook_entry"
+          },
+          "default": []
+        },
+        "post-start": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/post_hook_entry"
+          },
+          "default": []
+        },
+        "post-finish": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/post_hook_entry"
+          },
+          "default": []
+        },
+        "post-fail": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/post_hook_entry"
+          },
+          "default": []
+        },
+        "post-held": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/post_hook_entry"
+          },
+          "default": []
+        },
+        "post-cancel": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/post_hook_entry"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "default": {},
+      "description": "Hook name -> list of entries (interface: Hooks); a hook not listed has no entries."
+    },
+    "hooks_strip_env": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/env_name"
+      },
+      "uniqueItems": true,
+      "default": [],
+      "description": "Variables removed from hook environments."
+    },
+    "busy_timeout": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*[smhd]$",
+      "description": "SQLite busy timeout.",
+      "default": "5s"
+    },
+    "me": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._@-]{1,64}$",
+          "default": null,
+          "description": "For the default actor human:<name>; null: the OS user name."
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "default": {
+        "name": null
+      }
+    },
+    "queues": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/queue"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/queue_config"
+      },
+      "default": {}
     }
   },
-  "additionalProperties": true
+  "additionalProperties": false,
+  "required": [],
+  "description": "jobsctl config (interface: Config). Every key, with its default, is in config.example.yaml. Config comes only from files.",
+  "$defs": {
+    "config_path": {
+      "type": "string",
+      "pattern": "^(/|~/)[^\\n]*$",
+      "description": "Absolute path, or a path starting with ~/ (expanded to the user's home)."
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*[smhd]$",
+      "description": "DURATION: a positive integer and a unit (s, m, h, d)."
+    },
+    "env_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$",
+      "description": "An environment variable name."
+    },
+    "label": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}=[A-Za-z0-9._:/#@+=,-]{0,256}$",
+      "description": "key=value, split at the first '='."
+    },
+    "post_hook_entry": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "description": "Optional; the hook's identity is name if set, else cmd."
+        },
+        "cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Runs via /bin/sh -c in its own process group."
+        },
+        "timeout": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*[smhd]$",
+          "description": "DURATION: a positive integer and a unit (s, m, h, d).",
+          "default": "30s"
+        },
+        "queues": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/queue"
+          },
+          "uniqueItems": true,
+          "default": null,
+          "description": "Only jobs in these queues fire the hook; null: every queue."
+        },
+        "exclude_queues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/queue"
+          },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Jobs in these queues do not fire the hook."
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/label"
+          },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Only jobs with every one of these pairs fire the hook (AND)."
+        },
+        "async": {
+          "type": "boolean",
+          "default": false,
+          "description": "true runs the hook asynchronously, without blocking delivery of the job's other events; at most 8 async hooks run at once, one per job (post hooks only)."
+        },
+        "include_output": {
+          "type": "boolean",
+          "default": false,
+          "description": "true puts the output tail into the payload (post hooks only)."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmd"
+      ]
+    },
+    "pre_hook_entry": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "description": "Optional; the hook's identity is name if set, else cmd."
+        },
+        "cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Runs via /bin/sh -c in its own process group."
+        },
+        "timeout": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*[smhd]$",
+          "description": "DURATION: a positive integer and a unit (s, m, h, d).",
+          "default": "30s"
+        },
+        "queues": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/queue"
+          },
+          "uniqueItems": true,
+          "default": null,
+          "description": "Only jobs in these queues fire the hook; null: every queue."
+        },
+        "exclude_queues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/queue"
+          },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Jobs in these queues do not fire the hook."
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/label"
+          },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Only jobs with every one of these pairs fire the hook (AND)."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmd"
+      ]
+    },
+    "queue": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+      "description": "Queue name."
+    },
+    "queue_config": {
+      "type": "object",
+      "properties": {
+        "cap": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Absent: default_cap. null: unbounded. 0 holds the queue (nothing starts)."
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": -1000,
+          "maximum": 1000,
+          "default": 0,
+          "description": "Selection across queues: highest first."
+        },
+        "timeout": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/duration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Job timeout; null: none."
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 0,
+          "description": "Automatic retries; 0: off."
+        },
+        "retry_delay": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*[smhd]$",
+          "description": "DURATION: a positive integer and a unit (s, m, h, d).",
+          "default": "60s"
+        },
+        "kill_grace": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*[smhd]$",
+          "description": "Absent: the global kill_grace."
+        },
+        "tail_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144,
+          "description": "Absent: the global tail_bytes."
+        },
+        "tail_lines": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Absent: the global tail_lines."
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "description": "Settings of one queue (interface: Config); per-queue settings take precedence over global config."
+    }
+  }
 }

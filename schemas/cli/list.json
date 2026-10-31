@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/cli/list.json",
+  "title": "jobsctl list --json",
+  "type": "object",
+  "properties": {
+    "jobs": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/job"
+      },
+      "description": "By queue (sorted by name), then queued jobs by rank, starting, running and held jobs by enqueued_at then id, then terminal jobs by ended_at (newest first) then id."
+    },
+    "truncated": {
+      "type": "boolean",
+      "description": "true: --limit cut the list."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "jobs",
+    "truncated"
+  ]
+}

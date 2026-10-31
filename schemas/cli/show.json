@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/cli/show.json",
+  "title": "jobsctl show --json",
+  "description": "Also printed by wait (exits 0, 12, 13, 20, 22 and 130); add --wait embeds it in add.json.",
+  "$ref": "../defs.json#/$defs/job_detail"
+}

@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/cli/reconcile.json",
+  "title": "jobsctl reconcile --json",
+  "type": "object",
+  "properties": {
+    "already_running": {
+      "type": "boolean",
+      "description": "true: a live process holds the runner lease; nothing was done."
+    },
+    "holder": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "pid": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "since": {
+              "$ref": "../defs.json#/$defs/ts",
+              "description": "When the holder took the lease."
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "pid",
+            "since"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The live runner-lease holder when already_running; else null."
+    },
+    "dry_run": {
+      "type": "boolean",
+      "description": "true: --dry-run; nothing was changed."
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/finding"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "already_running",
+    "holder",
+    "dry_run",
+    "findings"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "already_running": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "holder": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "findings": {
+            "type": "array",
+            "maxItems": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "holder": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

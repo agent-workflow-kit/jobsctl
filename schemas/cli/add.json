@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/cli/add.json",
+  "title": "jobsctl add --json",
+  "type": "object",
+  "properties": {
+    "created": {
+      "type": "boolean",
+      "description": "false: a non-terminal job already holds the unique key (job is that job), or --dry-run."
+    },
+    "queue_created": {
+      "type": "boolean",
+      "description": "true: this add created the queue (first use)."
+    },
+    "dry_run": {
+      "type": "boolean",
+      "description": "true: --dry-run; nothing was changed."
+    },
+    "waited": {
+      "type": "boolean",
+      "description": "true: --wait was given; job is then the job as show prints it, after the wait."
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/warning"
+      },
+      "description": "pass_env_undefined, existing_job_held."
+    },
+    "job": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/job"
+        },
+        {
+          "$ref": "../defs.json#/$defs/job_detail"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The job; with --wait (waited: true), as show prints it after the wait; null only with --dry-run when a job would be created."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "created",
+    "queue_created",
+    "dry_run",
+    "waited",
+    "warnings",
+    "job"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "created": {
+            "const": false
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "queue_created": {
+            "const": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dry_run": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "created": {
+            "const": false
+          },
+          "queue_created": {
+            "const": false
+          },
+          "waited": {
+            "const": false
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "job": {
+            "not": {
+              "type": "null"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "waited": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "job": {
+            "$ref": "../defs.json#/$defs/job_detail"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "job": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/job"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/hooks/pre-start.json",
+  "title": "jobsctl pre-start hook payload",
+  "description": "Built on payload.json.",
+  "$ref": "payload.json",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "jobsctl"
+    },
+    "hook": {
+      "const": "pre-start"
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique per event; the same on redelivery. pre-start (not an outbox event): <claim_id>:pre-start:<hook index>."
+    },
+    "object_type": {
+      "const": "job"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/job_id"
+    },
+    "repo": {
+      "type": "null",
+      "description": "Always null: jobsctl has no repo notion; policies match on labels."
+    },
+    "labels": {
+      "$ref": "../defs.json#/$defs/labels"
+    },
+    "previous_status": {
+      "enum": [
+        "queued"
+      ],
+      "description": "The status before this transition."
+    },
+    "job": {
+      "$ref": "../defs.json#/$defs/hook_job",
+      "properties": {
+        "status": {
+          "enum": [
+            "starting"
+          ]
+        }
+      }
+    },
+    "attempt": {
+      "$ref": "../defs.json#/$defs/attempt",
+      "properties": {
+        "status": {
+          "const": "starting"
+        }
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tool",
+    "hook",
+    "event_id",
+    "object_type",
+    "object_id",
+    "repo",
+    "labels",
+    "previous_status",
+    "job",
+    "attempt"
+  ]
+}
