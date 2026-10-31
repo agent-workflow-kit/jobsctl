@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/cli/cancel.json",
+  "title": "jobsctl cancel --json",
+  "type": "object",
+  "properties": {
+    "changed": {
+      "type": "boolean",
+      "description": "true: a cancel or a force request was committed (a force-canceled job may still be running)."
+    },
+    "dry_run": {
+      "type": "boolean",
+      "description": "true: --dry-run; nothing was changed."
+    },
+    "jobs": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/job"
+      },
+      "description": "The canceled, force-pending or already terminal jobs after the command; empty when no selector matched."
+    },
+    "refused": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "$ref": "../defs.json#/$defs/job_id"
+          },
+          "reason": {
+            "$ref": "../defs.json#/$defs/refusal_reason"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "job_id",
+          "reason"
+        ]
+      },
+      "description": "With selectors: matches that could not be canceled. With selectors and --all, cancel.json is printed also on exit 20 (nothing canceled, something refused)."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "changed",
+    "dry_run",
+    "jobs",
+    "refused"
+  ]
+}

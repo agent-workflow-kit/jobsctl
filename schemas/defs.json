@@ -1,0 +1,2822 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/defs.json",
+  "title": "jobsctl shared definitions",
+  "description": "Definitions referenced by every other jobsctl schema (config.json embeds copies).",
+  "$defs": {
+    "job_id": {
+      "type": "string",
+      "pattern": "^jb-[a-z2-7]{8}$",
+      "description": "Job id: jb- and 8 characters of a-z2-7; random, never reused. Output always uses the full id."
+    },
+    "queue": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+      "description": "Queue name."
+    },
+    "label_key": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"
+    },
+    "label_value": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:/#@+=,-]{0,256}$"
+    },
+    "label": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}=[A-Za-z0-9._:/#@+=,-]{0,256}$",
+      "description": "key=value, split at the first '='."
+    },
+    "labels": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/label"
+      },
+      "uniqueItems": true,
+      "maxItems": 32,
+      "description": "The job's label pairs, sorted and unique; at most 32."
+    },
+    "unique_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:/#@+=,-]{1,256}$",
+      "description": "A unique key: unique across all queues among non-terminal jobs."
+    },
+    "env_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$",
+      "description": "An environment variable name."
+    },
+    "job_env_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$",
+      "not": {
+        "pattern": "^JOBSCTL_"
+      },
+      "description": "A name given with --env or --pass-env; must not start with JOBSCTL_."
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*[smhd]$",
+      "description": "DURATION: a positive integer and a unit (s, m, h, d)."
+    },
+    "seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "A duration in JSON output: integer seconds."
+    },
+    "actor": {
+      "type": "string",
+      "pattern": "^(human|auto):[A-Za-z0-9._@-]{1,64}$",
+      "description": "human:<user> or auto:<policy>; auto:jobsctl is reserved for jobsctl's own transitions and retention prunes."
+    },
+    "decision_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:@/-]{1,128}$"
+    },
+    "decision_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/decision_id"
+      }
+    },
+    "hook_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A hook's identity: its name if set, else its cmd."
+    },
+    "hook_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/hook_id"
+      },
+      "uniqueItems": true
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+      "description": "RFC 3339 timestamp in UTC with Z and millisecond precision."
+    },
+    "abs_path": {
+      "type": "string",
+      "pattern": "^/[^\\n]*$",
+      "description": "Absolute path without a newline."
+    },
+    "config_path": {
+      "type": "string",
+      "pattern": "^(/|~/)[^\\n]*$",
+      "description": "Absolute path, or a path starting with ~/ (expanded to the user's home)."
+    },
+    "priority": {
+      "type": "integer",
+      "minimum": -1000,
+      "maximum": 1000
+    },
+    "status": {
+      "enum": [
+        "queued",
+        "starting",
+        "running",
+        "held",
+        "done",
+        "failed",
+        "canceled"
+      ],
+      "description": "Non-terminal: queued, starting, running, held. Terminal: done, failed, canceled."
+    },
+    "reason": {
+      "enum": [
+        "exit",
+        "resolved",
+        "signaled",
+        "timeout",
+        "terminated",
+        "lost",
+        "spawn_failed",
+        "missing_env",
+        "cwd_missing",
+        "canceled",
+        "forced",
+        "vetoed"
+      ],
+      "description": "End reason (interface: End reasons); only terminal jobs and attempts have one."
+    },
+    "hold_reason": {
+      "enum": [
+        "manual",
+        "escalated",
+        "exit_13"
+      ],
+      "description": "manual: hold of a queued job; escalated: a pre-start hook exited 13; exit_13: the job's own command exited 13."
+    },
+    "refusal_reason": {
+      "enum": [
+        "live",
+        "not_queued",
+        "not_held",
+        "not_terminal",
+        "not_releasable",
+        "not_escalated",
+        "override_required",
+        "duplicate_key",
+        "other_queue",
+        "attempt_mismatch"
+      ]
+    },
+    "error_code": {
+      "enum": [
+        "usage",
+        "config_invalid",
+        "tui_missing",
+        "not_found",
+        "unknown_queue",
+        "cancel_pending",
+        "version_skew",
+        "interrupted",
+        "needs_human",
+        "refused",
+        "ambiguous",
+        "busy",
+        "internal"
+      ]
+    },
+    "finding_name": {
+      "enum": [
+        "result_file_finalized",
+        "boot_changed",
+        "claim_orphaned",
+        "shim_dead",
+        "job_gone",
+        "shim_lost",
+        "force_resumed",
+        "hooks_redelivered",
+        "pruned"
+      ]
+    },
+    "finding_action": {
+      "enum": [
+        "finalized",
+        "failed_lost",
+        "canceled_forced",
+        "requeued",
+        "marked_shim_lost",
+        "kill_started",
+        "redelivered",
+        "deleted"
+      ]
+    },
+    "hook_name": {
+      "enum": [
+        "pre-start",
+        "post-start",
+        "post-finish",
+        "post-fail",
+        "post-held",
+        "post-cancel"
+      ]
+    },
+    "untrusted_note": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 4096,
+      "x-untrusted": true,
+      "description": "Untrusted: the resolve --note-file contents (at most 4096 bytes; maxLength counts characters and only approximates the byte limit); null if none."
+    },
+    "argv": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[^\\u0000]*$"
+      },
+      "minItems": 1,
+      "maxItems": 4096,
+      "description": "The job's argv (never a shell string); at most 4096 arguments and 1 MiB in total, no NUL byte. argv[0] is resolved at start."
+    },
+    "env_map": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/job_env_name"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 131072
+      },
+      "maxProperties": 256,
+      "description": "The job's --env VAR=value entries (stored; non-secret by contract); at most 256 entries, each value at most 128 KiB (maxLength approximates the byte limit)."
+    },
+    "env_names": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/job_env_name"
+      },
+      "uniqueItems": true,
+      "maxItems": 256
+    },
+    "exit": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "exited",
+            "signaled",
+            "spawn_failed",
+            "unknown"
+          ],
+          "description": "exited: normal exit; signaled: died of a signal; spawn_failed: argv[0] could not be executed; unknown: no exit status was observed (lost from running, or forced after a shim loss)."
+        },
+        "code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 255,
+          "description": "Exit status for exited, else null."
+        },
+        "signal": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "Signal number for signaled, else null."
+        },
+        "core": {
+          "type": "boolean",
+          "description": "true if a core dump was reported."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "code",
+        "signal",
+        "core"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "exited"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "code": {
+                "type": "integer"
+              },
+              "signal": {
+                "type": "null"
+              },
+              "core": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "signaled"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "code": {
+                "type": "null"
+              },
+              "signal": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "spawn_failed",
+                  "unknown"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "code": {
+                "type": "null"
+              },
+              "signal": {
+                "type": "null"
+              },
+              "core": {
+                "const": false
+              }
+            }
+          }
+        }
+      ],
+      "description": "The exit record of an attempt (interface: Exit record)."
+    },
+    "warning": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "pass_env_undefined",
+            "existing_job_held",
+            "env_file_unsafe",
+            "shim_spawn_failed",
+            "path_entry_dropped"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "variable": {
+          "$ref": "#/$defs/env_name",
+          "description": "pass_env_undefined: the variable; path_entry_dropped from cron install: the XDG_* variable left out (path is then omitted)."
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id",
+          "description": "shim_spawn_failed, existing_job_held: the job."
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "path_entry_dropped: the dropped PATH entry (omitted when variable names a dropped XDG_* variable)."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "pass_env_undefined"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "variable"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "shim_spawn_failed",
+                  "existing_job_held"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "job_id"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "path_entry_dropped"
+              }
+            }
+          },
+          "then": {
+            "oneOf": [
+              {
+                "required": [
+                  "path"
+                ]
+              },
+              {
+                "required": [
+                  "variable"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "description": "A non-fatal warning in command output."
+    },
+    "status_rules": {
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "queued"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              },
+              "hold_reason": {
+                "type": "null"
+              },
+              "ended_at": {
+                "type": "null"
+              },
+              "exit": {
+                "type": "null"
+              },
+              "leftovers": {
+                "type": "null"
+              },
+              "rank": {
+                "type": "integer"
+              },
+              "not_before": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/ts"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "force_requested_by": {
+                "type": "null"
+              },
+              "shim_lost": {
+                "const": false
+              },
+              "resolved_path": {
+                "type": "null"
+              },
+              "claimed_at": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "starting"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              },
+              "hold_reason": {
+                "type": "null"
+              },
+              "ended_at": {
+                "type": "null"
+              },
+              "exit": {
+                "type": "null"
+              },
+              "leftovers": {
+                "type": "null"
+              },
+              "rank": {
+                "type": "null"
+              },
+              "not_before": {
+                "type": "null"
+              },
+              "force_requested_by": {
+                "type": "null"
+              },
+              "shim_lost": {
+                "const": false
+              },
+              "claimed_at": {
+                "$ref": "#/$defs/ts"
+              },
+              "running_at": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "running"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              },
+              "hold_reason": {
+                "type": "null"
+              },
+              "ended_at": {
+                "type": "null"
+              },
+              "exit": {
+                "type": "null"
+              },
+              "leftovers": {
+                "type": "null"
+              },
+              "rank": {
+                "type": "null"
+              },
+              "not_before": {
+                "type": "null"
+              },
+              "force_requested_by": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/actor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "claimed_at": {
+                "$ref": "#/$defs/ts"
+              },
+              "running_at": {
+                "$ref": "#/$defs/ts"
+              },
+              "resolved_path": {
+                "$ref": "#/$defs/abs_path"
+              },
+              "override_hooks": {
+                "type": "array",
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "held"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              },
+              "hold_reason": {
+                "$ref": "#/$defs/hold_reason"
+              },
+              "rank": {
+                "type": "null"
+              },
+              "shim_lost": {
+                "const": false
+              },
+              "force_requested_by": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "done",
+                  "failed",
+                  "canceled"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "hold_reason": {
+                "type": "null"
+              },
+              "rank": {
+                "type": "null"
+              },
+              "shim_lost": {
+                "const": false
+              },
+              "ended_at": {
+                "$ref": "#/$defs/ts"
+              },
+              "not_before": {
+                "type": "null"
+              },
+              "override_hooks": {
+                "type": "array",
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "not": {
+                  "const": "queued"
+                }
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "blocked_by": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "blocked_by": {
+                "const": "not_before"
+              }
+            },
+            "required": [
+              "blocked_by"
+            ]
+          },
+          "then": {
+            "properties": {
+              "not_before": {
+                "$ref": "#/$defs/ts"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "blocked_by": {
+                "const": "env_file_unavailable"
+              }
+            },
+            "required": [
+              "blocked_by"
+            ]
+          },
+          "then": {
+            "properties": {
+              "pass_env": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "done"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "exit",
+                  "resolved"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "exit",
+                  "signaled",
+                  "timeout",
+                  "terminated",
+                  "lost",
+                  "spawn_failed",
+                  "missing_env",
+                  "cwd_missing",
+                  "resolved"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "canceled"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "canceled",
+                  "forced",
+                  "vetoed",
+                  "resolved"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "hold_reason": {
+                "const": "exit_13"
+              }
+            },
+            "required": [
+              "hold_reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "exited"
+                  },
+                  "code": {
+                    "const": 13
+                  }
+                }
+              },
+              "resolved_path": {
+                "$ref": "#/$defs/abs_path"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "hold_reason": {
+                "enum": [
+                  "manual",
+                  "escalated"
+                ]
+              }
+            },
+            "required": [
+              "hold_reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit": {
+                "type": "null"
+              },
+              "leftovers": {
+                "type": "null"
+              },
+              "resolved_path": {
+                "type": "null"
+              },
+              "running_at": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "hold_reason": {
+                "const": "manual"
+              }
+            },
+            "required": [
+              "hold_reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "claimed_at": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "hold_reason": {
+                "const": "escalated"
+              }
+            },
+            "required": [
+              "hold_reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "escalated_hooks": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "hold_reason": {
+                "enum": [
+                  "escalated",
+                  "exit_13"
+                ]
+              }
+            },
+            "required": [
+              "hold_reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "override_hooks": {
+                "type": "array",
+                "maxItems": 0
+              },
+              "not_before": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "done"
+              },
+              "reason": {
+                "const": "exit"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "exited"
+                  },
+                  "code": {
+                    "const": 0
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "done"
+              },
+              "reason": {
+                "const": "resolved"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "exited"
+                      },
+                      "code": {
+                        "const": 13
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              },
+              "reason": {
+                "const": "exit"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "exited"
+                  },
+                  "code": {
+                    "not": {
+                      "enum": [
+                        0,
+                        13
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              },
+              "reason": {
+                "const": "signaled"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "signaled"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              },
+              "reason": {
+                "const": "timeout"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "exited",
+                      "signaled"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              },
+              "reason": {
+                "const": "terminated"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "exited",
+                          "signaled"
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              },
+              "reason": {
+                "const": "lost"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "unknown"
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              },
+              "reason": {
+                "const": "spawn_failed"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "spawn_failed"
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              },
+              "reason": {
+                "const": "missing_env"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              },
+              "reason": {
+                "const": "cwd_missing"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              },
+              "reason": {
+                "const": "resolved"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "exited"
+                      },
+                      "code": {
+                        "const": 13
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "canceled"
+              },
+              "reason": {
+                "const": "canceled"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "exited"
+                      },
+                      "code": {
+                        "const": 13
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "canceled"
+              },
+              "reason": {
+                "const": "forced"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "exited",
+                      "signaled",
+                      "unknown"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "canceled"
+              },
+              "reason": {
+                "const": "vetoed"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "canceled"
+              },
+              "reason": {
+                "const": "resolved"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "exit": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "exited"
+                      },
+                      "code": {
+                        "const": 13
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "exit": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "exited",
+                      "signaled",
+                      "unknown"
+                    ]
+                  }
+                }
+              }
+            },
+            "required": [
+              "exit"
+            ]
+          },
+          "then": {
+            "properties": {
+              "resolved_path": {
+                "$ref": "#/$defs/abs_path"
+              },
+              "running_at": {
+                "$ref": "#/$defs/ts"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "exit": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "spawn_failed"
+                  }
+                }
+              }
+            },
+            "required": [
+              "exit"
+            ]
+          },
+          "then": {
+            "properties": {
+              "running_at": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "exit": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "exited",
+                      "signaled"
+                    ]
+                  }
+                }
+              }
+            },
+            "required": [
+              "exit"
+            ]
+          },
+          "then": {
+            "properties": {
+              "leftovers": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "exit": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "spawn_failed"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "required": [
+              "exit"
+            ]
+          },
+          "then": {
+            "properties": {
+              "leftovers": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "done",
+                  "failed",
+                  "canceled",
+                  "held"
+                ]
+              },
+              "exit": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "status",
+              "exit"
+            ]
+          },
+          "then": {
+            "properties": {
+              "running_at": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "vetoed",
+                  "cwd_missing",
+                  "missing_env"
+                ]
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "resolved_path": {
+                "type": "null"
+              },
+              "running_at": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "spawn_failed"
+              },
+              "exit": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "reason",
+              "exit"
+            ]
+          },
+          "then": {
+            "properties": {
+              "resolved_path": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "forced"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "force_requested_by": {
+                "$ref": "#/$defs/actor"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "done",
+                  "failed",
+                  "canceled"
+                ]
+              },
+              "reason": {
+                "not": {
+                  "const": "forced"
+                }
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "force_requested_by": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "resolved"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "resolved_by": {
+                "$ref": "#/$defs/actor"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "resolved_by": {
+                "type": "null"
+              },
+              "note": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "vetoed"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "vetoed_by": {
+                "$ref": "#/$defs/hook_id"
+              },
+              "hook_messages": {
+                "contains": {
+                  "properties": {
+                    "outcome": {
+                      "const": "veto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "vetoed_by": {
+                "type": "null"
+              },
+              "hook_messages": {
+                "items": {
+                  "properties": {
+                    "outcome": {
+                      "not": {
+                        "const": "veto"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "escalated_hooks": {
+                "maxItems": 0
+              }
+            },
+            "required": [
+              "escalated_hooks"
+            ]
+          },
+          "then": {
+            "properties": {
+              "hook_messages": {
+                "items": {
+                  "properties": {
+                    "outcome": {
+                      "not": {
+                        "const": "escalate"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "claimed_at": {
+                "$ref": "#/$defs/ts"
+              }
+            },
+            "required": [
+              "claimed_at"
+            ]
+          },
+          "then": {
+            "properties": {
+              "attempt": {
+                "minimum": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "running_at": {
+                "$ref": "#/$defs/ts"
+              }
+            },
+            "required": [
+              "running_at"
+            ]
+          },
+          "then": {
+            "properties": {
+              "effective": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "overrides": {
+                "properties": {
+                  "timeout": {
+                    "const": "none"
+                  }
+                },
+                "required": [
+                  "timeout"
+                ]
+              }
+            },
+            "required": [
+              "overrides"
+            ]
+          },
+          "then": {
+            "properties": {
+              "effective": {
+                "properties": {
+                  "timeout": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "Consistency rules between status, reason, hold_reason, the exit record and the attempt fields (interface: End reasons, Exit record, Status transitions); used by job, hook_job, job_detail and attempt."
+    },
+    "effective": {
+      "type": "object",
+      "properties": {
+        "timeout": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/seconds"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Resolved timeout in seconds; null: none."
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "kill_grace": {
+          "$ref": "#/$defs/seconds"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "timeout",
+        "max_retries",
+        "kill_grace"
+      ],
+      "description": "The resolved timeout, max_retries and kill_grace."
+    },
+    "job_base": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "queue": {
+          "$ref": "#/$defs/queue"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "reason": {
+          "enum": [
+            "exit",
+            "resolved",
+            "signaled",
+            "timeout",
+            "terminated",
+            "lost",
+            "spawn_failed",
+            "missing_env",
+            "cwd_missing",
+            "canceled",
+            "forced",
+            "vetoed",
+            null
+          ],
+          "description": "End reason (interface: End reasons); null unless terminal."
+        },
+        "hold_reason": {
+          "enum": [
+            "manual",
+            "escalated",
+            "exit_13",
+            null
+          ],
+          "description": "Only for held jobs (interface: Hold reasons); else null."
+        },
+        "argv": {
+          "$ref": "#/$defs/argv"
+        },
+        "cwd": {
+          "$ref": "#/$defs/abs_path",
+          "description": "The job's working directory (absolute, normalized lexically; symlinks kept)."
+        },
+        "pass_env": {
+          "$ref": "#/$defs/env_names",
+          "description": "--pass-env names; their values come from env_file at start and are never stored."
+        },
+        "labels": {
+          "$ref": "#/$defs/labels"
+        },
+        "unique_key": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/unique_key"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "priority": {
+          "$ref": "#/$defs/priority",
+          "description": "-1000..1000, default 0; higher first."
+        },
+        "pinned": {
+          "type": "boolean"
+        },
+        "rank": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "1-based place among the queued jobs of its queue (pinned group first); null unless queued."
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The number of the job's last attempt (0 if none; a requeue that deletes an attempt decrements it); the next claim uses attempt + 1."
+        },
+        "retried_from_attempt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "The job's attempt when retry last requeued it (retry --attempt N); never above attempt; null if never retried."
+        },
+        "overrides": {
+          "type": "object",
+          "properties": {
+            "timeout": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/seconds"
+                },
+                {
+                  "const": "none"
+                }
+              ],
+              "description": "--timeout (add or retry) in seconds, or none (no timeout, overriding the queue's)."
+            },
+            "max_retries": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "--max-retries (add or retry)."
+            },
+            "kill_grace": {
+              "$ref": "#/$defs/seconds",
+              "description": "--kill-grace (add or retry) in seconds."
+            }
+          },
+          "additionalProperties": false,
+          "required": [],
+          "description": "The job's own settings from add or retry; an absent key means the queue's setting applies."
+        },
+        "effective": {
+          "$ref": "#/$defs/effective",
+          "description": "For starting and running jobs, the snapshot the shim recorded at start (once recorded); otherwise computed from the current config."
+        },
+        "not_before": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A pending automatic retry starts no earlier; null unless queued or held."
+        },
+        "blocked_by": {
+          "enum": [
+            "not_before",
+            "env_file_unavailable",
+            "queue_paused",
+            "global_paused",
+            null
+          ],
+          "description": "Queued jobs only: why the job cannot start now (the first that applies: not_before, env_file_unavailable, queue_paused for a queue cap of 0, global_paused for a global_cap of 0); null otherwise."
+        },
+        "force_requested_by": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/actor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Current attempt: set from a committed cancel --force request; on a terminal job exactly when the reason is forced."
+        },
+        "override_hooks": {
+          "$ref": "#/$defs/hook_ids",
+          "description": "Hook identities whose exit 13 counts as allow on the next start that runs hooks (release --override-escalation); empty otherwise."
+        },
+        "shim_lost": {
+          "type": "boolean",
+          "description": "true: the shim died while the job process lives; the job stays running and keeps its slot."
+        },
+        "created_at": {
+          "$ref": "#/$defs/ts"
+        },
+        "enqueued_at": {
+          "$ref": "#/$defs/ts",
+          "description": "Set at add; reset whenever the job returns to queued."
+        },
+        "status_changed_at": {
+          "$ref": "#/$defs/ts",
+          "description": "The job's last status change (e.g. held since, running since); created_at until the first."
+        },
+        "claimed_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Current attempt: when it was claimed; null without a current attempt."
+        },
+        "ended_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When the job became terminal; null otherwise."
+        },
+        "actor": {
+          "$ref": "#/$defs/actor",
+          "description": "The actor that added the job."
+        },
+        "decision_ids": {
+          "$ref": "#/$defs/decision_ids",
+          "description": "The --decision-id values given to add."
+        },
+        "exit": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/exit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Current attempt: the exit record; null when no job process was attempted, or it has not ended."
+        },
+        "leftovers": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Current attempt: processes left in the job's process group (interface: Leftovers); null when no probe was made."
+        },
+        "resolved_path": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/abs_path"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Current attempt: absolute path argv[0] resolved to."
+        },
+        "resolved_by": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/actor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The actor of resolve; set exactly when reason is resolved."
+        },
+        "note": {
+          "$ref": "#/$defs/untrusted_note"
+        }
+      },
+      "required": [
+        "id",
+        "queue",
+        "status",
+        "reason",
+        "hold_reason",
+        "argv",
+        "cwd",
+        "pass_env",
+        "labels",
+        "unique_key",
+        "priority",
+        "pinned",
+        "rank",
+        "attempt",
+        "retried_from_attempt",
+        "overrides",
+        "effective",
+        "not_before",
+        "blocked_by",
+        "force_requested_by",
+        "override_hooks",
+        "shim_lost",
+        "created_at",
+        "enqueued_at",
+        "status_changed_at",
+        "claimed_at",
+        "ended_at",
+        "actor",
+        "decision_ids",
+        "exit",
+        "leftovers",
+        "resolved_path",
+        "resolved_by",
+        "note"
+      ],
+      "allOf": [
+        {
+          "$ref": "#/$defs/status_rules"
+        }
+      ],
+      "description": "The job fields shared by job, job_detail and hook_job (not closed: each of those adds its own fields and closes with unevaluatedProperties)."
+    },
+    "job": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/job_base"
+        },
+        {
+          "properties": {
+            "env": {
+              "$ref": "#/$defs/env_map"
+            }
+          },
+          "required": [
+            "env"
+          ]
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "queued",
+                  "starting",
+                  "running",
+                  "held"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "ended_at": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false,
+      "description": "A job as printed by list, change, cancel and add (interface: Job object); show adds attempts and output."
+    },
+    "attempt": {
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "starting",
+            "running",
+            "held",
+            "done",
+            "failed",
+            "canceled"
+          ],
+          "description": "Follows the job until the attempt ends; held for an escalation or exit 13."
+        },
+        "reason": {
+          "enum": [
+            "exit",
+            "resolved",
+            "signaled",
+            "timeout",
+            "terminated",
+            "lost",
+            "spawn_failed",
+            "missing_env",
+            "cwd_missing",
+            "canceled",
+            "forced",
+            "vetoed",
+            null
+          ],
+          "description": "End reason (interface: End reasons); null unless terminal."
+        },
+        "hold_reason": {
+          "enum": [
+            "escalated",
+            "exit_13",
+            null
+          ],
+          "description": "escalated or exit_13 while the attempt is held; else null."
+        },
+        "claimed_at": {
+          "$ref": "#/$defs/ts",
+          "description": "When a pass claimed the job and created the attempt."
+        },
+        "running_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When the job process started (entered running)."
+        },
+        "ended_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When the attempt ended (including a hold)."
+        },
+        "exit": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/exit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The exit record; null when no job process was attempted, or it has not ended."
+        },
+        "leftovers": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Current attempt: processes left in the job's process group (interface: Leftovers); null when no probe was made."
+        },
+        "resolved_path": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/abs_path"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Set whenever argv[0] was resolved (also for spawn_failed when exec failed); null for vetoed, cwd_missing, missing_env and when resolution failed or was not reached."
+        },
+        "effective": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/effective"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The effective settings the shim recorded at start; null until recorded."
+        },
+        "escalated_hooks": {
+          "$ref": "#/$defs/hook_ids",
+          "description": "Identities of the pre-start hooks that escalated this attempt."
+        },
+        "vetoed_by": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/hook_id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Identity of the vetoing hook; set exactly when the reason is vetoed."
+        },
+        "hook_messages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "hook_id": {
+                "$ref": "#/$defs/hook_id"
+              },
+              "outcome": {
+                "enum": [
+                  "veto",
+                  "escalate"
+                ]
+              },
+              "message": {
+                "type": "string",
+                "maxLength": 4096,
+                "x-untrusted": true,
+                "description": "Untrusted: the hook's stderr, masked and sanitized, at most 4096 bytes (maxLength approximates the byte limit)."
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "hook_id",
+              "outcome",
+              "message"
+            ]
+          },
+          "description": "One entry per pre-start hook that vetoed or escalated this attempt."
+        },
+        "decision_ids": {
+          "$ref": "#/$defs/decision_ids",
+          "description": "Decision ids printed by this attempt's hooks."
+        },
+        "force_requested_by": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/actor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The actor of a committed cancel --force; on a terminal attempt exactly when the reason is forced."
+        },
+        "resolved_by": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/actor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The actor of resolve; null unless resolved."
+        },
+        "note": {
+          "$ref": "#/$defs/untrusted_note"
+        },
+        "jobsctl_version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Version of the jobsctl that claimed the attempt."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "attempt",
+        "status",
+        "reason",
+        "hold_reason",
+        "claimed_at",
+        "running_at",
+        "ended_at",
+        "exit",
+        "leftovers",
+        "resolved_path",
+        "effective",
+        "escalated_hooks",
+        "vetoed_by",
+        "hook_messages",
+        "decision_ids",
+        "force_requested_by",
+        "resolved_by",
+        "note",
+        "jobsctl_version"
+      ],
+      "allOf": [
+        {
+          "$ref": "#/$defs/status_rules"
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "held"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "ended_at": {
+                "$ref": "#/$defs/ts"
+              }
+            }
+          }
+        }
+      ],
+      "description": "One attempt of a job (interface: Attempt object); created when a pass claims the job."
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "tail": {
+          "type": "string",
+          "maxLength": 262144,
+          "x-untrusted": true,
+          "description": "Untrusted: the job's combined stdout/stderr tail, masked (mask_env, --pass-env and env_file values) and sanitized (interface: Masking and sanitizing); masking is best-effort and does not catch encoded or partial secrets."
+        },
+        "bytes_seen": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Every byte read from the job's output."
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "true when earlier output was dropped."
+        },
+        "updated_at": {
+          "$ref": "#/$defs/ts",
+          "description": "When the tail was last flushed."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tail",
+        "bytes_seen",
+        "truncated",
+        "updated_at"
+      ],
+      "description": "The output tail of one attempt (interface: Output capture)."
+    },
+    "job_detail": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/job_base"
+        },
+        {
+          "properties": {
+            "env": {
+              "$ref": "#/$defs/env_map"
+            }
+          },
+          "required": [
+            "env"
+          ]
+        },
+        {
+          "properties": {
+            "attempts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/attempt"
+              },
+              "description": "Every attempt, oldest first; empty before the first claim."
+            },
+            "output": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/output"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The tail of the current attempt (or of --attempt N); null with --no-output or when the attempt has no tail."
+            }
+          },
+          "required": [
+            "attempts",
+            "output"
+          ]
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "queued",
+                  "starting",
+                  "running",
+                  "held"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "ended_at": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false,
+      "description": "A job as printed by show, wait and add --wait: the job object plus attempts and output."
+    },
+    "finding": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "finding": {
+          "$ref": "#/$defs/finding_name"
+        },
+        "action": {
+          "$ref": "#/$defs/finding_action",
+          "description": "What was done (or, with --dry-run, would be done)."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "finding",
+        "action"
+      ],
+      "description": "A reconcile finding (interface: Reconcile)."
+    },
+    "hook_job": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/job_base"
+        },
+        {
+          "properties": {
+            "env_names": {
+              "$ref": "#/$defs/env_names",
+              "description": "The names of the job's --env entries; values are never in a payload."
+            }
+          },
+          "required": [
+            "env_names"
+          ]
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "queued",
+                  "starting",
+                  "running",
+                  "held"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "ended_at": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false,
+      "description": "The job object as in list, with env reduced to its variable names (env_names)."
+    },
+    "pre_hook_entry": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "description": "Optional; the hook's identity is name if set, else cmd."
+        },
+        "cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Runs via /bin/sh -c in its own process group."
+        },
+        "timeout": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*[smhd]$",
+          "description": "DURATION: a positive integer and a unit (s, m, h, d).",
+          "default": "30s"
+        },
+        "queues": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/queue"
+          },
+          "uniqueItems": true,
+          "default": null,
+          "description": "Only jobs in these queues fire the hook; null: every queue."
+        },
+        "exclude_queues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/queue"
+          },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Jobs in these queues do not fire the hook."
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/label"
+          },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Only jobs with every one of these pairs fire the hook (AND)."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmd"
+      ]
+    },
+    "post_hook_entry": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "description": "Optional; the hook's identity is name if set, else cmd."
+        },
+        "cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Runs via /bin/sh -c in its own process group."
+        },
+        "timeout": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*[smhd]$",
+          "description": "DURATION: a positive integer and a unit (s, m, h, d).",
+          "default": "30s"
+        },
+        "queues": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/queue"
+          },
+          "uniqueItems": true,
+          "default": null,
+          "description": "Only jobs in these queues fire the hook; null: every queue."
+        },
+        "exclude_queues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/queue"
+          },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Jobs in these queues do not fire the hook."
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/label"
+          },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Only jobs with every one of these pairs fire the hook (AND)."
+        },
+        "async": {
+          "type": "boolean",
+          "default": false,
+          "description": "true runs the hook asynchronously, without blocking delivery of the job's other events; at most 8 async hooks run at once, one per job (post hooks only)."
+        },
+        "include_output": {
+          "type": "boolean",
+          "default": false,
+          "description": "true puts the output tail into the payload (post hooks only)."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmd"
+      ]
+    },
+    "queue_config": {
+      "type": "object",
+      "properties": {
+        "cap": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Absent: default_cap. null: unbounded. 0 holds the queue (nothing starts)."
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": -1000,
+          "maximum": 1000,
+          "default": 0,
+          "description": "Selection across queues: highest first."
+        },
+        "timeout": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/duration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Job timeout; null: none."
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 0,
+          "description": "Automatic retries; 0: off."
+        },
+        "retry_delay": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*[smhd]$",
+          "description": "DURATION: a positive integer and a unit (s, m, h, d).",
+          "default": "60s"
+        },
+        "kill_grace": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*[smhd]$",
+          "description": "Absent: the global kill_grace."
+        },
+        "tail_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144,
+          "description": "Absent: the global tail_bytes."
+        },
+        "tail_lines": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Absent: the global tail_lines."
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "description": "Settings of one queue (interface: Config); per-queue settings take precedence over global config."
+    }
+  }
+}

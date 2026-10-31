@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/cli/cron.json",
+  "title": "jobsctl cron install/uninstall --json",
+  "type": "object",
+  "properties": {
+    "changed": {
+      "type": "boolean"
+    },
+    "dry_run": {
+      "type": "boolean",
+      "description": "true: --dry-run; nothing was changed."
+    },
+    "block": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The managed crontab block after the command (# jobsctl managed and its run entry, every value single-quoted); null after cron uninstall."
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/warning"
+      },
+      "description": "path_entry_dropped."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "changed",
+    "dry_run",
+    "block",
+    "warnings"
+  ]
+}

@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/cli/queues.json",
+  "title": "jobsctl queues --json",
+  "type": "object",
+  "properties": {
+    "queues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "queue": {
+            "$ref": "../defs.json#/$defs/queue"
+          },
+          "configured": {
+            "type": "boolean",
+            "description": "true: queues.<name> is in config."
+          },
+          "first_seen": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/ts"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the queue first had a job; null if it never had one."
+          },
+          "cap": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Effective cap; null: unbounded."
+          },
+          "priority": {
+            "$ref": "../defs.json#/$defs/priority"
+          },
+          "timeout": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/seconds"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Seconds; null: none."
+          },
+          "max_retries": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "retry_delay": {
+            "$ref": "../defs.json#/$defs/seconds"
+          },
+          "kill_grace": {
+            "$ref": "../defs.json#/$defs/seconds"
+          },
+          "tail_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 262144
+          },
+          "tail_lines": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "counts": {
+            "type": "object",
+            "properties": {
+              "queued": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "starting": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "running": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "held": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "done": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "failed": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "canceled": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "queued",
+              "starting",
+              "running",
+              "held",
+              "done",
+              "failed",
+              "canceled"
+            ],
+            "description": "Jobs by status."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "queue",
+          "configured",
+          "first_seen",
+          "cap",
+          "priority",
+          "timeout",
+          "max_retries",
+          "retry_delay",
+          "kill_grace",
+          "tail_bytes",
+          "tail_lines",
+          "counts"
+        ]
+      },
+      "description": "Every known queue, sorted by name, with its effective settings."
+    },
+    "unmatched_selectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "hook": {
+            "$ref": "../defs.json#/$defs/hook_name"
+          },
+          "hook_id": {
+            "$ref": "../defs.json#/$defs/hook_id"
+          },
+          "queue": {
+            "$ref": "../defs.json#/$defs/queue"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "hook",
+          "hook_id",
+          "queue"
+        ]
+      },
+      "description": "Hook queues/exclude_queues entries naming a queue that is neither configured nor known."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "queues",
+    "unmatched_selectors"
+  ]
+}

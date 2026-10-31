@@ -26,7 +26,10 @@ fully standalone (no harness, bus, shared library or shared contracts package).
 - Run `make verify` before every commit.
 - All subprocess and HTTP calls go through `src/jobsctl/gateway.py`.
 - Never run destructive git commands (reset, checkout --, clean, restore, stash drop,
-  force-push). Never kill processes by pattern; only signal an exact PID this tool started.
+  force-push). Never kill processes by pattern; only signal an exact PID this tool started
+  (verified by its recorded identity), the process group the shim created for a job
+  (docs/interface.md, Signal sequence), or a hook's process group (docs/interface.md, Hook
+  processes).
 - Minimize dependencies; justify each one in `docs/design.md`.
 
 ## Workflow

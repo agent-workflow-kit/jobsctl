@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/cli/browse-result.json",
+  "title": "jobsctl browse --result-file contents",
+  "description": "Written on exit only when --result-file is given.",
+  "type": "object",
+  "properties": {
+    "intent": {
+      "enum": [
+        "back",
+        "open"
+      ],
+      "description": "back: return to the caller; open: the user asked the caller to open the selected jobs."
+    },
+    "selected": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/job_id"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "intent",
+    "selected"
+  ]
+}

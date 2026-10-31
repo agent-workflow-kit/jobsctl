@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/cli/run.json",
+  "title": "jobsctl run --json",
+  "description": "One pass; with --loop, one JSON line per pass.",
+  "type": "object",
+  "properties": {
+    "already_running": {
+      "type": "boolean",
+      "description": "true: another live process holds the runner lease; nothing was done."
+    },
+    "holder": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "pid": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "since": {
+              "$ref": "../defs.json#/$defs/ts",
+              "description": "When the holder took the lease."
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "pid",
+            "since"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The live runner-lease holder when already_running; else null."
+    },
+    "started": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/job_id"
+      },
+      "description": "Jobs claimed and handed to a shim."
+    },
+    "reconciled": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/finding"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/warning"
+      },
+      "description": "env_file_unsafe, shim_spawn_failed."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "already_running",
+    "holder",
+    "started",
+    "reconciled",
+    "warnings"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "already_running": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "holder": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "started": {
+            "type": "array",
+            "maxItems": 0
+          },
+          "reconciled": {
+            "type": "array",
+            "maxItems": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "holder": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

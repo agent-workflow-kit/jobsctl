@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/cli/prune.json",
+  "title": "jobsctl prune --json",
+  "type": "object",
+  "properties": {
+    "dry_run": {
+      "type": "boolean",
+      "description": "true: --dry-run; nothing was changed."
+    },
+    "pruned": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/job_id"
+      },
+      "description": "Deleted (with --dry-run: would be deleted) jobs."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "dry_run",
+    "pruned"
+  ]
+}

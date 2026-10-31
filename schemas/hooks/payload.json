@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/hooks/payload.json",
+  "title": "jobsctl hook payload",
+  "description": "The JSON document every hook gets on stdin; hooks/<hook>.json narrow it per hook.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "jobsctl"
+    },
+    "hook": {
+      "$ref": "../defs.json#/$defs/hook_name"
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique per event; the same on redelivery. pre-start (not an outbox event): <claim_id>:pre-start:<hook index>."
+    },
+    "object_type": {
+      "const": "job"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/job_id"
+    },
+    "repo": {
+      "type": "null",
+      "description": "Always null: jobsctl has no repo notion; policies match on labels."
+    },
+    "labels": {
+      "$ref": "../defs.json#/$defs/labels"
+    },
+    "previous_status": {
+      "$ref": "../defs.json#/$defs/status",
+      "description": "The status before this transition."
+    },
+    "job": {
+      "$ref": "../defs.json#/$defs/hook_job"
+    },
+    "attempt": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/attempt"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The attempt the event concerns (post-fail: the failed attempt); null when the transition involved no attempt."
+    },
+    "output_available": {
+      "type": "boolean",
+      "description": "true whenever the attempt's job process ran and a tail exists."
+    },
+    "output_tail": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 262144,
+      "x-untrusted": true,
+      "description": "Untrusted: the final masked, sanitized output tail, only for a hook with include_output: true when output_available; else null. Notification templates should leave it out."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tool",
+    "hook",
+    "event_id",
+    "object_type",
+    "object_id",
+    "repo",
+    "labels",
+    "previous_status",
+    "job",
+    "attempt"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "hook": {
+            "enum": [
+              "post-finish",
+              "post-fail",
+              "post-held",
+              "post-cancel"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "output_available"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "output_available"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "hook": {
+            "enum": [
+              "post-finish",
+              "post-fail",
+              "post-held",
+              "post-cancel"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "output_tail"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "output_tail"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "output_available": {
+            "const": false
+          }
+        },
+        "required": [
+          "output_available"
+        ]
+      },
+      "then": {
+        "properties": {
+          "output_tail": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "attempt": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "exit": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "const": "spawn_failed"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "required": [
+          "attempt"
+        ]
+      },
+      "then": {
+        "properties": {
+          "output_available": {
+            "const": false
+          }
+        }
+      }
+    }
+  ]
+}

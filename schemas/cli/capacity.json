@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/cli/capacity.json",
+  "title": "jobsctl capacity --json",
+  "description": "Always exits 0 when it answers.",
+  "type": "object",
+  "properties": {
+    "queues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "queue": {
+            "$ref": "../defs.json#/$defs/queue"
+          },
+          "known": {
+            "type": "boolean",
+            "description": "false: not configured and never used; reported with default_cap."
+          },
+          "cap": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "null: unbounded."
+          },
+          "running": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "starting + running jobs."
+          },
+          "queued": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Queued jobs, including those waiting for not_before."
+          },
+          "free": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "max(0, cap - running - queued); null when cap is null."
+          },
+          "effective_free": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "min(free, global free); null when neither limit applies; never above free."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "queue",
+          "known",
+          "cap",
+          "running",
+          "queued",
+          "free",
+          "effective_free"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "cap": {
+                  "type": "null"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "free": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "free": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "global": {
+      "type": "object",
+      "properties": {
+        "cap": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "null: unbounded."
+        },
+        "running": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "starting + running jobs."
+        },
+        "queued": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Sum over queues of min(ready queued, max(0, cap - running)); all ready queued for a null cap."
+        },
+        "free": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "max(0, cap - running - queued); null when cap is null."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cap",
+        "running",
+        "queued",
+        "free"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "cap": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "free": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "free": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "queues",
+    "global"
+  ]
+}

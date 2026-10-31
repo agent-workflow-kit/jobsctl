@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/cli/change.json",
+  "title": "jobsctl mutating command --json",
+  "description": "Printed by move, pin, unpin, priority, hold, release, resolve, retry, label add and label remove.",
+  "type": "object",
+  "properties": {
+    "changed": {
+      "type": "boolean",
+      "description": "false: nothing to change (exit 0)."
+    },
+    "dry_run": {
+      "type": "boolean",
+      "description": "true: --dry-run; nothing was changed."
+    },
+    "job": {
+      "$ref": "../defs.json#/$defs/job"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "changed",
+    "dry_run",
+    "job"
+  ]
+}
