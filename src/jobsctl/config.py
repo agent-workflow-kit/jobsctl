@@ -174,13 +174,22 @@ class PostHookEntry(_HookEntry):
 
 
 def _unique_names(entries: list[Any]) -> list[Any]:
-    seen: set[str] = set()
-    for entry in entries:
-        if entry.name is None:
-            continue
-        if entry.name in seen:
-            raise ValueError(f"duplicate hook name {entry.name!r} in one list")
-        seen.add(entry.name)
+    """A duplicate `name`, or two entries with one identity (`name` if set, else `cmd`: an
+    unnamed `{cmd: foo}` next to `{name: foo}`, or two unnamed entries with one `cmd`), is
+    invalid: `hook_id`, `vetoed_by` and `override_hooks` must name exactly one hook."""
+    names: set[str] = set()
+    identities: dict[str, int] = {}
+    for index, entry in enumerate(entries):
+        if entry.name is not None:
+            if entry.name in names:
+                raise ValueError(f"duplicate hook name {entry.name!r} in one list")
+            names.add(entry.name)
+        if entry.identity in identities:
+            # an unnamed hook's identity is its cmd, which may hold a secret: echo a name only
+            first = identities[entry.identity]
+            shown = f" {entry.identity!r}" if entry.identity in names else ""
+            raise ValueError(f"duplicate hook identity{shown}: entries {first} and {index}")
+        identities[entry.identity] = index
     return entries
 
 

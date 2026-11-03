@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Callable
 
 # 7-bit and 8-bit forms of CSI, OSC, DCS, SOS, PM and APC. Unterminated string sequences end at
 # the end of the text, so a stray introducer cannot hide what follows it from a reader.
@@ -56,20 +57,27 @@ def _escape_char(ch: str) -> str:
     return ch
 
 
-def sanitize(text: str, *, inline: bool = False) -> str:
+def sanitize(text: str, *, inline: bool = False, mask: Callable[[str], str] | None = None) -> str:
     """Strip terminal escape sequences and escape control, bidirectional, invisible format and
     line or paragraph separator characters as `\\uNNNN`.
 
     By default (captured output) keep the last segment of `\\r`-rewritten lines. With `inline`
     (error messages and echoed input) a `\\r` or `\\n` becomes the two characters `\\r` or `\\n`,
     so the text cannot rewrite, erase or forge a line.
+
+    `mask` is step 4 of the order in interface.md (Masking and sanitizing): it runs on the text
+    after the escape sequences are removed and before control characters are escaped. It applies
+    to captured output only (not with `inline`).
     """
     text = _ESCAPES.sub("", text)
     if inline:
         text = text.replace("\r", "\\r").replace("\n", "\\n")
         return "".join(_escape_char(ch) for ch in text)
     lines = [line.rsplit("\r", 1)[-1] for line in text.replace("\r\n", "\n").split("\n")]
-    return "".join(_escape_char(ch) for ch in "\n".join(lines))
+    text = "\n".join(lines)
+    if mask is not None:
+        text = mask(text)
+    return "".join(_escape_char(ch) for ch in text)
 
 
 def echo(value: str, limit: int = 80) -> str:
