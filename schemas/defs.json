@@ -495,6 +495,71 @@
               }
             ]
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "env_file_unsafe"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "mode",
+                  "size",
+                  "owner",
+                  "not_regular",
+                  "ancestor",
+                  "open",
+                  "path",
+                  "read"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "path_entry_dropped"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "empty",
+                  "relative",
+                  "temporary",
+                  "missing"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "env_file_unsafe",
+                  "path_entry_dropped"
+                ]
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "reason"
+              ]
+            }
+          }
         }
       ],
       "description": "A non-fatal warning in command output."

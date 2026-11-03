@@ -211,6 +211,61 @@ def test_schema_requires_path_unless_the_entry_was_empty() -> None:
     assert not validator.is_valid({**base, "reason": "relative"})
 
 
+_UNSAFE_REASONS = ["mode", "size", "owner", "not_regular", "ancestor", "open", "path", "read"]
+_DROPPED_REASONS = ["empty", "relative", "temporary", "missing"]
+
+
+@pytest.mark.parametrize("reason", _UNSAFE_REASONS)
+def test_schema_accepts_env_file_unsafe_reasons(reason: str) -> None:
+    instance = {"code": "env_file_unsafe", "message": "env_file unsafe", "reason": reason}
+    assert warning_validator().is_valid(instance)
+
+
+@pytest.mark.parametrize("reason", _DROPPED_REASONS)
+def test_schema_rejects_dropped_reason_on_env_file_unsafe(reason: str) -> None:
+    instance = {"code": "env_file_unsafe", "message": "env_file unsafe", "reason": reason}
+    assert not warning_validator().is_valid(instance)
+
+
+@pytest.mark.parametrize("reason", _DROPPED_REASONS)
+def test_schema_accepts_path_entry_dropped_reasons(reason: str) -> None:
+    instance = {
+        "code": "path_entry_dropped",
+        "message": "PATH entry dropped",
+        "path": "/x",
+        "reason": reason,
+    }
+    if reason == "empty":
+        del instance["path"]
+    assert warning_validator().is_valid(instance)
+
+
+@pytest.mark.parametrize("reason", _UNSAFE_REASONS)
+def test_schema_rejects_unsafe_reason_on_path_entry_dropped(reason: str) -> None:
+    instance = {
+        "code": "path_entry_dropped",
+        "message": "PATH entry dropped",
+        "path": "/x",
+        "reason": reason,
+    }
+    assert not warning_validator().is_valid(instance)
+
+
+@pytest.mark.parametrize(
+    ("instance", "reason"),
+    [
+        ({"code": "pass_env_undefined", "variable": "FOO"}, "mode"),
+        ({"code": "existing_job_held", "job_id": "jb-abcdefgh"}, "empty"),
+        ({"code": "shim_spawn_failed", "job_id": "jb-abcdefgh"}, "mode"),
+    ],
+)
+def test_schema_forbids_reason_on_other_codes(instance: dict[str, str], reason: str) -> None:
+    validator = warning_validator()
+    base = {**instance, "message": "warning"}
+    assert validator.is_valid(base)
+    assert not validator.is_valid({**base, "reason": reason})
+
+
 def test_repr_hides_values() -> None:
     result = build(cfg(inherit=["TOKEN"]), {"TOKEN": "super-secret-value"})
     assert result.values["TOKEN"] == "super-secret-value"
