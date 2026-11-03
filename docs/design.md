@@ -101,7 +101,8 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 | `hooks.py` | sync hook execution under the unreaped-leader rule (process groups, timeouts, selectors, output read in memory for `decision_id`, `hook_messages` and the `hook_ran` excerpt), payload building, leaving async events to `_deliver` (D39), stopping a running hook when a CLI command is interrupted (D48) |
 | `config.py` | Pydantic models, drop-ins, precedence (files and flags only), absolute `--config` hand-off; errors name keys, never `env.*` values |
 | `ids.py`, `durations.py`, `timestamps.py` | planned (`TODO(#4)`): id generation (checked against `pruned_ids`) and prefix lookup; duration and timestamp grammars, moved out of `cli_values.py` |
-| `audit.py` | `audit.jsonl` and `log.jsonl` writers (`seq` allocation, D42), diagnostics files (D43) |
+| `log_records.py`, `log_files.py`, `log_writer.py`, `log_export.py` | the `audit.jsonl` and `log.jsonl` writers (D42): record shapes, cleaning (masking set, sanitizer) and serialization; safe open (0600, no symlink or FIFO), `flock` and the single append with torn-line repair; `seq` allocation under the lock and once-per-state warnings (state kept in `state.db` counters); the `export` reader |
+| `audit.py` | planned: diagnostics files (D43) |
 | `procs.py` | process identity, boot id, liveness, subreaper, pidfds (including group signals where the kernel has them), dumpability, group probing (Linux and macOS) |
 | `gateway.py` | every process spawn, signal, wait, file lock and clock access, so tests replace them with fakes |
 | `tui/` | `browse` (optional extra) |

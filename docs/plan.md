@@ -25,7 +25,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 | `gateway.py` | 0 | the only boundary: `Popen`, `os.kill`/`killpg`, `waitid`, `prctl`, `flock`, `/proc`, clocks |
 | `procs.py` | 0 | process identity (Linux `/proc` field 22, boot id; macOS `libproc`, `kern.bootsessionuuid`), liveness, pidfd with the allow-listed ctypes `syscall()` fallback and the re-check before `kill` without pidfds, dumpability, group probing |
 | `store.py` | 0 | connection setup, additive migrations at open for CLI commands, `user_version` checks for long-lived and internal processes, compare-and-set helpers, outbox writes |
-| `audit.py` | 0 | `log.jsonl`/`audit.jsonl` with `flock` + `state.db` `seq` counters, once-per-change-of-state warnings |
+| `log_records.py`, `log_files.py`, `log_writer.py`, `log_export.py` | 0 | `log.jsonl`/`audit.jsonl` with `flock` + `state.db` `seq` counters, once-per-change-of-state warnings, `export` |
 | `order.py` | 1 | position keys, `rank`, `move`/`pin`/`priority`, selection across queues, `blocked_by`, capacity |
 | `env.py` | 1 | `env_file` loading and checks (ancestors, `O_NOFOLLOW`/`O_NONBLOCK`, format), canonical environment, job environment, masking set |
 | `commands/` | 1–4 | one module per command group |
