@@ -96,6 +96,11 @@ def clean_path(path: str) -> tuple[str, tuple[EnvWarning, ...]]:
     return ":".join(kept), tuple(dropped)
 
 
+def path_entry_usable(entry: str) -> bool:
+    """The entry survives PATH cleaning."""
+    return _drop_reason(entry, _temp_roots()) is None
+
+
 def prepend_path(prefix: Iterable[str], path: str | None) -> str:
     """`prefix` entries in front of `path`; an entry already in `path` moves to the front, so the
     operation is idempotent (the canonical and job environments both apply it)."""
