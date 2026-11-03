@@ -57,9 +57,7 @@ def _escape_char(ch: str) -> str:
     return ch
 
 
-def sanitize(
-    text: str, *, inline: bool = False, mask: Callable[[str], str] | None = None
-) -> str:
+def sanitize(text: str, *, inline: bool = False, mask: Callable[[str], str] | None = None) -> str:
     """Strip terminal escape sequences and escape control, bidirectional, invisible format and
     line or paragraph separator characters as `\\uNNNN`.
 

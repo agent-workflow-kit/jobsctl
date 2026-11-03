@@ -108,10 +108,6 @@ def provisional_canonical_environment(
     picked = {
         name: value
         for name, value in source.items()
-        if any(
-            (name.startswith(p[:-1]) if p.endswith("*") else name == p) for p in patterns
-        )
+        if any((name.startswith(p[:-1]) if p.endswith("*") else name == p) for p in patterns)
     }
     return _clean(picked)
-
-

@@ -59,5 +59,3 @@ def encode_payload(payload: Mapping[str, Any]) -> bytes:
     """ASCII-only JSON (`\\uNNNN` escapes) plus a newline: it encodes whatever the strings hold,
     lone surrogates included, and cannot confuse a hook's line reader."""
     return (json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
-
-

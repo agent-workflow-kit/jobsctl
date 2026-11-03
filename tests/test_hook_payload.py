@@ -74,9 +74,7 @@ def test_post_start_has_no_output_fields(hook: str) -> None:
     ("hook", "status", "reason"),
     [("post-finish", "done", "exit"), ("post-fail", "failed", "timeout")],
 )
-def test_output_hooks_include_the_tail_only_when_asked(
-    hook: str, status: str, reason: str
-) -> None:
+def test_output_hooks_include_the_tail_only_when_asked(hook: str, status: str, reason: str) -> None:
     job, attempt = terminal(status, reason)
     kw = {"event_id": "e1", "job": job, "previous_status": "running", "attempt": attempt}
     with_tail = build_payload(
@@ -87,7 +85,9 @@ def test_output_hooks_include_the_tail_only_when_asked(
     without = build_payload(hook, output_available=True, output_tail="tail", **kw)
     validate_against(f"hooks/{hook}.json", without)
     assert without["output_tail"] is None and without["output_available"] is True
-    none_ran = build_payload(hook, output_available=False, output_tail="x", include_output=True, **kw)
+    none_ran = build_payload(
+        hook, output_available=False, output_tail="x", include_output=True, **kw
+    )
     validate_against(f"hooks/{hook}.json", none_ran)
     assert none_ran["output_tail"] is None and none_ran["output_available"] is False
 
