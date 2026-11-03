@@ -28,7 +28,15 @@ Label = tuple[str, str]
 
 
 class GrammarError(ValueError):
-    """The input breaks a grammar; the message states the rule only."""
+    """The input breaks a grammar; the message states the rule only.
+
+    `part` names the failing part of a compound value (`key` or `value` of a label), or is
+    None when the value as a whole is malformed.
+    """
+
+    def __init__(self, message: str, *, part: str | None = None) -> None:
+        super().__init__(message)
+        self.part = part
 
 
 def queue_name(text: str) -> str:
@@ -56,11 +64,22 @@ def label_value(text: str) -> str:
 
 
 def parse_label(text: str) -> Label:
-    """`key=value`, split at the first `=` (a value may contain further `=`)."""
+    """`key=value`, split at the first `=` (a value may contain further `=`).
+
+    A bad key or value raises `GrammarError` with `part` set to `key` or `value`.
+    """
     key, sep, value = text.partition("=")
     if not sep:
         raise GrammarError("expected key=value")
-    return label_key(key), label_value(value)
+    try:
+        label_key(key)
+    except GrammarError as exc:
+        raise GrammarError(str(exc), part="key") from None
+    try:
+        label_value(value)
+    except GrammarError as exc:
+        raise GrammarError(str(exc), part="value") from None
+    return key, value
 
 
 def env_name(text: str) -> str:

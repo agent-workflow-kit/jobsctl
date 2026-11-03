@@ -613,6 +613,8 @@ A duration is `<integer><unit>` with unit `s`, `m`, `h` or `d` (e.g. `30s`, `10m
 
 Every timestamp is RFC 3339 in UTC with `Z` and millisecond precision (e.g. `2026-10-31T12:00:00.000Z`).
 
+A timestamp given as input (e.g. `export --since`) is RFC 3339 with `T` or `t`, with `Z`, `z` or a `+hh:mm`/`-hh:mm` offset, and an optional fraction of 1 to 9 digits; it is converted to UTC. A leap second (`:60`) is refused with `usage`.
+
 ## Global flags
 
 | Flag | Meaning |

@@ -65,7 +65,12 @@ def format_timestamp(when: dt.datetime) -> str:
 
 
 def since_cutoff(seconds_back: int, now: dt.datetime) -> dt.datetime:
-    """The instant `seconds_back` before `now` (`export --since DURATION`)."""
+    """The instant `seconds_back` before `now` (`export --since DURATION`).
+
+    Raises `TimestampError` (a `ValueError`, not a `JobsctlError`) when the result is before
+    year 1; callers map it to a `usage` error.
+    """
+    # TODO(#6): map TimestampError from since_cutoff to a usage error in export --since
     if now.tzinfo is None:
         raise ValueError("timestamps must be timezone-aware")
     try:

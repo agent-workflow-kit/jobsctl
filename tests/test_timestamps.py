@@ -63,6 +63,20 @@ def test_rejects(text: str) -> None:
         parse_timestamp(text)
 
 
+@pytest.mark.parametrize(
+    "text", ["2026-10-31t12:00:00z", "2026-10-31t12:00:00Z", "2026-10-31T12:00:00z"]
+)
+def test_lowercase_t_and_z_are_accepted(text: str) -> None:
+    assert format_timestamp(parse_timestamp(text)) == "2026-10-31T12:00:00.000Z"
+
+
+def test_leap_second_and_long_fraction_are_refused() -> None:
+    for text in ("2026-12-31T23:59:60Z", "2026-10-31T12:00:00.1234567890Z"):
+        with pytest.raises(TimestampError):
+            parse_timestamp(text)
+    assert parse_timestamp("2026-10-31T12:00:00.123456789Z").microsecond == 123456
+
+
 def test_leap_day_is_accepted() -> None:
     assert format_timestamp(parse_timestamp("2024-02-29T00:00:00Z")) == "2024-02-29T00:00:00.000Z"
 

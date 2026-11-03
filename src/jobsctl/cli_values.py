@@ -19,11 +19,11 @@ from jobsctl.actors import parse_actor
 from jobsctl.durations import DurationError, looks_like_duration, parse_duration
 from jobsctl.errors import JobsctlError
 from jobsctl.ids import IdError, normalize_id_input
-from jobsctl.textsafe import echo
+from jobsctl.textsafe import echo, echo_input
 from jobsctl.timestamps import TimestampError, parse_timestamp
 
 _INT_RE: Final = re.compile(r"-?[0-9]+")
-_MAX_INT_CHARS: Final = 18  # longer is out of every range here; never int() it
+_MAX_INT_DIGITS: Final = 18  # more significant digits are out of every range; never int() them
 ENV_VALUE_MAX_BYTES: Final = 128 * 1024
 
 
@@ -32,14 +32,8 @@ def _bad(message: str) -> argparse.ArgumentTypeError:
 
 
 def _q(text: str) -> str:
-    """An input quoted back in a message: cut at the first `=`, inline-sanitized, capped.
-
-    A mistyped `--env` flag can push `NAME=secret` into any positional, so a value is never
-    echoed; only `unique_key` and label values legitimately contain `=`, and losing their tail
-    is harmless.
-    """
-    name, eq, _ = text.partition("=")
-    return f"'{echo(name)}{'=...' if eq else ''}'"
+    """An input quoted back in a message, through `textsafe.echo_input` (never past an `=`)."""
+    return f"'{echo_input(text)}'"
 
 
 def _checked(check: Callable[[str], str], text: str, what: str) -> str:
@@ -80,7 +74,12 @@ def timestamp_or_duration(text: str) -> tuple[str, dt.datetime | int]:
 def _int_in(text: str, low: int, high: int | None, what: str) -> int:
     if _INT_RE.fullmatch(text) is None:
         raise _bad(f"invalid {what} {_q(text)}: not an integer")
-    value = int(text) if len(text) <= _MAX_INT_CHARS else None
+    negative = text.startswith("-")
+    digits = text.lstrip("-").lstrip("0")
+    if len(digits) > _MAX_INT_DIGITS:
+        value = None
+    else:
+        value = -int(digits or "0") if negative else int(digits or "0")
     if value is None or value < low or (high is not None and value > high):
         bound = f"at least {low}" if high is None else f"{low} to {high}"
         raise _bad(f"invalid {what} {_q(text)}: must be {bound}")
@@ -112,15 +111,15 @@ def unique_key(text: str) -> str:
 
 
 def label_pair(text: str) -> tuple[str, str]:
-    key, sep, value = text.partition("=")
-    if not sep:
-        raise _bad(f"invalid label {_q(text)}: expected key=value")
-    _checked(validate.label_key, key, "invalid label key")
     try:
-        validate.label_value(value)
+        return validate.parse_label(text)
     except validate.GrammarError as exc:
-        raise _bad(f"invalid label value for {echo(key)!r}: {exc}") from None
-    return key, value
+        key = text.partition("=")[0]
+        if exc.part == "key":
+            raise _bad(f"invalid label key {_q(key)}: {exc}") from None
+        if exc.part == "value":
+            raise _bad(f"invalid label value for {echo(key)!r}: {exc}") from None
+        raise _bad(f"invalid label {_q(text)}: expected key=value") from None
 
 
 def env_name(text: str) -> str:

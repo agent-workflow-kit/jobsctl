@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from jobsctl import durations
 from jobsctl.durations import (
     MAX_DURATION_SECONDS,
     DurationError,
@@ -32,7 +33,7 @@ def test_valid(text: str, seconds: int) -> None:
 def test_invalid(text: str) -> None:
     with pytest.raises(DurationError):
         parse_duration(text)
-    assert not looks_like_duration(text) or text.startswith("-") is False
+    assert not looks_like_duration(text)
 
 
 def test_cap_boundary_per_unit() -> None:
@@ -59,3 +60,30 @@ def test_looks_like_duration_ignores_the_cap() -> None:
     assert looks_like_duration("99999999999999d")
     assert not looks_like_duration("0s")
     assert not looks_like_duration("2026-10-31T12:00:00Z")
+
+
+@pytest.mark.parametrize("text", ["1m\n", "1mX", " 1m", "1m1", "\n1m"])
+def test_looks_like_duration_matches_the_whole_text(text: str) -> None:
+    assert not looks_like_duration(text)
+
+
+def test_digit_cap_refuses_13_digits_before_int(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(_: str) -> int:
+        raise AssertionError("int() reached")
+
+    monkeypatch.setattr(durations, "int", boom, raising=False)
+    with pytest.raises(DurationError, match="100 years"):
+        parse_duration("1" + "0" * 12 + "s")
+
+
+def test_digit_cap_lets_12_digits_reach_the_value_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+
+    def spy(text: str) -> int:
+        seen.append(text)
+        return int(text)
+
+    monkeypatch.setattr(durations, "int", spy, raising=False)
+    with pytest.raises(DurationError, match="100 years"):
+        parse_duration("9" * 12 + "s")
+    assert seen == ["9" * 12]

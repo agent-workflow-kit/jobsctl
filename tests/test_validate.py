@@ -131,6 +131,15 @@ def test_bad_labels(text: str) -> None:
         validate.parse_label(text)
 
 
+@pytest.mark.parametrize(
+    ("text", "part"), [("ab", None), ("=b", "key"), ("A=b", "key"), ("a=b c", "value")]
+)
+def test_bad_label_names_the_failing_part(text: str, part: str | None) -> None:
+    with pytest.raises(validate.GrammarError) as exc:
+        validate.parse_label(text)
+    assert exc.value.part == part
+
+
 def test_labels_are_a_sorted_set() -> None:
     merged = validate.merge_labels([("b", "2"), ("a", "z")], [("a", "y"), ("b", "2"), ("a", "z")])
     assert merged == [("a", "y"), ("a", "z"), ("b", "2")]

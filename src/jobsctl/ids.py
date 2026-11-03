@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable
 from typing import Final
 
 from jobsctl.errors import JobsctlError, usage_error
-from jobsctl.textsafe import echo
+from jobsctl.textsafe import echo_input
 
 ID_PREFIX: Final = "jb-"
 ID_ALPHABET: Final = "abcdefghijklmnopqrstuvwxyz234567"
@@ -85,7 +85,7 @@ def resolve_job_id(text: str, find: Callable[[str], Iterable[str]]) -> str:
     try:
         prefix = normalize_id_input(text)
     except IdError as exc:
-        raise usage_error(f"invalid job id '{echo(text)}': {exc}") from None
+        raise usage_error(f"invalid job id '{echo_input(text)}': {exc}") from None
     matches = sorted(set(find(prefix)))
     for match in matches:
         if not is_job_id(match) or not match.startswith(prefix):
