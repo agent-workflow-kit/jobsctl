@@ -191,6 +191,7 @@ Every relied-on behavior becomes a regression test ([plan.md](plan.md)); the cro
 
 - `pyyaml` (config; the standard library cannot read YAML) and `pydantic` (config validation), the design guide's standard set.
 - `textual`, only in the optional `tui` extra.
+- `jsonschema` (dev only): the tests validate every `--json` output and error envelope against `schemas/`; nothing at runtime imports it.
 - No process-management library: the few calls needed (`prctl`, `proc_pidinfo`) are made through `ctypes` in `procs.py`, which keeps the platform code in one reviewable place.
 
 ## Testing
