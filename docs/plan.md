@@ -17,11 +17,11 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 
 | Module | Stage | Responsibility |
 |---|---|---|
-| `cli.py`, `cli_surface.py`, `cli_values.py`, `cli_registry.py`, `cli_output.py` | 0 | entry point and dispatch; the argparse surface and usage checks; flag value grammars (`TODO(#4)`: parsing moves to `durations.py`, `timestamps.py`, `ids.py`); the `@command` registry and `Context`; human and `--json` output and error envelopes |
+| `cli.py`, `cli_surface.py`, `cli_values.py`, `cli_registry.py`, `cli_output.py` | 0 | entry point and dispatch; the argparse surface and usage checks; flag value `type=` adapters over the grammar modules; the `@command` registry and `Context`; human and `--json` output and error envelopes |
 | `actors.py`, `checks.py`, `errors.py`, `textsafe.py` | 0 | actors and the human-only gate; the check order (usage → not found/ambiguous → refusals → human gate); error codes, exit codes, the envelope; the sanitizer |
 | `config.py` | 0 | YAML + `config.d` merge, Pydantic models, defaults equal to `config.example.yaml`, unknown-queue-selector warnings, absolute `--config` propagation |
-| `validate.py`, `durations.py`, `timestamps.py` | 0 (planned; `TODO(#4)`) | grammars (queues, labels, unique keys, env names, actors, decision ids, hook names), durations, UTC millisecond timestamps |
-| `ids.py` | 0 (planned; `TODO(#4)`) | `jb-` id generation against jobs and `pruned_ids`, prefix resolution (2/10/21) |
+| `validate.py`, `durations.py`, `timestamps.py` | 0 | grammars (queues, labels and the 32-label set, unique keys, env names, decision ids; actors stay in `actors.py`, hook names come with the hooks issue), durations, UTC millisecond timestamps |
+| `ids.py` | 0 | `jb-` id generation with a pluggable `taken` predicate (jobs and `pruned_ids`, supplied by the store), prefix resolution (2/10/21) with a pluggable lookup |
 | `gateway.py` | 0 | the only boundary: `Popen`, `os.kill`/`killpg`, `waitid`, `prctl`, `flock`, `/proc`, clocks |
 | `procs.py` | 0 | process identity (Linux `/proc` field 22, boot id; macOS `libproc`, `kern.bootsessionuuid`), liveness, pidfd with the allow-listed ctypes `syscall()` fallback and the re-check before `kill` without pidfds, dumpability, group probing |
 | `store.py` | 0 | connection setup, additive migrations at open for CLI commands, `user_version` checks for long-lived and internal processes, compare-and-set helpers, outbox writes |
