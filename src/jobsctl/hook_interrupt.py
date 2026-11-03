@@ -5,7 +5,7 @@ A CLI command that delivers a hook itself (`hold`, `cancel`, `resolve`) wraps th
 
     with InterruptGuard() as guard:
         result = run_hook(..., stop=guard)
-        guard.check(result)   # raises the `interrupted` or `internal` error if it was stopped
+        guard.check(result)   # raises the `interrupted` or `internal` error if a signal came
 
 SIGINT, SIGHUP and SIGTERM then only record themselves; ``run_hook`` sees ``stop`` answer, stops
 the hook's group (SIGTERM, 5 seconds, SIGKILL, leader held unreaped) and returns. The command
@@ -58,8 +58,10 @@ class InterruptGuard:
         return None if self.signum is None else signal.Signals(self.signum).name
 
     def check(self, result: HookResult) -> None:
-        """Raise the command's error if ``result`` was stopped by a received signal."""
-        if result.stopped is None or self.signum is None:
+        """Raise the command's error if a signal was received, whether or not ``result`` was
+        stopped by it (the signal may arrive after the last ``stop`` poll, while the hook ends on
+        its own). Call it before marking the event delivered."""
+        if self.signum is None:
             return
         name = signal.Signals(self.signum).name
         message = (

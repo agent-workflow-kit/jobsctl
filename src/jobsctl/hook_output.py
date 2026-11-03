@@ -78,9 +78,26 @@ def excerpt(capture: Capture, limit: int, mask: Mask) -> str:
     return _cut_bytes(sanitize(text, mask=mask), limit)
 
 
+def _masked(value: object, mask: Mask) -> object:
+    """``value`` with every string, and every key, masked as decoded text (so a JSON escape
+    cannot hide a masked value)."""
+    if isinstance(value, str):
+        return mask(value[:CAPTURE_LIMIT])
+    if isinstance(value, list):
+        return [_masked(item, mask) for item in value]
+    if isinstance(value, dict):
+        return {mask(str(key)[:CAPTURE_LIMIT]): _masked(item, mask) for key, item in value.items()}
+    return value
+
+
 def _clean_for_warning(value: object, mask: Mask) -> str:
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=True)
-    return _cut_bytes(sanitize(mask(text[:200]), inline=True), 64)
+    """A short echo of an invalid value: masked in full first, then cut to 64 bytes."""
+    if isinstance(value, str):
+        text = mask(value[:CAPTURE_LIMIT])
+    else:
+        text = json.dumps(_masked(value, mask), ensure_ascii=True)
+        text = mask(text[:CAPTURE_LIMIT])
+    return _cut_bytes(sanitize(text, inline=True), 64)
 
 
 def parse_decision_ids(capture: Capture, mask: Mask) -> tuple[list[str], list[str]]:

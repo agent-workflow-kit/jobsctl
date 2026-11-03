@@ -22,7 +22,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 | `config.py` | 0 | YAML + `config.d` merge, Pydantic models, defaults equal to `config.example.yaml`, unknown-queue-selector warnings, absolute `--config` propagation |
 | `validate.py`, `durations.py`, `timestamps.py` | 0 (planned; `TODO(#4)`) | grammars (queues, labels, unique keys, env names, actors, decision ids, hook names), durations, UTC millisecond timestamps |
 | `ids.py` | 0 (planned; `TODO(#4)`) | `jb-` id generation against jobs and `pruned_ids`, prefix resolution (2/10/21) |
-| `gateway.py` | 0 | the single boundary for subprocess calls (`run`, `Popen`) |
+| `gateway.py` | 0 | the single boundary for subprocess calls (`run`, `spawn`, `Popen`) |
 | `gateway_proc.py` | 0 | raw process syscalls through `os` and `ctypes`: `kill`/`killpg` with argument validation, pidfds and the allow-listed `syscall()` fallback, `prctl`, `waitid`/`waitpid`, libproc, `sysctl` |
 | `proc_host.py`, `proc_identity.py`, `proc_signal.py`, `proc_group.py`, `proc_linux.py` | 0 | the `Host` seam (`/proc` reads, libproc); process identity (Linux `/proc` field 22, boot id; macOS `libproc`, `kern.bootsessionuuid`), liveness, pidfd with the allow-listed ctypes `syscall()` fallback and the re-check before `kill` without pidfds, dumpability, group probing |
 | `store.py` | 0 | connection setup, additive migrations at open for CLI commands, `user_version` checks for long-lived and internal processes, compare-and-set helpers, outbox writes |
@@ -35,7 +35,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 | `output.py` | 2 | ring buffer, masking (window rules), sanitizing, compression |
 | `kill.py` | 3 | `_kill` for force-cancel after a shim loss |
 | `reconcile.py` | 3 | reconcile rules and findings |
-| `hooks.py`, `deliver.py` | 4 | hook processes (WNOWAIT reservation, timeout, interrupted CLI commands), selectors, outbox delivery, `_deliver` and its async hooks |
+| `hook_run.py`, `hook_output.py`, `hook_env.py`, `hook_payload.py`, `hook_select.py`, `hook_interrupt.py`, `deliver.py` | 4 | hook processes (WNOWAIT reservation, timeout, interrupted CLI commands), selectors, outbox delivery, `_deliver` and its async hooks |
 | `cron.py` | 5 | `cron install`/`uninstall` block |
 | `tui/` | 6 | `browse` (Textual, `tui` extra) |
 
@@ -46,7 +46,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 **Tests**:
 
 - argparse: every command and flag of interface.md "Commands" and "Global flags"; flag-combination usage errors (`--wait-timeout` without `--wait`/`--force`, `cancel --all` without a selector, id plus selectors, `--dry-run` with `--wait`, `--actor auto:jobsctl`).
-- config: defaults equal `config.example.yaml`; drop-in merge; hook entries (duration timeouts, duplicate `name` → `config_invalid`); no `JOBSCTL_<KEY>` variables read.
+- config: defaults equal `config.example.yaml`; drop-in merge; hook entries (duration timeouts, duplicate `name` or identity (`name`, else `cmd`) → `config_invalid`); no `JOBSCTL_<KEY>` variables read.
 - grammars, durations (`none` where allowed), timestamps; ids and prefixes (short → 2, ambiguous → 21, unknown or pruned → 10).
 - store: connection setup per spike B1 pitfalls; `BEGIN IMMEDIATE`; a migration adds a column with a default; long-lived processes see `version_skew`.
 - audit/log: 10 concurrent writers × 300 lines give strictly increasing, gap-free `seq` in file order (spike C6); no append inside a write transaction.

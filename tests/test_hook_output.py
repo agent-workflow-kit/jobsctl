@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 
 import pytest
 
@@ -14,6 +15,7 @@ from jobsctl.hook_output import (
     parse_decision_ids,
 )
 
+Mask = Callable[[str], str]
 SECRET = "s3cr3t-VALUE-9f2"
 
 
@@ -76,8 +78,8 @@ def test_excerpt_rewritten_lines_keep_the_last_segment() -> None:
     assert excerpt(cap(b"progress 1\rprogress 2\r\nok\n"), 2048, mask) == "progress 2\nok\n"
 
 
-def ids(doc: object) -> tuple[list[str], list[str]]:
-    return parse_decision_ids(cap(json.dumps(doc).encode()), mask)
+def ids(doc: object, mask: Mask = mask) -> tuple[list[str], list[str]]:
+    return parse_decision_ids(cap(json.dumps(doc, ensure_ascii=False).encode()), mask)
 
 
 @pytest.mark.parametrize(
@@ -111,6 +113,24 @@ def test_invalid_detail_is_sanitized_masked_and_short() -> None:
     assert got == []
     assert len(bad[0].encode()) <= 64 and SECRET not in bad[0]
     assert "\n" not in bad[0] and "\x1b" not in bad[0]
+
+
+def test_a_long_secret_is_masked_before_the_detail_is_cut() -> None:
+    secret = "k" * 300
+    got, bad = ids(
+        {"decision_id": [f"has space {secret}"]}, mask=lambda t: t.replace(secret, "***")
+    )
+    assert got == [] and len(bad) == 1
+    assert "k" * 10 not in bad[0] and len(bad[0].encode()) <= 64
+
+
+def test_a_non_string_value_is_masked_before_it_is_json_escaped() -> None:
+    secret = 'sé"cr\\et'  # a non-ASCII character, a quote and a backslash
+    got, bad = ids(
+        {"decision_id": [{secret: [secret, 1]}]}, mask=lambda t: t.replace(secret, "***")
+    )
+    assert got == [] and len(bad) == 1
+    assert "cr" not in bad[0] and "***" in bad[0]
 
 
 def test_too_many_decision_ids_are_capped() -> None:

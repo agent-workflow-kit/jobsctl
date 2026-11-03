@@ -107,3 +107,25 @@ def test_the_first_signal_decides_and_a_signal_before_start_runs_nothing(
         with pytest.raises(JobsctlError) as info:
             guard.check(res)
     assert tracker.spawned == [] and info.value.exit_code == ExitCode.INTERNAL
+
+
+def test_check_raises_for_a_signal_that_arrived_after_the_last_stop_poll(
+    tracker: HookTracker, tmp_path: Path
+) -> None:
+    with InterruptGuard() as guard:
+        res = run_hook(
+            hook="post-held",
+            hook_id="h",
+            cmd="exit 0",
+            payload=b"{}\n",
+            timeout=10,
+            env={"PATH": os.environ["PATH"]},
+            cwd=tmp_path,
+            stop=guard,
+            tuning=FAST,
+        )
+        assert res.stopped is None and res.outcome == "allow"  # it finished on its own
+        os.kill(os.getpid(), signal.SIGINT)  # after the last poll
+        with pytest.raises(JobsctlError) as info:
+            guard.check(res)
+    assert info.value.code == "interrupted" and info.value.exit_code == ExitCode.INTERRUPTED

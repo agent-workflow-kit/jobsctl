@@ -14,6 +14,8 @@ The caller (``pre-start`` in the shim, the delivery of post hooks) selects hooks
 payload and the environment, and logs the result; this module knows nothing of jobs or state.
 TODO(#24): outbox delivery and ``async`` hooks call ``run_hook`` per event.
 TODO(#25): the shim's ``pre-start`` loop applies veto and escalation from ``HookResult``.
+TODO(#28): ``wait_exited_keep`` (``waitid`` with ``WNOWAIT``) is ENOSYS on macOS: ``run_hook`` is
+Linux-only until the macOS port.
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ from .proc_group import probe_group
 from .proc_host import BootIdUnavailable, Host, default_host
 from .proc_identity import Identity, ProcessGone, identify
 from .proc_linux import reap_held_leader, wait_exited_keep
-from .proc_signal import signal_group
+from .proc_signal import Result, signal_group
 
 __all__ = [
     "EXIT_ESCALATE",
@@ -94,7 +96,13 @@ class HookResult:
     @property
     def vetoes(self) -> bool:
         """A `pre-start` hook that vetoes: any non-zero exit other than 13, a timeout, or a hook
-        that could not run. A stopped hook decides nothing."""
+        that could not run. A stopped hook decides nothing.
+
+        TODO(#25): the `pre-start` loop records a vetoing result in `hook_messages` with outcome
+        `veto` (also for a timeout, a kill by signal and a hook that could not start), while its
+        `hook_ran` outcome stays veto, timeout or failed. A result with ``unkillable`` set (the
+        leader outlived SIGKILL and was left unreaped) must be treated as an internal error by
+        the callers (#24, #25), not as a veto."""
         return (
             self.hook == PRE_START
             and self.stopped is None
@@ -106,7 +114,10 @@ class HookResult:
         return self.hook == PRE_START and self.stopped is None and self.outcome == "escalate"
 
     def log_fields(self, job_id: str) -> dict[str, Any]:
-        """The fields of the `hook_ran` log record (`schemas/log.json`), without seq, ts, level."""
+        """The fields of the `hook_ran` log record (`schemas/log.json`), without seq, ts, level.
+
+        TODO(#6): the `hook_ran` writer consumes these fields and ``warnings`` (the
+        `invalid_decision_id` log warnings)."""
         fields: dict[str, Any] = {
             "event": "hook_ran",
             "job_id": job_id,
@@ -146,6 +157,7 @@ class _Run:
     tuning: HookTuning
     proc: Any
     payload: memoryview
+    sel: selectors.BaseSelector
     out: Capture = field(default_factory=Capture)
     err: Capture = field(default_factory=Capture)
     ident: Identity | None = None
@@ -154,8 +166,11 @@ class _Run:
     written: int = 0
 
     def __post_init__(self) -> None:
-        self.sel = selectors.DefaultSelector()
-        self.pid = int(self.proc.pid)
+        self.pid = int(self.proc.pid)  # nothing here can fail: ``emergency`` works from here on
+
+    def setup(self) -> None:
+        """Register the pipes. May fail or be interrupted; ``emergency`` copes with a half-done
+        setup."""
         for stream, capture in ((self.proc.stdout, self.out), (self.proc.stderr, self.err)):
             os.set_blocking(stream.fileno(), False)
             self.sel.register(stream.fileno(), selectors.EVENT_READ, capture)
@@ -180,13 +195,15 @@ class _Run:
         except OSError:
             pass
 
-    def _pump(self, timeout: float) -> None:
-        """Move bytes for at most ``timeout`` seconds (one select round)."""
+    def _pump(self, timeout: float) -> bool:
+        """Move bytes for at most ``timeout`` seconds (one select round); whether any I/O was
+        ready."""
         timeout = max(0.0, min(timeout, _TICK))
         if not self.sel.get_map():
             time.sleep(timeout)
-            return
-        for key, _ in self.sel.select(timeout):
+            return False
+        ready = self.sel.select(timeout)
+        for key, _ in ready:
             fd = key.fd
             if key.events & selectors.EVENT_WRITE:
                 self._write_stdin(fd)
@@ -201,6 +218,13 @@ class _Run:
                 key.data.add(chunk)
             else:
                 self.sel.unregister(fd)
+        return bool(ready)
+
+    def _drain_ready(self) -> None:
+        """Read what the pipes already hold, never waiting, for at most ``tuning.drain``."""
+        end = time.monotonic() + self.tuning.drain
+        while time.monotonic() < end and self._pump(0.0):
+            pass
 
     def _write_stdin(self, fd: int) -> None:
         try:
@@ -230,17 +254,26 @@ class _Run:
         return probe.complete and probe.count == 0
 
     def send(self, sig: int) -> None:
-        """``sig`` to the hook's process group, only while the leader (held unreaped) is ours."""
+        """``sig`` to the hook's process group, only while the leader (held unreaped) is ours.
+
+        ``signals`` records only a signal that was sent. When the identity cannot be verified
+        (``UNKNOWN``) the leader is still our own unreaped child, so its PID reserves the group id
+        and ``killpg(pid)`` is safe, exactly as when no identity could be read at all.
+        """
         if self.proc.returncode is not None:
             return  # reaped: the group id is no longer reserved, never signal
-        self.signals.append(signal.Signals(sig).name)
         if self.ident is not None:
-            signal_group(self.host, self.ident, sig, allow_zombie=True)
-        else:  # no identity could be read; the leader is our own unreaped child, pgid == pid
-            try:
-                self.host.killpg(self.pid, sig)
-            except OSError:
-                pass
+            outcome = signal_group(self.host, self.ident, sig, allow_zombie=True)
+            if outcome.sent:
+                self.signals.append(signal.Signals(sig).name)
+                return
+            if outcome.result is not Result.UNKNOWN:
+                return  # not alive, denied or an error: nothing was signaled
+        try:
+            self.host.killpg(self.pid, sig)
+        except OSError:
+            return
+        self.signals.append(signal.Signals(sig).name)
 
     def terminate(self) -> bool:
         """SIGTERM, ``term_grace``, SIGKILL; returns False if the leader outlived SIGKILL."""
@@ -248,6 +281,7 @@ class _Run:
         end = time.monotonic() + self.tuning.term_grace
         while time.monotonic() < end:
             if self.leader_exited() and self.group_clear():
+                self._drain_ready()
                 return True
             self._pump(end - time.monotonic())
         if not (self.leader_exited() and self.group_clear()):
@@ -257,6 +291,7 @@ class _Run:
             if self.leader_exited() and self.group_clear():
                 break
             self._pump(end - time.monotonic())
+        self._drain_ready()  # the last bytes written before the signal
         return self.leader_exited()
 
     def close(self) -> None:
@@ -269,7 +304,8 @@ class _Run:
                     pass
 
     def emergency(self) -> None:
-        """An unexpected exception: SIGKILL the group, reap the leader if it died, close all."""
+        """An unexpected exception, also on a half-built run: SIGKILL the group (the leader is
+        our own unreaped child, ``returncode`` still ``None``), reap it if it died, close all."""
         try:
             self.send(signal.SIGKILL)
             end = time.monotonic() + self.tuning.kill_wait
@@ -319,18 +355,24 @@ def run_hook(
     if stop is not None and (reason := stop()):
         return _stopped_before_start(hook, hook_id, reason)
     use_host = host or default_host()
+    view = memoryview(payload)
+    sel = selectors.DefaultSelector()
     try:
         proc = gateway.spawn(["/bin/sh", "-c", cmd], cwd=cwd, env=env, new_process_group=True)
     except (OSError, ValueError) as exc:
+        sel.close()
         text = os.strerror(exc.errno) if isinstance(exc, OSError) and exc.errno else "invalid"
         message = f"hook could not be started ({text})" if hook == PRE_START else None
         return HookResult(
             hook, hook_id, "failed", None, None, (), (), "", message, False, False, None,
             None, text, (), False, time.monotonic() - began,
         )  # fmt: skip
-    run = _Run(use_host, tune, proc, memoryview(payload))
-    run.ident = _identity(use_host, run.pid)
+    # From here on the leader exists: any exception, a KeyboardInterrupt included, must end in
+    # ``emergency`` (SIGKILL to the group, reap by PID), even before the run is fully set up.
+    run = _Run(use_host, tune, proc, view, sel)
     try:
+        run.setup()
+        run.ident = _identity(use_host, run.pid)
         return _supervise(run, hook, hook_id, timeout, mask, stop, began)
     except BaseException:
         run.emergency()
@@ -405,7 +447,7 @@ def _supervise(
         outcome = "failed"
     ids: list[str] = []
     bad: list[str] = []
-    if not (timed_out or stopped):
+    if not (timed_out or stopped) and sig is None:
         ids, bad = parse_decision_ids(run.out, mask)
     log_stderr = None
     message = None

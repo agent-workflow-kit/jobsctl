@@ -102,7 +102,7 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 | `audit.py` | `audit.jsonl` and `log.jsonl` writers (`seq` allocation, D42), diagnostics files (D43) |
 | `proc_host.py`, `proc_identity.py`, `proc_signal.py`, `proc_group.py`, `proc_linux.py` (instead of one `procs.py`) | process identity, boot id, liveness, pidfd signals (including group signals where the kernel has them), group probing, dumpability, subreaper, held-leader reaping (Linux; `os.waitid` is missing on macOS CPython, so held-leader waiting there is owned by issue #28); `proc_host.py` is the platform seam (`LinuxHost` over an injectable `/proc` root, `DarwinHost` over a fakeable libproc) |
 | `gateway_proc.py` | the process half of the gateway: `kill`/`killpg`, pidfds with the `ctypes` fallback and its architecture allow list, `prctl`, `waitid`, libproc, `sysctl` |
-| `gateway.py` | the single boundary for subprocess calls (`run`); the other process, lock and clock access sits in `gateway_proc.py` and the modules that use it, and tests replace the `Host` and these seams with fakes |
+| `gateway.py` | the single boundary for subprocess calls (`run`, `spawn`); the other process, lock and clock access sits in `gateway_proc.py` and the modules that use it, and tests replace the `Host` and these seams with fakes |
 | `tui/` | `browse` (optional extra) |
 
 `_shim`, `_deliver` and `_kill` are internal commands, not part of the stable interface. Every jobsctl process except the job itself runs with the state dir as its cwd and the [canonical environment](interface.md#canonical-environment), which never holds `env_file` values (D7); internal processes are started with `<python> -I -m jobsctl` (D31), and on Linux they are not dumpable (D43).

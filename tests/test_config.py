@@ -553,6 +553,13 @@ def test_identity_collision_message_never_echoes_a_long_cmd(tmp_path: Path) -> N
     secret = "tok-" + "x" * 5000
     message = invalid(tmp_path, f"hooks:\n  post-fail: [{{cmd: {secret}}}, {{cmd: {secret}}}]\n")
     assert "duplicate hook identity" in message and secret not in message
+    assert "tok-" not in message  # an unnamed hook's cmd is never echoed, not even a prefix
+    assert "hooks.post-fail" in message and "entries 0 and 1" in message
+
+
+def test_identity_collision_with_a_name_echoes_the_name_only(tmp_path: Path) -> None:
+    message = invalid(tmp_path, "hooks:\n  post-fail: [{name: foo, cmd: x}, {cmd: foo}]\n")
+    assert "duplicate hook identity 'foo': entries 0 and 1" in message
 
 
 def test_same_cmd_with_different_names_or_in_different_hooks_is_fine(tmp_path: Path) -> None:
@@ -570,7 +577,7 @@ def test_identity_collision_across_drop_ins_is_config_invalid(tmp_path: Path) ->
     with pytest.raises(JobsctlError) as info:
         load_config(base)
     assert info.value.code == "config_invalid"
-    assert "duplicate hook identity 'foo'" in info.value.message
+    assert "duplicate hook identity 'foo': entries 0 and 1" in info.value.message
 
 
 def test_unknown_queue_selector_is_a_warning_only(tmp_path: Path) -> None:

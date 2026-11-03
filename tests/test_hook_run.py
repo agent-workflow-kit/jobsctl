@@ -16,10 +16,12 @@ from pathlib import Path
 
 import pytest
 
+from jobsctl import hook_run
 from jobsctl.hook_env import build_hook_env
 from jobsctl.hook_run import HookResult, HookTuning, run_hook
 from jobsctl.proc_host import BootIdUnavailable, LinuxHost
-from jobsctl.proc_linux import wait_exited_keep
+from jobsctl.proc_linux import reap_held_leader, wait_exited_keep
+from jobsctl.proc_signal import Result, SignalOutcome
 from tests.conftest import validate_against
 from tests.hook_real import (
     HookTracker,
@@ -447,3 +449,105 @@ def test_hook_result_is_json_friendly_in_its_log_fields(
 ) -> None:
     res = run("""echo '{"decision_id":"a"}'""", state_dir)
     assert json.loads(json.dumps(res.log_fields("jb-abcdefgh")))["decision_ids"] == ["a"]
+
+
+# --- round-1 review fixes ----------------------------------------------------------------------
+
+
+def test_a_hook_that_prints_decision_ids_then_kills_itself_yields_none(
+    tracker: HookTracker, state_dir: Path
+) -> None:
+    res = run("""echo '{"decision_id":"a"}'; kill -KILL $$""", state_dir)
+    assert res.signal == signal.SIGKILL and res.decision_ids == () and res.warnings == ()
+
+
+def test_output_written_when_the_group_is_terminated_is_captured(
+    tracker: HookTracker, state_dir: Path
+) -> None:
+    class SlowSignalHost(SpyHost):
+        """Returns only after the hook had time to write and exit: nothing is left to poll."""
+
+        def killpg(self, pgid: int, sig: int) -> None:
+            super().killpg(pgid, sig)
+            time.sleep(0.4)
+
+    host = SlowSignalHost(tracker)
+    res = run(
+        "trap 'echo last-words >&2; exit 3' TERM; sleep 60 & wait",
+        state_dir,
+        timeout=0.3,
+        host=host,
+    )
+    assert res.outcome == "timeout" and res.stderr is not None and "last-words" in res.stderr
+
+
+@pytest.mark.parametrize("failing", ["identity", "set_blocking"])
+def test_an_interrupt_right_after_spawn_leaves_no_hook_process(
+    tracker: HookTracker, state_dir: Path, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    def boom(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    if failing == "identity":
+        monkeypatch.setattr(hook_run, "_identity", boom)
+    else:
+        monkeypatch.setattr(hook_run.os, "set_blocking", boom)
+    with pytest.raises(KeyboardInterrupt):
+        run("sleep 60 & sleep 60", state_dir)
+    assert tracker.last.popen.returncode is not None  # killed and reaped by PID
+    pgid = tracker.last.pgid
+    end = time.monotonic() + 3
+    while time.monotonic() < end and any(
+        not m.zombie for m in LinuxHost().scan_group(pgid).members
+    ):
+        time.sleep(0.02)
+    assert [m for m in LinuxHost().scan_group(pgid).members if not m.zombie] == []
+
+
+def test_signals_sent_records_only_signals_actually_sent(
+    tracker: HookTracker, state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for outcome in (Result.NOT_ALIVE, Result.DENIED, Result.ERROR):
+        monkeypatch.setattr(hook_run, "signal_group", lambda *a, _o=outcome, **k: SignalOutcome(_o))
+        res = run("sleep 60", state_dir, timeout=0.2, tuning=HookTuning(0.1, 0.3, 0.1, 0.05))
+        assert res.signals_sent == () and res.unkillable
+        tracker.teardown()  # the hook was never signaled: kill it by its held leader's group
+        tracker.spawned.clear()
+
+
+def test_an_unverifiable_identity_falls_back_to_killpg_on_our_unreaped_leader(
+    tracker: HookTracker, state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(hook_run, "signal_group", lambda *a, **k: SignalOutcome(Result.UNKNOWN))
+    host = SpyHost(tracker)
+    res = run("sleep 60", state_dir, timeout=0.3, host=host)
+    assert res.signals_sent == ("SIGTERM",) and not res.unkillable
+    assert host.calls == [(tracker.last.popen.pid, signal.SIGTERM, True)]
+
+
+def test_a_killpg_that_finds_no_group_is_not_recorded(
+    tracker: HookTracker, state_dir: Path
+) -> None:
+    class GoneHost(SpyHost):
+        def killpg(self, pgid: int, sig: int) -> None:
+            raise ProcessLookupError
+
+    res = run("sleep 0.5", state_dir, timeout=0.2, host=GoneHost(tracker, no_boot_id=True))
+    assert res.signals_sent == ()
+
+
+def test_a_held_live_leader_is_untouched_while_an_exited_sibling_is_reaped_by_pid(
+    tracker: HookTracker, state_dir: Path
+) -> None:
+    held = subprocess.Popen(["/bin/sleep", "60"], process_group=0)
+    try:
+        sibling = subprocess.Popen(["/bin/sh", "-c", "exit 7"])
+        assert wait_exited_keep(sibling.pid) is not None  # exited, still unreaped
+        assert run("exit 0", state_dir).outcome == "allow"  # a hook run in between
+        assert reap_held_leader(sibling) == 7  # by its own PID
+        assert held.poll() is None and held.returncode is None  # never reaped
+        info = LinuxHost().process_info(held.pid)
+        assert info is not None and not info.zombie and info.pgid == held.pid
+    finally:
+        held.kill()
+        held.wait(timeout=5)
