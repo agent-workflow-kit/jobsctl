@@ -41,8 +41,12 @@ def test_handler_gets_context_and_its_return_value_is_the_exit_code(
     handlers: dict[str, cli_registry.Handler],
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     seen: list[Context] = []
+    (tmp_path / "rel").mkdir()
+    (tmp_path / "rel" / "c.yaml").write_text("{}\n")
+    monkeypatch.chdir(tmp_path)
 
     @command("hold")
     def hold(ctx: Context) -> int:
@@ -54,7 +58,8 @@ def test_handler_gets_context_and_its_return_value_is_the_exit_code(
     ctx = seen[0]
     assert ctx.command == "hold"
     assert ctx.json is True
-    assert ctx.config_path == Path.cwd() / "rel/c.yaml"
+    assert ctx.config_path == tmp_path / "rel/c.yaml"
+    assert ctx.config.default_cap == 1
     assert ctx.args.id == JID
     assert ctx.explicit_actor is None
     assert ctx.actor == "auto:unknown"  # stdin is not a TTY under pytest

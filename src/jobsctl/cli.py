@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import traceback
 from pathlib import Path
@@ -12,6 +11,8 @@ from jobsctl import commands
 from jobsctl.cli_output import print_error
 from jobsctl.cli_registry import Context, lookup, os_user_name
 from jobsctl.cli_surface import build_parser, check_usage
+from jobsctl.config import Config
+from jobsctl.config_files import absolute, load_config
 from jobsctl.errors import ExitCode, JobsctlError, usage_error
 
 __all__ = ["build_parser", "main", "parse_args"]
@@ -53,16 +54,22 @@ def _stdin_isatty() -> bool:
         return False
 
 
-def _context(args: argparse.Namespace) -> Context:
+def _config_path(args: argparse.Namespace) -> Path | None:
+    """`--config` made absolute (the form handed on to triggered passes and internal processes)."""
+    return absolute(args.config) if args.config is not None else None
+
+
+def _context(args: argparse.Namespace, config: Config) -> Context:
     return Context(
         args=args,
         command=args.command_key,
         json=args.json,
         verbose=args.verbose,
         quiet=args.quiet,
-        config_path=Path(os.path.abspath(args.config)) if args.config is not None else None,
+        config_path=_config_path(args),
         stdin_isatty=_stdin_isatty(),
-        me_name=os_user_name(),
+        me_name=config.actor_name(os_user_name()),
+        config=config,
         explicit_actor=getattr(args, "actor", None),
     )
 
@@ -91,12 +98,12 @@ def _dispatch(argv: list[str]) -> tuple[int, bool]:
         return err.exit_code, _wants_json(argv)
     try:
         check_usage(args)
-        # TODO(#3): load and validate config here (`config_invalid`, exit 2).
+        config = load_config(_config_path(args))
         commands.load_all()
         handler = lookup(args.command_key)
         if handler is None:
             raise JobsctlError("internal", f"{args.command_key}: not implemented yet")
-        return handler(_context(args)), args.json
+        return handler(_context(args, config)), args.json
     except JobsctlError as err:
         print_error(err, as_json=args.json)
         return err.exit_code, args.json

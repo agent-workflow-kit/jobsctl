@@ -79,7 +79,7 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 
 | Module | Responsibility |
 |---|---|
-| `cli.py` | entry point: parse, usage checks, config load (`TODO(#3)`), dispatch, exit codes |
+| `cli.py` | entry point: parse, usage checks, config load, dispatch, exit codes |
 | `cli_surface.py` | the frozen argparse surface (commands, global flags) and the flag-combination usage checks |
 | `cli_values.py` | flag value grammars as `type=` callables: durations, timestamps, names, ids; `TODO(#4)`: the parsing functions move to the shared grammar modules (`durations.py`, `timestamps.py`, `ids.py`), leaving the `type=` adapters here |
 | `cli_registry.py` | the `@command` registry and the per-invocation `Context` |
@@ -96,7 +96,8 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 | `env.py` | the canonical environment (`PATH` cleaning, ignored names), the job environment, safe `env_file` loading (trust-anchor checks, line format) |
 | `output.py` | planned (output-capture issue): ring buffer, live-flush withholding, masking (the masking set and the `add` secret refusal), sanitizing, compression |
 | `hooks.py` | sync hook execution under the unreaped-leader rule (process groups, timeouts, selectors, output read in memory for `decision_id`, `hook_messages` and the `hook_ran` excerpt), payload building, leaving async events to `_deliver` (D39), stopping a running hook when a CLI command is interrupted (D48) |
-| `config.py` | Pydantic models, drop-ins, precedence (files and flags only), absolute `--config` hand-off; errors name keys, never `env.*` values |
+| `config.py` | Pydantic models for every config key (strict, unknown keys refused, durations as seconds, `~/` expanded), per-queue precedence (`Config.queue`), `unknown_queue_selector` detection |
+| `config_files.py` | default path (`XDG_CONFIG_HOME`), `config.d/*.yaml` drop-ins and merge (maps merge, hook lists append), YAML loading without anchors, aliases or duplicate keys, absolute `--config` hand-off; errors name keys, never `env.*` values |
 | `ids.py`, `durations.py`, `timestamps.py` | planned (`TODO(#4)`): id generation (checked against `pruned_ids`) and prefix lookup; duration and timestamp grammars, moved out of `cli_values.py` |
 | `audit.py` | `audit.jsonl` and `log.jsonl` writers (`seq` allocation, D42), diagnostics files (D43) |
 | `procs.py` | process identity, boot id, liveness, subreaper, pidfds (including group signals where the kernel has them), dumpability, group probing (Linux and macOS) |
@@ -195,7 +196,8 @@ Every relied-on behavior becomes a regression test ([plan.md](plan.md)); the cro
 
 ## Dependencies
 
-- `pyyaml` (config; the standard library cannot read YAML) and `pydantic` (config validation), the design guide's standard set.
+- `pyyaml` (config; the standard library cannot read YAML) and `pydantic` (config validation), the design guide's standard set. Pydantic gives strict typing, `extra=forbid` and error locations (`loc`) that name the offending key; config messages are built from `loc` and the validator text alone, never from the input. PyYAML is used through a `SafeLoader` subclass that refuses anchors, aliases and duplicate keys (no expansion bombs; the file is also capped at 1 MiB).
+- `types-pyyaml` (dev only): type stubs for the type checker.
 - `textual`, only in the optional `tui` extra.
 - `jsonschema` (dev only): the tests validate every `--json` output and error envelope against `schemas/`; nothing at runtime imports it.
 - No process-management library: the few calls needed (`prctl`, `proc_pidinfo`) are made through `ctypes` in `procs.py`, which keeps the platform code in one reviewable place.

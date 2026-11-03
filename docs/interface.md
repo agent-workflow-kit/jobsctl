@@ -732,16 +732,24 @@ Delivery is **at least once and in order per job** (a job's synchronous events i
 
 Config is per invocation, while the state directory is shared: a job added with `--config X` starts under the config of whichever process claims it (a cron pass, or a pass triggered by another command, uses the default config). For a separate queue system, use `--config X` together with a matching `XDG_STATE_HOME`.
 
+Drop-ins are the entries of `config.d` whose name ends in `.yaml` (case-sensitive; `.yml` and `.YAML` are ignored) and does not start with `.`, read in byte-wise lexical order, at most 256 of them. The main file and each drop-in must be, or resolve to, a regular file of at most 256 KiB, and all of them together at most 1 MiB (`config_invalid` naming the file that crosses the limit).
+
+Lists other than the `hooks.<hook>` lists (e.g. `mask_env`, `env.inherit`, `env.path_prepend`, `hooks_strip_env`) are replaced by a later file, not appended. A hook `name` may be omitted but not `null`; one used in two files is `config_invalid` naming both files.
+
+Config files are UTF-8 YAML with YAML 1.2 core-schema scalars: booleans are only `true`, `True`, `TRUE`, `false`, `False`, `FALSE`; integers only decimal without leading zeros or `_`; null only `~`, `null`, `Null`, `NULL` or empty; every other plain scalar (`yes`, `on`, `0x10`, `1:30`, `2024-01-01`) is a string. Anchors, aliases, explicit tags (`!!bool`, `!foo`), mapping keys that are not strings, and duplicate keys are refused (`config_invalid` with the position, never the text).
+
+`hooks.<hook>[].cmd`, `env.set` values, `env_file` and `env.path_prepend` entries must not contain NUL and must be valid Unicode (no lone surrogates); a `cmd` and an `env.set` value are at most 128 KiB as UTF-8. An `env.set` key that is not a valid variable name is reported as `env.set.<invalid name>`. `~/` needs a known, absolute home directory: an empty or relative `HOME` is `config_invalid` naming the key.
+
 | Key | Default | Meaning |
 |---|---|---|
-| `default_cap` | `1` | cap of a queue with no configured `cap`; `null` = unbounded |
-| `global_cap` | `null` | total running jobs across queues; `null` = none |
+| `default_cap` | `1` | cap of a queue with no configured `cap`, 0..2147483647; `null` = unbounded |
+| `global_cap` | `null` | total running jobs across queues, 0..2147483647; `null` = none |
 | `strict_queues` | `false` | `add` to an unknown queue exits 10; affects `add` only |
 | `auto_run` | `true` | [Start triggers](#start-triggers) |
 | `run_interval` | `10s` | `run --loop` interval |
 | `kill_grace` | `30s` | per step of the [signal sequence](#signal-sequence) |
 | `tail_bytes` | `16384` | [Output capture](#output-capture) (max 262144) |
-| `tail_lines` | `200` | |
+| `tail_lines` | `200` | 1..2147483647 |
 | `tail_flush_interval` | `5s` | |
 | `mask_env` | `[]` | variable names whose values are masked in tails and hook output; `--env` refuses them |
 | `retention` | `30d` | terminal jobs whose `ended_at` is older than this are pruned by each pass; `null` keeps them |
@@ -753,13 +761,13 @@ Config is per invocation, while the state directory is shared: a job added with 
 | `hooks_strip_env` | `[]` | variables removed from hook environments |
 | `busy_timeout` | `5s` | SQLite busy timeout |
 | `me.name` | OS user name | for the default actor |
-| `queues.<name>.cap` | `default_cap` | integer ≥ 0 or `null` (0 holds the queue: nothing starts) |
+| `queues.<name>.cap` | `default_cap` | 0..2147483647 or `null` (0 holds the queue: nothing starts) |
 | `queues.<name>.priority` | `0` | [Selection](#selection), -1000..1000 |
 | `queues.<name>.timeout` | `null` | [Timeouts](#timeouts) |
 | `queues.<name>.max_retries` | `0` | [Automatic retry](#automatic-retry), 0..100 |
 | `queues.<name>.retry_delay` | `60s` | |
-| `queues.<name>.kill_grace` | global value | |
-| `queues.<name>.tail_bytes`, `tail_lines` | global values | |
+| `queues.<name>.kill_grace` | global value | absent: the global value (`null` is refused) |
+| `queues.<name>.tail_bytes`, `tail_lines` | global values | absent: the global values (`null` is refused); ranges as the global keys |
 
 ## Environment
 
