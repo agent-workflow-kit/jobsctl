@@ -1,0 +1,296 @@
+"""Canonical environment: inherit, JOBSCTL_ removal, PATH replacement, prepend and cleaning."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+from jsonschema import Draft202012Validator
+
+from jobsctl import env_canonical as ec
+from jobsctl.config import Config
+from tests.conftest import _registry
+
+
+def cfg(**env: object) -> Config:
+    return Config.model_validate({"env": env} if env else {})
+
+
+def build(config: Config, environ: dict[str, str]) -> ec.CanonicalEnv:
+    return ec.build_canonical_env(config, environ)
+
+
+@pytest.fixture
+def bins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    # pytest's tmp dirs live under /tmp, which the cleaning step drops; move the "temporary"
+    # root away for tests that use real directories (the /tmp rules have their own tests).
+    monkeypatch.setattr(ec, "_TEMP_ROOTS", ("/jobsctl-test-tmp", "/run/user"))
+    out = []
+    for name in ("a", "b", "c"):
+        d = tmp_path / "bin" / name
+        d.mkdir(parents=True)
+        out.append(str(d))
+    return out
+
+
+def test_default_inherit_names_only() -> None:
+    environ = {"PATH": "/usr/bin", "HOME": "/h", "LC_ALL": "C", "SECRET_TOKEN": "x", "FOO": "1"}
+    result = build(cfg(), environ)
+    assert result.values == {"PATH": "/usr/bin", "HOME": "/h", "LC_ALL": "C"}
+
+
+def test_inherit_prefix_and_exact(bins: list[str]) -> None:
+    environ = {"AWS_REGION": "r", "AWS_PROFILE": "p", "AWSX": "no", "PATH": bins[0]}
+    result = build(cfg(inherit=["AWS_*", "PATH"]), environ)
+    assert result.values == {"AWS_REGION": "r", "AWS_PROFILE": "p", "PATH": bins[0]}
+
+
+def test_xdg_and_tmpdir_always_inherited() -> None:
+    environ = {
+        "XDG_CONFIG_HOME": "/c",
+        "XDG_STATE_HOME": "/s",
+        "XDG_DATA_HOME": "/d",
+        "XDG_CACHE_HOME": "/k",
+        "XDG_RUNTIME_DIR": "/r",
+        "TMPDIR": "/t",
+        "HOME": "/h",
+    }
+    result = build(cfg(inherit=[]), environ)
+    assert result.values == {k: v for k, v in environ.items() if k != "HOME"}
+
+
+def test_jobsctl_variables_removed_even_when_inherited() -> None:
+    environ = {"JOBSCTL_GLOBAL_CAP": "", "JOBSCTL_X": "1", "JOBSCTL_": "1", "HOME": "/h"}
+    result = build(cfg(inherit=["JOBSCTL_*", "JOBSCTL_X", "HOME"]), environ)
+    assert result.values == {"HOME": "/h"}
+
+
+def test_env_set_path_replaces_inherited(bins: list[str]) -> None:
+    result = build(cfg(set={"PATH": bins[1]}), {"PATH": bins[0]})
+    assert result.values["PATH"] == bins[1]
+
+
+def test_env_set_path_applies_even_if_path_not_inherited(bins: list[str]) -> None:
+    result = build(cfg(inherit=[], set={"PATH": bins[1]}), {"PATH": bins[0]})
+    assert result.values == {"PATH": bins[1]}
+
+
+def test_other_env_set_values_are_not_in_the_canonical_environment(bins: list[str]) -> None:
+    result = build(cfg(set={"FOO": "bar"}), {"PATH": bins[0]})
+    assert "FOO" not in result.values
+
+
+def test_path_prepend_in_order_in_front(bins: list[str]) -> None:
+    result = build(cfg(path_prepend=[bins[1], bins[2]]), {"PATH": bins[0]})
+    assert result.values["PATH"] == ":".join([bins[1], bins[2], bins[0]])
+
+
+def test_path_prepend_after_env_set_path(bins: list[str]) -> None:
+    result = build(cfg(set={"PATH": bins[0]}, path_prepend=[bins[2]]), {"PATH": bins[1]})
+    assert result.values["PATH"] == ":".join([bins[2], bins[0]])
+
+
+def test_path_prepend_without_any_path(bins: list[str]) -> None:
+    assert build(cfg(path_prepend=[bins[0]]), {}).values == {"PATH": bins[0]}
+
+
+def test_path_prepend_tilde_expanded_by_config(bins: list[str]) -> None:
+    home = Path(os.environ["HOME"])
+    (home / "bin").mkdir()
+    result = build(cfg(path_prepend=["~/bin"]), {})
+    assert result.values["PATH"] == str(home / "bin")
+
+
+def test_no_path_means_no_path_key() -> None:
+    assert "PATH" not in build(cfg(), {"HOME": "/h"}).values
+
+
+def test_path_cleaning_drops_each_kind(bins: list[str], tmp_path: Path) -> None:
+    missing = str(tmp_path / "nope")
+    path = ":".join(
+        ["", "rel/bin", ".", missing, "/jobsctl-test-tmp/x", "/run/user/1000/bin", bins[0]]
+    )
+    result = build(cfg(), {"PATH": path})
+    assert result.values["PATH"] == bins[0]
+    dropped = {(w.path, w.reason) for w in result.warnings}
+    assert dropped == {
+        (None, "empty"),
+        ("rel/bin", "relative"),
+        (".", "relative"),
+        (missing, "missing"),
+        ("/jobsctl-test-tmp/x", "temporary"),
+        ("/run/user/1000/bin", "temporary"),
+    }
+    assert {w.code for w in result.warnings} == {"path_entry_dropped"}
+
+
+@pytest.mark.parametrize(
+    "entry", ["/tmp", "/tmp/", "//tmp/bin", "/tmp/../tmp/bin", "/run/user", "/run/user/0"]
+)
+def test_temporary_entries_variants(entry: str) -> None:
+    result = build(cfg(), {"PATH": entry})
+    assert result.values.get("PATH") != ""
+    assert [w.reason for w in result.warnings] in (["temporary"], ["missing"])
+
+
+def test_tmp_prefix_is_not_a_substring_match(tmp_path: Path) -> None:
+    # "/tmpfoo" is not under /tmp; it is dropped only because it does not exist
+    result = build(cfg(), {"PATH": "/tmpfoo"})
+    assert [w.reason for w in result.warnings] == ["missing"]
+
+
+def test_symlink_into_tmp_dropped(tmp_path: Path) -> None:
+    target = Path("/tmp") / f"jobsctl-test-{os.getpid()}"
+    target.mkdir(exist_ok=True)
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    try:
+        result = build(cfg(), {"PATH": str(link)})
+        assert [w.reason for w in result.warnings] == ["temporary"]
+    finally:
+        target.rmdir()
+
+
+def test_existing_file_entry_kept_and_duplicates_kept(bins: list[str]) -> None:
+    result = build(cfg(), {"PATH": f"{bins[0]}:{bins[0]}"})
+    assert result.values["PATH"] == f"{bins[0]}:{bins[0]}"
+    assert result.warnings == ()
+
+
+def test_all_entries_dropped_falls_back_to_system_dirs() -> None:
+    # an empty PATH makes POSIX shells search the current directory
+    result = build(cfg(), {"PATH": "rel"})
+    expected = ":".join(d for d in ("/usr/bin", "/bin") if os.path.isdir(d))
+    assert result.values["PATH"] == expected
+    assert [w.reason for w in result.warnings] == ["relative"]
+
+
+def test_fallback_entries_are_cleaned_too(monkeypatch: pytest.MonkeyPatch, bins: list[str]) -> None:
+    monkeypatch.setattr(ec, "_FALLBACK_PATH", ("/jobsctl-no-such-dir", bins[0]))
+    assert build(cfg(), {"PATH": "rel"}).values["PATH"] == bins[0]
+
+
+def test_no_usable_fallback_removes_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ec, "_FALLBACK_PATH", ("/jobsctl-no-such-dir", "/tmp"))
+    assert "PATH" not in build(cfg(), {"PATH": "rel"}).values
+
+
+def test_path_prepend_entry_with_colon_is_split(bins: list[str]) -> None:
+    config = cfg(path_prepend=[f"{bins[0]}:/jobsctl-test-tmp/evil"])
+    result = build(config, {"PATH": bins[1]})
+    assert result.values["PATH"] == f"{bins[0]}:{bins[1]}"
+
+
+def test_warning_path_is_sanitized() -> None:
+    result = build(cfg(), {"PATH": "evil\x1b[31m\nbin"})
+    (w,) = result.warnings
+    assert w.path is not None
+    assert "\x1b" not in w.path and "\n" not in w.path
+
+
+def warning_validator() -> Draft202012Validator:
+    schema = {"$ref": "jobsctl/defs.json#/$defs/warning"}
+    return Draft202012Validator(schema, registry=_registry())
+
+
+@pytest.mark.parametrize("entry", ["", "rel", "/jobsctl-test-tmp/x", "/jobsctl-no-such-dir"])
+def test_dropped_warning_matches_schema(bins: list[str], entry: str) -> None:
+    (w,) = build(cfg(), {"PATH": f"{bins[0]}:{entry}"}).warnings
+    instance = {"code": w.code, "message": "PATH entry dropped", "reason": w.reason}
+    if w.path is not None:
+        instance["path"] = w.path
+    validator = warning_validator()
+    validator.validate(instance)
+
+
+def test_schema_requires_path_unless_the_entry_was_empty() -> None:
+    validator = warning_validator()
+    base = {"code": "path_entry_dropped", "message": "PATH entry dropped"}
+    assert validator.is_valid({**base, "reason": "empty"})
+    assert not validator.is_valid({**base, "reason": "relative"})
+
+
+_UNSAFE_REASONS = ["mode", "size", "owner", "not_regular", "ancestor", "open", "path", "read"]
+_DROPPED_REASONS = ["empty", "relative", "temporary", "missing"]
+
+
+@pytest.mark.parametrize("reason", _UNSAFE_REASONS)
+def test_schema_accepts_env_file_unsafe_reasons(reason: str) -> None:
+    instance = {"code": "env_file_unsafe", "message": "env_file unsafe", "reason": reason}
+    assert warning_validator().is_valid(instance)
+
+
+@pytest.mark.parametrize("reason", _DROPPED_REASONS)
+def test_schema_rejects_dropped_reason_on_env_file_unsafe(reason: str) -> None:
+    instance = {"code": "env_file_unsafe", "message": "env_file unsafe", "reason": reason}
+    assert not warning_validator().is_valid(instance)
+
+
+@pytest.mark.parametrize("reason", _DROPPED_REASONS)
+def test_schema_accepts_path_entry_dropped_reasons(reason: str) -> None:
+    instance = {
+        "code": "path_entry_dropped",
+        "message": "PATH entry dropped",
+        "path": "/x",
+        "reason": reason,
+    }
+    if reason == "empty":
+        del instance["path"]
+    assert warning_validator().is_valid(instance)
+
+
+@pytest.mark.parametrize("reason", _UNSAFE_REASONS)
+def test_schema_rejects_unsafe_reason_on_path_entry_dropped(reason: str) -> None:
+    instance = {
+        "code": "path_entry_dropped",
+        "message": "PATH entry dropped",
+        "path": "/x",
+        "reason": reason,
+    }
+    assert not warning_validator().is_valid(instance)
+
+
+@pytest.mark.parametrize(
+    ("instance", "reason"),
+    [
+        ({"code": "pass_env_undefined", "variable": "FOO"}, "mode"),
+        ({"code": "existing_job_held", "job_id": "jb-abcdefgh"}, "empty"),
+        ({"code": "shim_spawn_failed", "job_id": "jb-abcdefgh"}, "mode"),
+    ],
+)
+def test_schema_forbids_reason_on_other_codes(instance: dict[str, str], reason: str) -> None:
+    validator = warning_validator()
+    base = {**instance, "message": "warning"}
+    assert validator.is_valid(base)
+    assert not validator.is_valid({**base, "reason": reason})
+
+
+def test_repr_hides_values() -> None:
+    result = build(cfg(inherit=["TOKEN"]), {"TOKEN": "super-secret-value"})
+    assert result.values["TOKEN"] == "super-secret-value"
+    assert "super-secret-value" not in repr(result)
+    assert "super-secret-value" not in str(result)
+
+
+def test_never_contains_env_file_values(bins: list[str]) -> None:
+    # the builder has no env_file input at all; an inherited variable of the same name is the
+    # process's own and is not an env_file value
+    import inspect
+
+    assert "env_file" not in inspect.signature(ec.build_canonical_env).parameters
+
+
+def test_state_key_stable_for_same_warnings() -> None:
+    a = build(cfg(), {"PATH": "rel:/tmp/x"})
+    b = build(cfg(), {"PATH": "rel:/tmp/x"})
+    c = build(cfg(), {"PATH": "rel"})
+    assert a.state_key == b.state_key != c.state_key
+
+
+def test_matches_helper() -> None:
+    assert ec.matches("LC_ALL", ["LC_*"])
+    assert not ec.matches("LCX", ["LC_*"])
+    assert ec.matches("PATH", ["PATH"])
+    assert not ec.matches("PATHX", ["PATH"])
+    assert not ec.matches("A", [])
