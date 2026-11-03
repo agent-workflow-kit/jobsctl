@@ -134,8 +134,9 @@ class RecordWriter:
 
         The record is built and checked first, so a refused record records nothing. The state
         is then recorded before the record is appended: a failed append that this process
-        survives puts the earlier state back (the next call logs the warning), and only a
-        crash in between loses the warning rather than repeating it.
+        survives puts the earlier state back (the next call logs the warning), an error after
+        the line was written keeps the state, and only a crash in between loses the warning
+        rather than repeating it.
         """
         self._require_no_transaction()
         body: dict[str, Any] | None = None
@@ -152,10 +153,12 @@ class RecordWriter:
                 raise JobsctlError("internal", "warning state changed under the write lock")
         if body is None:
             return False
+        written: list[int] = []
         try:
-            self._append(LOG_FILE, LOG_COUNTER, body, durable=False)
+            self._append(LOG_FILE, LOG_COUNTER, body, durable=False, on_written=written.append)
         except BaseException:
-            self._restore_warning(name, wanted, current)
+            if not written:  # an error after the line was written must not log it twice
+                self._restore_warning(name, wanted, current)
             raise
         return True
 
@@ -168,7 +171,17 @@ class RecordWriter:
                 "use Tx.after_commit to log after the commit"
             )
 
-    def _append(self, filename: str, counter: str, body: dict[str, Any], *, durable: bool) -> int:
+    def _append(
+        self,
+        filename: str,
+        counter: str,
+        body: dict[str, Any],
+        *,
+        durable: bool,
+        on_written: Callable[[int], object] | None = None,
+    ) -> int:
+        """Append ``body`` with the next ``seq`` and return it; ``on_written(seq)`` is called as
+        soon as the line is written, before the lock is released."""
         self._require_no_transaction()
         _check_size(filename, body)
         path = self._store.paths.root / filename
@@ -182,6 +195,8 @@ class RecordWriter:
             except BaseException:
                 self._give_back(counter, seq)
                 raise
+            if on_written is not None:
+                on_written(seq)
         return seq
 
     def _give_back(self, counter: str, seq: int) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import math
@@ -700,6 +701,25 @@ def test_a_failed_append_restores_the_previous_state_not_zero(
     monkeypatch.setattr(log_writer, "append_line", real)
     assert warn(writer, "first") is False  # still "first": not re-armed by the failure
     assert warn(writer, "second") is True
+
+
+def test_an_error_after_a_completed_append_keeps_the_warning_state(
+    writer: RecordWriter, store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = log_writer.locked
+
+    @contextlib.contextmanager
+    def interrupted_on_release(path: Path) -> Iterator[int]:
+        with real(path) as fd:
+            yield fd
+        raise KeyboardInterrupt  # after the line was written and the lock released
+
+    monkeypatch.setattr(log_writer, "locked", interrupted_on_release)
+    with pytest.raises(KeyboardInterrupt):
+        warn(writer, "bad")
+    monkeypatch.setattr(log_writer, "locked", real)
+    assert warn(writer, "bad") is False  # the state stayed recorded: not logged twice
+    assert [r["message"] for r in records(store, "log.jsonl")] == ["state bad"]
 
 
 @pytest.mark.parametrize(
