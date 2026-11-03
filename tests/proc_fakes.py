@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 from dataclasses import dataclass, field
 
+from jobsctl.gateway_proc import validate_pid, validate_signal
 from jobsctl.proc_host import BootIdUnavailable, GroupScan, ProcInfo
 
 
@@ -19,6 +20,9 @@ class FakeHost:
     procs: dict[int, ProcInfo] = field(default_factory=dict)
     # pid -> exception raised by process_info (PermissionError, ProcParseError, ...)
     info_errors: dict[int, Exception] = field(default_factory=dict)
+    # pid -> Tgid reported for it (default: the pid itself, as for a thread-group leader)
+    tgids: dict[int, int] = field(default_factory=dict)
+    hidden: bool = False  # /proc hides other users' processes (hidepid=2)
     pidfd_ok: bool = True
     pidfd_open_error: OSError | None = None
     pidfd_send_error: dict[int, OSError] = field(default_factory=dict)  # by flags
@@ -43,9 +47,18 @@ class FakeHost:
             raise self.info_errors[pid]
         return self.procs.get(pid)
 
+    def thread_group_id(self, pid: int) -> int | None:
+        if pid not in self.procs:
+            return None
+        return self.tgids.get(pid, pid)
+
+    def procs_hidden(self) -> bool:
+        return self.hidden
+
     def scan_group(self, pgid: int) -> GroupScan:
         members = tuple(p for p in self.procs.values() if p.pgid == pgid)
         unreadable = sum(1 for pid in self.info_errors if pid not in self.procs)
+        unreadable += 1 if self.hidden else 0
         return GroupScan(members, unreadable)
 
     def pidfd_supported(self) -> bool:
@@ -68,7 +81,10 @@ class FakeHost:
         return self.pidfd_pid_value if self.pidfd_pid_value is not None else self._fds[fd]
 
     def pidfd_send_signal(self, fd: int, sig: int, flags: int = 0) -> None:
+        validate_signal(sig)
         self.calls.append(("pidfd_send_signal", self._fds[fd], sig, flags))
+        if self._fds[fd] not in self.procs:
+            raise oserror(errno.ESRCH)  # like the kernel: a pidfd to a reaped process
         if self.send_error_all is not None:
             raise self.send_error_all
         if flags in self.pidfd_send_error:
@@ -78,11 +94,15 @@ class FakeHost:
         self.calls.append(("close", self._fds.pop(fd)))
 
     def kill(self, pid: int, sig: int) -> None:
+        validate_pid(pid)
+        validate_signal(sig)
         self.calls.append(("kill", pid, sig))
         if self.kill_error is not None:
             raise self.kill_error
 
     def killpg(self, pgid: int, sig: int) -> None:
+        validate_pid(pgid)
+        validate_signal(sig)
         self.calls.append(("killpg", pgid, sig))
         if self.killpg_error is not None:
             raise self.killpg_error

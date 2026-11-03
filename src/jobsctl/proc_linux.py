@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 from . import gateway_proc
-from .proc_identity import validate_pid
+from .gateway_proc import validate_pid
 
 __all__ = [
     "get_dumpable",
@@ -50,13 +50,14 @@ def is_child_subreaper() -> bool | None:
     return gateway_proc.prctl_get_int(gateway_proc.PR_GET_CHILD_SUBREAPER) == 1
 
 
-def wait_exited_keep(pid: int) -> None:
-    """Block until child ``pid`` has exited without reaping it (``WEXITED | WNOWAIT``), so the
-    PID and process group id stay reserved. Raises ``OSError(ENOSYS)`` where ``os.waitid`` is
-    missing (macOS CPython; the shim needs another wait there).
+def wait_exited_keep(pid: int, *, nohang: bool = False) -> os.waitid_result | None:
+    """Wait until child ``pid`` has exited without reaping it (``WEXITED | WNOWAIT``), so the
+    PID and process group id stay reserved. Blocks by default; with ``nohang`` returns ``None``
+    at once if the child has not exited. Raises ``OSError(ENOSYS)`` where ``os.waitid`` is
+    missing (macOS CPython; held-leader waiting there is owned by issue #28).
     """
     validate_pid(pid)
-    gateway_proc.waitid_nowait(pid)
+    return gateway_proc.waitid_nowait(pid, nohang)
 
 
 def reap_held_leader(proc: subprocess.Popen[bytes] | subprocess.Popen[str]) -> int | None:

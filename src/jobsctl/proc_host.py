@@ -9,6 +9,7 @@ takes a ``Host``, so unit tests use fakes and never signal anything.
 from __future__ import annotations
 
 import errno
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +57,8 @@ class Host(Protocol):
 
     def boot_id(self) -> str: ...
     def process_info(self, pid: int) -> ProcInfo | None: ...
+    def thread_group_id(self, pid: int) -> int | None: ...
+    def procs_hidden(self) -> bool: ...
     def scan_group(self, pgid: int) -> GroupScan: ...
     def pidfd_supported(self) -> bool: ...
     def pidfd_open(self, pid: int) -> int: ...
@@ -80,7 +83,8 @@ def parse_proc_stat(raw: bytes, pid: int) -> ProcInfo:
     if raw[:lparen].strip() != str(pid).encode():
         raise ProcParseError("stat pid does not match")
     fields = raw[rparen + 1 :].split()
-    # fields[0] is field 3 (state); field 22 (starttime) is fields[19]
+    # fields[0] is field 3 (state); field 20 (num_threads) is fields[17], field 22 (starttime)
+    # is fields[19]
     if len(fields) < 20:
         raise ProcParseError("too few stat fields")
     state = fields[0].decode("ascii", "replace")
@@ -89,12 +93,39 @@ def parse_proc_stat(raw: bytes, pid: int) -> ProcInfo:
     try:
         ppid = int(fields[1])
         pgid = int(fields[2])
+        threads = int(fields[17])
         start = int(fields[19])
     except ValueError as exc:
         raise ProcParseError("non-numeric stat field") from exc
     if ppid < 0 or pgid < 0 or not 0 <= start <= _MAX_START:
         raise ProcParseError("stat field out of range")
-    return ProcInfo(pid, ppid, pgid, start, state, state in "ZX")
+    # A thread-group leader whose main thread exited reads Z while other threads still run:
+    # it is alive. Only a Z with no other thread is a zombie.
+    zombie = state == "X" or (state == "Z" and threads <= 1)
+    return ProcInfo(pid, ppid, pgid, start, state, zombie)
+
+
+_MOUNTINFO_LIMIT = 1024 * 1024
+_HIDING = frozenset({"2", "4", "invisible", "ptraceable"})
+
+
+def _mountinfo_hides_procs(text: str) -> bool:
+    """Whether the (last) mount at ``/proc`` has ``hidepid`` hiding other users' processes.
+
+    No ``/proc`` mount found counts as hidden (unknown).
+    """
+    found = False
+    hides = False
+    for line in text.splitlines():
+        left, sep, right = line.partition(" - ")
+        fields = left.split()
+        if not sep or len(fields) < 6 or fields[4] != "/proc":
+            continue
+        found = True
+        tail = right.split()  # fstype, source, super options
+        opts = [*fields[5].split(","), *(tail[2].split(",") if len(tail) > 2 else [])]
+        hides = any(o.startswith("hidepid=") and o[8:] in _HIDING for o in opts)
+    return hides or not found
 
 
 def _read_limited(path: Path, limit: int) -> bytes:
@@ -120,6 +151,35 @@ class LinuxHost(_SignalOps):
 
     def __init__(self, proc_root: Path = Path("/proc")) -> None:
         self._root = proc_root
+
+    def procs_hidden(self) -> bool:
+        """Whether ``/proc`` hides other users' processes (``hidepid=2``/``invisible``).
+
+        Read from the ``/proc`` mount in ``<root>/self/mountinfo``. If that cannot be read or
+        no ``/proc`` mount is found, assume hidden: a conservative answer only makes callers
+        report "unknown" where they would have said "gone".
+        """
+        try:
+            raw = _read_limited(self._root / "self/mountinfo", _MOUNTINFO_LIMIT)
+        except OSError:
+            return True
+        return _mountinfo_hides_procs(raw.decode("utf-8", "replace"))
+
+    def thread_group_id(self, pid: int) -> int | None:
+        """The ``Tgid`` of ``pid`` (its own PID unless ``pid`` is a thread ID); ``None`` if
+        the process is gone. ``ProcParseError`` if ``status`` has no valid ``Tgid`` line.
+        """
+        try:
+            raw = _read_limited(self._root / str(pid) / "status", _STAT_LIMIT)
+        except (FileNotFoundError, ProcessLookupError, NotADirectoryError):
+            return None
+        for line in raw.split(b"\n"):
+            if line.startswith(b"Tgid:"):
+                try:
+                    return int(line[5:].strip())
+                except ValueError:
+                    break
+        raise ProcParseError("no Tgid in status")
 
     def boot_id(self) -> str:
         try:
@@ -149,6 +209,8 @@ class LinuxHost(_SignalOps):
             names = [n.name for n in self._root.iterdir()]
         except OSError:
             return GroupScan((), 1)
+        if self.procs_hidden():
+            unreadable += 1  # other users' processes are invisible: the scan is incomplete
         for name in names:
             if not (name.isascii() and name.isdecimal()):
                 continue
@@ -183,7 +245,10 @@ class DarwinHost(_SignalOps):
         self._lib = libproc if libproc is not None else gateway_proc.DarwinLibproc()
 
     def boot_id(self) -> str:
-        text = self._lib.boot_uuid().strip()
+        try:
+            text = self._lib.boot_uuid().strip()
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise BootIdUnavailable(f"kern.bootsessionuuid: {exc}") from exc
         if not text or len(text) > 64:
             raise BootIdUnavailable("kern.bootsessionuuid is empty or malformed")
         return text
@@ -194,6 +259,12 @@ class DarwinHost(_SignalOps):
             return None
         ppid, pgid, sec, usec, zombie = got
         return ProcInfo(pid, ppid, pgid, sec * 1_000_000 + usec, "Z" if zombie else "R", zombie)
+
+    def thread_group_id(self, pid: int) -> int | None:
+        return pid if self._lib.bsdinfo(pid) is not None else None
+
+    def procs_hidden(self) -> bool:
+        return False
 
     def scan_group(self, pgid: int) -> GroupScan:
         members: list[ProcInfo] = []

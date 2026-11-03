@@ -14,7 +14,7 @@ import pytest
 
 from jobsctl import gateway_proc
 from jobsctl.proc_group import probe_group
-from jobsctl.proc_host import LinuxHost
+from jobsctl.proc_host import LinuxHost, ProcParseError
 from jobsctl.proc_identity import Identity, Liveness, check_identity, identify
 from jobsctl.proc_linux import (
     get_dumpable,
@@ -26,6 +26,7 @@ from jobsctl.proc_linux import (
 )
 from jobsctl.proc_signal import Result, signal_group, signal_process
 
+from . import proc_real
 from .proc_real import Spawner, spawner_fixture
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc and pidfd tests")
@@ -152,6 +153,91 @@ def test_unreadable_stat_means_unknown_not_dead(spawner: Spawner, tmp_path):
     assert res.state is Liveness.UNKNOWN
 
 
+# --- spawner teardown, thread-group leaders, thread ids, non-blocking wait -----------------
+
+THREAD_EXIT_CHILD = (
+    "import ctypes, threading, time\n"
+    "threading.Thread(target=time.sleep, args=(600,)).start()\n"
+    "print('ready', flush=True)\n"
+    "ctypes.CDLL(None).pthread_exit(None)\n"
+)
+THREAD_ID_CHILD = (
+    "import threading, time\n"
+    "def f():\n"
+    "    print(threading.get_native_id(), flush=True); time.sleep(600)\n"
+    "threading.Thread(target=f).start(); time.sleep(600)\n"
+)
+
+
+def start_python(spawner: Spawner, code: str):
+    popen = subprocess.Popen(
+        [sys.executable, "-I", "-c", code],
+        stdout=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        env={"HOME": os.environ["HOME"], "PATH": os.environ.get("PATH", "")},
+    )
+    child = spawner.track(popen)
+    assert popen.stdout is not None
+    return child, popen.stdout.readline().split()
+
+
+@pytest.mark.parametrize("group", [False, True])
+def test_teardown_kills_and_reaps_when_pidfd_open_fails(
+    group: bool, monkeypatch: pytest.MonkeyPatch
+):
+    sp = Spawner()
+
+    def boom(pid: int) -> int:
+        raise OSError(errno.EMFILE, "forced")
+
+    monkeypatch.setattr(proc_real, "_open_pidfd", boom)
+    with pytest.raises(OSError):
+        sp.spawn(group=group, grandchildren=1)
+    monkeypatch.undo()
+    (child,) = sp.children
+    assert child.pidfd is None and child.popen.poll() is None  # the SIGTERM-ignoring sleeper runs
+    sp.teardown()
+    assert child.popen.returncode == -signal.SIGKILL
+
+
+def test_main_thread_exit_leader_is_alive_and_signalable(spawner: Spawner):
+    child, line = start_python(spawner, THREAD_EXIT_CHILD)
+    assert line == [b"ready"]
+    ident = identify(HOST, child.pid)
+
+    def fields() -> list[bytes]:
+        raw = open(f"/proc/{child.pid}/stat", "rb").read()
+        return raw[raw.rindex(b")") + 1 :].split()
+
+    assert wait_until(lambda: fields()[0] == b"Z")  # the main thread is gone
+    assert int(fields()[17]) == 2  # one thread still runs
+    res = check_identity(HOST, ident)
+    assert res.alive and res.info is not None and res.info.state == "Z"
+    out = signal_process(HOST, ident, signal.SIGTERM)
+    assert out.sent
+    assert child.popen.wait(timeout=10) == -signal.SIGTERM
+
+
+def test_identify_refuses_a_real_thread_id(spawner: Spawner):
+    child, line = start_python(spawner, THREAD_ID_CHILD)
+    tid = int(line[0])
+    assert tid != child.pid and HOST.process_info(tid) is not None  # /proc/<tid>/stat parses
+    with pytest.raises(ProcParseError):
+        identify(HOST, tid)
+    assert identify(HOST, child.pid).pid == child.pid
+
+
+def test_wait_exited_keep_nohang_then_held_zombie(spawner: Spawner):
+    child = spawner.spawn()
+    assert wait_exited_keep(child.pid, nohang=True) is None
+    os.kill(child.pid, signal.SIGKILL)  # own unreaped child, exact PID
+    assert wait_until(lambda: wait_exited_keep(child.pid, nohang=True) is not None)
+    info = HOST.process_info(child.pid)
+    assert info is not None and info.state == "Z"  # still unreaped
+    assert child.popen.returncode is None
+    assert reap_held_leader(child.popen) == -signal.SIGKILL
+
+
 # --- dumpability (spike C4) -----------------------------------------------------------------
 
 DUMPABLE_CHILD = (
@@ -265,7 +351,8 @@ def test_group_signal_refused_for_non_leader(spawner: Spawner):
     ident = identify(HOST, child.pid)
     assert HOST.process_info(child.pid).pgid != child.pid  # type: ignore[union-attr]
     out = signal_group(HOST, ident, signal.SIGKILL)
-    assert out.result is Result.NOT_LEADER
+    # no group is numbered by this PID: nothing to signal
+    assert out.result is Result.NOT_ALIVE and out.detail == "gone"
     assert child.popen.poll() is None
 
 

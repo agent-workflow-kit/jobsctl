@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import errno
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from jobsctl.proc_group import probe_group
 from jobsctl.proc_host import (
     BootIdUnavailable,
     DarwinHost,
@@ -26,12 +28,13 @@ from .proc_fakes import FakeHost, proc
 
 
 def stat_line(
-    pid: int, comm: bytes, state: bytes = b"S", start: int = 4242, pgrp: int = 7
+    pid: int, comm: bytes, state: bytes = b"S", start: int = 4242, pgrp: int = 7, threads: int = 1
 ) -> bytes:
     # fields 4.. after the state: ppid pgrp session tty tpgid flags minflt cminflt majflt
     # cmajflt utime stime cutime cstime priority nice threads itrealvalue starttime ...
     rest = [state, b"1", str(pgrp).encode(), b"7", b"0", b"-1", b"4194304"]
-    rest += [b"0"] * 4 + [b"0"] * 4 + [b"20", b"0", b"1", b"0", str(start).encode(), b"1", b"2"]
+    rest += [b"0"] * 4 + [b"0"] * 4 + [b"20", b"0", str(threads).encode(), b"0"]
+    rest += [str(start).encode(), b"1", b"2"]
     return str(pid).encode() + b" (" + comm + b") " + b" ".join(rest) + b"\n"
 
 
@@ -66,6 +69,19 @@ def test_parse_zombie_state():
     assert info.zombie and info.state == "Z"
 
 
+def test_parse_zombie_state_with_live_threads_is_alive():
+    info = parse_proc_stat(stat_line(10, b"z", state=b"Z", threads=2), 10)
+    assert info.state == "Z" and not info.zombie
+
+
+def test_parse_zombie_state_single_thread_is_zombie():
+    assert parse_proc_stat(stat_line(10, b"z", state=b"Z", threads=1), 10).zombie
+
+
+def test_parse_dead_state_x_is_dead_whatever_the_threads():
+    assert parse_proc_stat(stat_line(10, b"z", state=b"X", threads=3), 10).zombie
+
+
 @pytest.mark.parametrize(
     "raw",
     [
@@ -78,6 +94,7 @@ def test_parse_zombie_state():
         b"10 (sleep) S x 7 7 0 -1 0 " + b"0 " * 20,  # non-numeric ppid
         stat_line(10, b"sleep", start=-5),  # negative start
         b"(sleep) S 1 7 7",  # no pid
+        stat_line(10, b"sleep").replace(b" 20 0 1 0 ", b" 20 0 x 0 "),  # non-numeric threads
     ],
 )
 def test_parse_malformed_is_an_error_not_a_guess(raw: bytes):
@@ -99,7 +116,16 @@ def proc_root(tmp_path: Path) -> Path:
     root = tmp_path / "proc"
     (root / "sys/kernel/random").mkdir(parents=True)
     (root / "sys/kernel/random/boot_id").write_text("1234-abcd\n")
+    (root / "self").mkdir()
+    write_mountinfo(root, "rw,relatime")
     return root
+
+
+MOUNTINFO = "25 20 0:23 / /proc rw,nosuid,nodev,noexec,relatime shared:13 - proc proc {opts}\n"
+
+
+def write_mountinfo(root: Path, opts: str) -> None:
+    (root / "self/mountinfo").write_text(MOUNTINFO.format(opts=opts))
 
 
 def add_proc(root: Path, pid: int, raw: bytes) -> None:
@@ -159,11 +185,90 @@ def test_linux_scan_group_counts_unreadable_and_skips_non_pids(proc_root: Path):
     add_proc(proc_root, 31, stat_line(31, b"b", pgrp=30))
     add_proc(proc_root, 32, stat_line(32, b"c", pgrp=99))
     add_proc(proc_root, 33, b"garbage")
-    (proc_root / "self").mkdir()
     (proc_root / "cpuinfo").write_text("x")
     scan = LinuxHost(proc_root).scan_group(30)
     assert sorted(m.pid for m in scan.members) == [30, 31]
     assert scan.unreadable == 1  # pid 33 could not be parsed
+
+
+# --- hidepid and thread ids (R1-7, R1-6) ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "opts", ["rw,hidepid=2", "rw,hidepid=invisible", "rw,gid=1000,hidepid=2,subset=pid"]
+)
+def test_linux_hidepid_detected(proc_root: Path, opts: str):
+    write_mountinfo(proc_root, opts)
+    assert LinuxHost(proc_root).procs_hidden()
+
+
+@pytest.mark.parametrize("opts", ["rw", "rw,hidepid=0", "rw,hidepid=1", "rw,hidepid=off"])
+def test_linux_not_hidden(proc_root: Path, opts: str):
+    write_mountinfo(proc_root, opts)
+    assert not LinuxHost(proc_root).procs_hidden()
+
+
+def test_linux_unreadable_or_proc_less_mountinfo_is_assumed_hidden(proc_root: Path):
+    (proc_root / "self/mountinfo").write_text("1 0 0:1 / / rw - ext4 /dev/sda rw\n")
+    assert LinuxHost(proc_root).procs_hidden()
+    (proc_root / "self/mountinfo").unlink()
+    assert LinuxHost(proc_root).procs_hidden()
+
+
+def test_linux_hidepid_makes_group_scan_incomplete(proc_root: Path):
+    add_proc(proc_root, 30, stat_line(30, b"a", pgrp=30))
+    write_mountinfo(proc_root, "rw,hidepid=2")
+    scan = LinuxHost(proc_root).scan_group(30)
+    assert scan.unreadable >= 1 and [m.pid for m in scan.members] == [30]
+
+
+def test_linux_hidepid_missing_process_is_unknown_not_dead(proc_root: Path):
+    write_mountinfo(proc_root, "rw,hidepid=2")
+    res = check_identity(LinuxHost(proc_root), Identity("1234-abcd", 77, 5))
+    assert res.state is Liveness.UNKNOWN and res.reason == "hidepid"
+
+
+def test_linux_visible_missing_process_is_dead(proc_root: Path):
+    res = check_identity(LinuxHost(proc_root), Identity("1234-abcd", 77, 5))
+    assert res.state is Liveness.DEAD and res.reason == "gone"
+
+
+def test_fake_hidden_missing_process_is_unknown_and_group_probe_incomplete():
+    host = FakeHost(hidden=True)
+    assert check_identity(host, Identity("boot-1", 5, 9)).state is Liveness.UNKNOWN
+    assert not probe_group(host, 5).complete
+
+
+def add_status(root: Path, pid: int, tgid: int) -> None:
+    (root / str(pid) / "status").write_text(f"Name:\tx\nTgid:\t{tgid}\nPid:\t{pid}\n")
+
+
+def test_linux_thread_group_id_reads_tgid(proc_root: Path):
+    add_proc(proc_root, 20, stat_line(20, b"x"))
+    add_status(proc_root, 20, 19)
+    host = LinuxHost(proc_root)
+    assert host.thread_group_id(20) == 19
+    assert host.thread_group_id(21) is None
+
+
+def test_linux_thread_group_id_without_tgid_is_a_parse_error(proc_root: Path):
+    add_proc(proc_root, 20, stat_line(20, b"x"))
+    (proc_root / "20" / "status").write_text("Name:\tx\n")
+    with pytest.raises(ProcParseError):
+        LinuxHost(proc_root).thread_group_id(20)
+
+
+def test_identify_refuses_a_thread_id():
+    host = FakeHost(procs={50: proc(50, start=321)}, tgids={50: 40})
+    with pytest.raises(ProcParseError):
+        identify(host, 50)
+
+
+def test_identify_refuses_when_tgid_unreadable(proc_root: Path):
+    add_proc(proc_root, 20, stat_line(20, b"x"))  # no status file content with Tgid
+    (proc_root / "20" / "status").write_text("")
+    with pytest.raises(ProcParseError):
+        identify(LinuxHost(proc_root), 20)
 
 
 # --- identify / check_identity (fake host) --------------------------------------------------
@@ -313,6 +418,34 @@ def test_darwin_boot_uuid_empty_is_unavailable():
     lib.uuid = ""
     with pytest.raises(BootIdUnavailable):
         DarwinHost(lib).boot_id()
+
+
+@pytest.mark.parametrize(
+    "exc", [FileNotFoundError(2, "no sysctl"), subprocess.TimeoutExpired("s", 5)]
+)
+def test_darwin_sysctl_failure_is_boot_id_unavailable(
+    exc: Exception, monkeypatch: pytest.MonkeyPatch
+):
+    argv: list[list[str]] = []
+
+    def boom(a: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+        argv.append(a)
+        raise exc
+
+    monkeypatch.setattr("jobsctl.gateway.run", boom)
+    host = DarwinHost()
+    with pytest.raises(BootIdUnavailable):
+        host.boot_id()
+    assert argv[0][0] == "/usr/sbin/sysctl"
+    res = check_identity(host, Identity("AAAA", 40, 5))
+    assert res.state is Liveness.UNKNOWN and res.reason == "boot_id_unavailable"
+
+
+def test_darwin_sysctl_nonzero_exit_is_boot_id_unavailable(monkeypatch: pytest.MonkeyPatch):
+    done = subprocess.CompletedProcess(["x"], 1, stdout="junk\n", stderr="")
+    monkeypatch.setattr("jobsctl.gateway.run", lambda a, **kw: done)
+    with pytest.raises(BootIdUnavailable):
+        DarwinHost().boot_id()
 
 
 def test_darwin_has_no_pidfds():

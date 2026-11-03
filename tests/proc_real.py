@@ -1,9 +1,11 @@
 """Real-process fixture: every child is recorded at launch and killed by that exact handle.
 
-Never kills by pattern. Each child holds a pidfd opened right after the spawn (while the
-child is still our unreaped child, so its PID cannot have been reused). Teardown signals
-SIGKILL through that pidfd, and to the recorded process group only while the leader is still
-unreaped (so the pgid is reserved), then reaps by exact PID.
+Never kills by pattern. A child is recorded the moment it is spawned, then gets a pidfd (while
+it is still our unreaped child, so its PID cannot have been reused); grandchildren are recorded
+as the child announces them. Teardown, even after a partial failure, signals SIGKILL to the
+group the fixture created (``group=True``) only while the leader is unreaped (so the pgid is
+reserved), then through each recorded pidfd (``Popen.kill`` if the child has none), reaps the
+child by exact PID and closes every fd.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ import pytest
 from jobsctl import gateway_proc
 
 # A child that ignores SIGTERM, optionally renames itself (prctl PR_SET_NAME) and optionally
-# starts N grandchildren that also ignore SIGTERM. Prints "ready <grandchild pids...>".
+# starts N grandchildren that also ignore SIGTERM. Prints "kid <pid>" per grandchild, then "ready".
 CHILD = textwrap.dedent(
     """
     import ctypes, os, signal, subprocess, sys, time
@@ -34,9 +36,10 @@ CHILD = textwrap.dedent(
         k = subprocess.Popen([sys.executable, "-I", "-c",
             "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
             "print('up', flush=True); time.sleep(600)"], stdout=subprocess.PIPE)
+        print("kid", k.pid, flush=True)
         k.stdout.readline()
         kids.append(k.pid)
-    print("ready", *kids, flush=True)
+    print("ready", flush=True)
     time.sleep(600)
     """
 )
@@ -67,16 +70,25 @@ class Spawner:
             process_group=0 if group else None,
             env={"HOME": os.environ["HOME"], "PATH": os.environ.get("PATH", "")},
         )
-        fd = _open_pidfd(popen.pid)
-        child = Child(popen, fd, popen.pid if group else None)
-        self.children.append(child)
+        child = self.track(popen, group=group)
         assert popen.stdout is not None
-        line = popen.stdout.readline().split()
-        assert line and line[0] == b"ready", line
-        child.grandchildren = [int(p) for p in line[1:]]
-        # grandchildren are not our children: open pidfds now, while we hold the leader
-        for gpid in child.grandchildren:
+        while True:
+            line = popen.stdout.readline().split()
+            assert line, "child exited before it was ready"
+            if line[0] == b"ready":
+                return child
+            assert line[0] == b"kid", line
+            # grandchildren are not our children: record and open a pidfd right away, while
+            # we hold the leader
+            gpid = int(line[1])
+            child.grandchildren.append(gpid)
             child.grand_fds.append(_open_pidfd(gpid))
+
+    def track(self, popen: subprocess.Popen[bytes], *, group: bool = False) -> Child:
+        """Record ``popen`` for teardown at once, then open its pidfd."""
+        child = Child(popen, None, popen.pid if group else None)
+        self.children.append(child)
+        child.pidfd = _open_pidfd(popen.pid)
         return child
 
     def teardown(self) -> None:
@@ -89,15 +101,23 @@ def _open_pidfd(pid: int) -> int:
 
 
 def _kill_child(child: Child) -> None:
+    if child.popen.returncode is None and child.pgid is not None:
+        try:  # the group this fixture created; the leader is unreaped, so the pgid is ours
+            gateway_proc.killpg(child.pgid, signal.SIGKILL)
+        except OSError:
+            pass
     for fd in child.grand_fds:
         try:
             gateway_proc.pidfd_send_signal(fd, signal.SIGKILL)
         except OSError:
             pass  # already gone
         os.close(fd)
-    if child.popen.returncode is None and child.pidfd is not None:
+    if child.popen.returncode is None:
         try:
-            gateway_proc.pidfd_send_signal(child.pidfd, signal.SIGKILL)
+            if child.pidfd is not None:
+                gateway_proc.pidfd_send_signal(child.pidfd, signal.SIGKILL)
+            else:
+                child.popen.kill()  # unreaped child: its PID cannot have been reused
         except OSError:
             pass
     if child.popen.returncode is None:

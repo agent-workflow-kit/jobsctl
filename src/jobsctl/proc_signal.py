@@ -22,14 +22,13 @@ import enum
 import errno
 from dataclasses import dataclass
 
-from .gateway_proc import PIDFD_SIGNAL_PROCESS_GROUP
+from .gateway_proc import PIDFD_SIGNAL_PROCESS_GROUP, validate_pid, validate_signal
 from .proc_host import Host
-from .proc_identity import Identity, Liveness, LivenessResult, check_identity, validate_pid
+from .proc_identity import Identity, Liveness, LivenessResult, check_identity
 
 __all__ = ["Result", "SignalOutcome", "signal_group", "signal_process"]
 
 _FALLBACK_ERRNOS = frozenset({errno.ENOSYS, errno.EPERM})
-_MAX_SIGNAL = 64
 
 
 class Result(enum.Enum):
@@ -37,7 +36,6 @@ class Result(enum.Enum):
     NOT_ALIVE = "not_alive"  # gone, reused PID, new boot or zombie: nothing was signaled
     UNKNOWN = "unknown"  # identity could not be established: nothing was signaled
     DENIED = "denied"  # the kernel refused the signal (EPERM)
-    NOT_LEADER = "not_leader"  # group signal: the process is not leader of its own group
     ERROR = "error"  # an unexpected OS error; nothing is known to have been signaled
 
 
@@ -52,29 +50,17 @@ class SignalOutcome:
         return self.result is Result.SENT
 
 
-def _check_signal(sig: int) -> int:
-    if isinstance(sig, bool) or not isinstance(sig, int) or not 1 <= sig <= _MAX_SIGNAL:
-        raise ValueError(f"unsafe signal number: {sig!r}")
-    return sig
-
-
 def _refuse(res: LivenessResult, *, method: str | None) -> SignalOutcome:
     kind = Result.UNKNOWN if res.state is Liveness.UNKNOWN else Result.NOT_ALIVE
     return SignalOutcome(kind, method, res.reason)
 
 
-def _verify(host: Host, ident: Identity, allow_zombie: bool, group: bool) -> SignalOutcome | None:
-    """``None`` if the identity (and, for a group, leadership) holds; else the refusal."""
-    res = check_identity(host, ident, allow_zombie=allow_zombie)
-    if not res.alive:
-        return _refuse(res, method=None)
-    if group and (res.info is None or res.info.pgid != ident.pid):
-        return SignalOutcome(Result.NOT_LEADER, None, "process is not its own group leader")
-    return None
+def _verify(host: Host, ident: Identity, allow_zombie: bool) -> LivenessResult:
+    return check_identity(host, ident, allow_zombie=allow_zombie)
 
 
 def _pidfd_path(
-    host: Host, ident: Identity, sig: int, flags: int, allow_zombie: bool, group: bool
+    host: Host, ident: Identity, sig: int, flags: int, allow_zombie: bool
 ) -> SignalOutcome | None:
     """Try the pidfd path. ``None`` means: use the fallback (unavailable here)."""
     if not host.pidfd_supported():
@@ -91,9 +77,12 @@ def _pidfd_path(
             return None
         return SignalOutcome(Result.ERROR, method, f"pidfd_open: {exc.strerror}")
     try:
-        refusal = _verify(host, ident, allow_zombie, group)
-        if refusal is not None:
-            return SignalOutcome(refusal.result, method, refusal.detail)
+        res = _verify(host, ident, allow_zombie)
+        if not res.alive:
+            return _refuse(res, method=method)
+        if flags and (res.info is None or res.info.pgid != ident.pid):
+            # the leader left its group: the flag would hit its current group, not the job's
+            return None
         held = host.pidfd_pid(fd)
         if held is not None and held != ident.pid:
             # -1 means the process behind the pidfd already exited; anything else, a mismatch
@@ -117,9 +106,9 @@ def _fallback(
     host: Host, ident: Identity, sig: int, allow_zombie: bool, group: bool
 ) -> SignalOutcome:
     method = "killpg" if group else "kill"
-    refusal = _verify(host, ident, allow_zombie, group)
-    if refusal is not None:
-        return SignalOutcome(refusal.result, method, refusal.detail)
+    res = _verify(host, ident, allow_zombie)
+    if not res.alive:
+        return _refuse(res, method=method)
     try:
         if group:
             host.killpg(ident.pid, sig)
@@ -139,8 +128,8 @@ def signal_process(
 ) -> SignalOutcome:
     """Send ``sig`` to the exact process ``ident``, only while its identity holds."""
     validate_pid(ident.pid)
-    _check_signal(sig)
-    out = _pidfd_path(host, ident, sig, 0, allow_zombie, group=False)
+    validate_signal(sig)
+    out = _pidfd_path(host, ident, sig, 0, allow_zombie)
     if out is not None:
         return out
     return _fallback(host, ident, sig, allow_zombie, group=False)
@@ -151,15 +140,19 @@ def signal_group(
 ) -> SignalOutcome:
     """Send ``sig`` to the process group whose leader is ``leader`` (pgid == leader PID).
 
-    The group is signaled only while ``leader`` verifiably is that group's leader. The caller
-    that spawned the leader keeps it unreaped (``allow_zombie``), which reserves the pgid.
-    ``use_pidfd`` selects ``PIDFD_SIGNAL_PROCESS_GROUP`` (Linux 6.9+, for a leader that is not
-    the caller's child); older kernels (``EINVAL``) fall back to ``killpg`` with a re-check.
+    The group is addressed by the leader's PID and signaled only while the leader's identity
+    holds (alive, or held unreaped with ``allow_zombie``), which reserves that PID and so the
+    group id, even after the leader left the group. If the leader still is its own group's
+    leader, ``use_pidfd`` selects ``PIDFD_SIGNAL_PROCESS_GROUP`` (Linux 6.9+, for a leader that
+    is not the caller's child); older kernels (``EINVAL``) fall back to ``killpg`` with a
+    re-check. If it left the group the flag is never used (it targets the leader's current
+    group): ``killpg(leader PID)`` follows an identity re-check, and ``ESRCH`` (no such group)
+    reads as ``NOT_ALIVE``.
     """
     validate_pid(leader.pid)
-    _check_signal(sig)
+    validate_signal(sig)
     if use_pidfd:
-        out = _pidfd_path(host, leader, sig, PIDFD_SIGNAL_PROCESS_GROUP, allow_zombie, group=True)
+        out = _pidfd_path(host, leader, sig, PIDFD_SIGNAL_PROCESS_GROUP, allow_zombie)
         if out is not None:
             return out
     return _fallback(host, leader, sig, allow_zombie, group=True)

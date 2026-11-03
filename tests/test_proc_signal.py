@@ -162,10 +162,74 @@ def test_group_requires_leader_and_uses_killpg_with_recheck():
     assert host.calls[-1] == ("killpg", 5, signal.SIGTERM)
 
 
-def test_group_refused_when_process_is_not_its_own_leader():
-    host = FakeHost(procs={5: proc(5, start=9, pgid=2000)})
+def test_group_signaled_by_leader_pid_after_leader_left_the_group():
+    # leader 5 moved to group 2000; member 11 still is in group 5, numbered by the leader's PID
+    host = FakeHost(procs={5: proc(5, start=9, pgid=2000), 11: proc(11, pgid=5)})
+    out = signal_group(host, IDENT, signal.SIGKILL, use_pidfd=True)
+    assert out.sent and out.method == "killpg"
+    assert host.sent() == [("killpg", 5, signal.SIGKILL)]
+    assert not any(c[0] == "pidfd_send_signal" for c in host.calls)
+
+
+def test_group_leader_left_and_group_gone_is_not_alive():
+    host = FakeHost(
+        procs={5: proc(5, start=9, pgid=2000)}, killpg_error=ProcessLookupError(errno.ESRCH, "x")
+    )
     out = signal_group(host, IDENT, signal.SIGKILL)
-    assert out.result is Result.NOT_LEADER and host.sent() == []
+    assert out.result is Result.NOT_ALIVE and out.detail == "gone"
+
+
+def test_group_leader_left_rechecks_identity_before_killpg():
+    host = FakeHost(procs={5: proc(5, start=9, pgid=2000)})
+    signal_group(host, IDENT, signal.SIGKILL)
+    assert names(host)[-2:] == ["process_info", "killpg"]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: gateway_proc.kill(-1, 15),
+        lambda: gateway_proc.kill(0, 15),
+        lambda: gateway_proc.kill(1, 15),
+        lambda: gateway_proc.kill(5, 0),
+        lambda: gateway_proc.kill(5, 65),
+        lambda: gateway_proc.kill(True, 15),
+        lambda: gateway_proc.killpg(0, 9),
+        lambda: gateway_proc.killpg(-1, 9),
+        lambda: gateway_proc.killpg(1, 9),
+        lambda: gateway_proc.killpg(5, 0),
+        lambda: gateway_proc.pidfd_send_signal(3, 0),
+        lambda: gateway_proc.pidfd_send_signal(3, 65),
+    ],
+)
+def test_gateway_sinks_refuse_unsafe_arguments(call, monkeypatch: pytest.MonkeyPatch):
+    def fail(*a: object) -> None:
+        pytest.fail("the OS was called")
+
+    monkeypatch.setattr("os.kill", fail)
+    monkeypatch.setattr("os.killpg", fail)
+    monkeypatch.setattr("signal.pidfd_send_signal", fail, raising=False)
+    monkeypatch.setattr(gateway_proc, "_raw_syscall", fail)
+    with pytest.raises(ValueError):
+        call()
+
+
+@pytest.mark.parametrize("method", ["kill", "killpg"])
+def test_fake_host_refuses_unsafe_arguments_like_the_gateway(method: str):
+    host = host_with()
+    with pytest.raises(ValueError):
+        getattr(host, method)(0, 9)
+    with pytest.raises(ValueError):
+        getattr(host, method)(5, 0)
+
+
+def test_fake_pidfd_signal_after_removal_is_esrch():
+    host = host_with()
+    fd = host.pidfd_open(5)
+    del host.procs[5]
+    with pytest.raises(OSError) as ei:
+        host.pidfd_send_signal(fd, 15)
+    assert ei.value.errno == errno.ESRCH
 
 
 def test_group_held_zombie_leader_is_signaled():

@@ -11,6 +11,7 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass
 
+from .gateway_proc import validate_pid
 from .proc_host import BootIdUnavailable, Host, ProcInfo, ProcParseError
 
 __all__ = [
@@ -23,18 +24,9 @@ __all__ = [
     "validate_pid",
 ]
 
-MAX_PID = 2**31 - 1
-
 
 class ProcessGone(Exception):
     """No process with that PID exists."""
-
-
-def validate_pid(pid: object) -> int:
-    """A PID jobsctl may ever signal: 2..2**31-1. 0, 1 and negatives mean groups or init."""
-    if isinstance(pid, bool) or not isinstance(pid, int) or not 1 < pid <= MAX_PID:
-        raise ValueError(f"unsafe pid: {pid!r}")
-    return pid
 
 
 @dataclass(frozen=True)
@@ -72,13 +64,18 @@ def identify(host: Host, pid: int) -> Identity:
     """The identity of the process now holding ``pid``.
 
     Raises ``ProcessGone``, ``BootIdUnavailable`` (never record an identity without a boot id),
-    ``PermissionError`` or ``ProcParseError``.
+    ``PermissionError`` or ``ProcParseError`` (also for a thread ID, which is not a process).
     """
     validate_pid(pid)
     boot = host.boot_id()
     info = host.process_info(pid)
     if info is None:
         raise ProcessGone(pid)
+    tgid = host.thread_group_id(pid)
+    if tgid is None:
+        raise ProcessGone(pid)
+    if tgid != pid:
+        raise ProcParseError(f"pid {pid} is a thread of process {tgid}, not a process")
     return Identity(boot, pid, info.start)
 
 
@@ -101,6 +98,8 @@ def check_identity(host: Host, ident: Identity, *, allow_zombie: bool = False) -
     except (ProcParseError, OSError):
         return LivenessResult(Liveness.UNKNOWN, "unreadable")
     if info is None:
+        if host.procs_hidden():
+            return LivenessResult(Liveness.UNKNOWN, "hidepid")
         return LivenessResult(Liveness.DEAD, "gone")
     if info.start != ident.start:
         return LivenessResult(Liveness.DEAD, "reused")

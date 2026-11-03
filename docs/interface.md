@@ -377,7 +377,9 @@ When the [timeout](#timeouts) expires the shim runs the sequence and ends the jo
 2. If the job's PID is still alive, or processes remain in the job's process group: SIGTERM to the job's process group.
 3. SIGKILL to the job's process group (and to the job's PID if it left the group).
 
-The shim keeps the job's group leader unreaped until the sequence and the leftover probe are done, so the process group id stays reserved and verifiable on every platform. Group signals are sent only to the process group the shim created for the job, and only while it is verified to be that group. Processes other than the job's own PID that left the group (e.g. a tmux server, which daemonizes into its own session) are never signaled.
+The shim keeps the job's group leader unreaped until the sequence and the leftover probe are done, so the process group id stays reserved and verifiable on every platform. Group signals are sent only to the process group the shim created for the job, and only while the leader's identity is verified.
+
+The group is addressed by the leader's PID while the leader's identity holds, even after the leader left the group, because the leader's PID stays reserved. Processes other than the job's own PID that left the group (e.g. a tmux server, which daemonizes into its own session) are never signaled.
 
 **Exact signals.** On Linux every signal that a jobsctl process (a shim, `_kill`, `cancel`, the firing process of a hook) sends to an exact PID (a shim, a job, a hook's leader) goes through `pidfd_open`, then an identity check of the pidfd's process ([Process identity](#process-identity)), then `pidfd_send_signal`. Where pidfds are unavailable (macOS; on Linux, an architecture outside the allow list of the system-call fallback, `ENOSYS`, `EPERM` from a seccomp filter, WSL1), jobsctl re-checks the identity immediately before `kill` or `killpg` and accepts the remaining window ([Residual risks](#residual-risks)).
 
@@ -407,6 +409,8 @@ A process identity is `(boot_id, pid, start)`:
 - **macOS:** `boot_id` from `sysctl kern.bootsessionuuid`; `start` from `proc_pidinfo(PROC_PIDTBSDINFO)` (seconds and microseconds) through `libproc`; never `ps` output.
 
 A process is alive only if a process with that PID exists in the current boot with the same start value. A zombie counts as not alive, except a job leader the shim keeps unreaped ([Signal sequence](#signal-sequence)). Wall-clock time is never used for identity.
+
+A zombie is a process in state `Z` with no live threads: a thread-group leader whose main thread exited while other threads run is alive. A PID recorded as an identity must be a thread-group leader, not a thread ID.
 
 ### Leases
 
@@ -798,6 +802,7 @@ Every TUI action is a CLI command.
 
 - **Linux and WSL:** identity from `/proc` ([Process identity](#process-identity)); the shim is a child subreaper; exact signals use pidfds where available ([Signal sequence](#signal-sequence)), and a `shim_lost` group signal uses `PIDFD_SIGNAL_PROCESS_GROUP` on Linux 6.9 or later ([Signal sequence](#signal-sequence)). Shutting down the WSL VM ends every shim and job; the next pass sees a new boot id and marks their jobs `lost`. A shutdown or a logout with `KillUserProcesses` sends SIGTERM to the shims, so their jobs end `failed` (`terminated`). Cron runs only if the distribution runs `cron`.
 - **macOS:** identity through `libproc` and `sysctl` (`kern.bootsessionuuid`); no subreaper, so [leftovers](#leftovers) are counted only by probing the job's process group; no pidfds, so signals to processes jobsctl did not spawn are checked immediately before sending, and `PR_SET_DUMPABLE` does not exist.
+- **Hidden `/proc`:** with `hidepid=2` (or `invisible`) on `/proc`, other users' processes are inconclusive, never dead: a missing `/proc/<pid>` reads as unknown and a group probe is incomplete.
 - **Cron:** cron's environment is minimal and its `python3` may be older than 3.12; [`cron install`](#cron-install--cron-uninstall) writes the absolute path of `jobsctl`, an explicit `PATH` and the `XDG_*` directories set at install.
 - **Requirements:** Python ≥ 3.12; SQLite ≥ 3.35.
 

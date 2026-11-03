@@ -23,6 +23,9 @@ SYS_PIDFD_SEND_SIGNAL = 424
 SYS_PIDFD_OPEN = 434
 PIDFD_SIGNAL_PROCESS_GROUP = 4  # Linux 6.9 or later
 
+MAX_PID = 2**31 - 1
+MAX_SIGNAL = 64
+
 PR_GET_DUMPABLE = 3
 PR_SET_DUMPABLE = 4
 PR_SET_CHILD_SUBREAPER = 36
@@ -102,7 +105,22 @@ def pidfd_open(pid: int) -> int:
     return _raw_syscall(SYS_PIDFD_OPEN, pid, 0)
 
 
+def validate_pid(pid: object) -> int:
+    """A PID jobsctl may ever signal: 2..2**31-1. 0, 1 and negatives mean groups or init."""
+    if isinstance(pid, bool) or not isinstance(pid, int) or not 1 < pid <= MAX_PID:
+        raise ValueError(f"unsafe pid: {pid!r}")
+    return pid
+
+
+def validate_signal(sig: object) -> int:
+    """A real signal number, 1..64; 0 (an existence probe) is not a signal jobsctl sends."""
+    if isinstance(sig, bool) or not isinstance(sig, int) or not 1 <= sig <= MAX_SIGNAL:
+        raise ValueError(f"unsafe signal number: {sig!r}")
+    return sig
+
+
 def pidfd_send_signal(fd: int, sig: int, flags: int = 0) -> None:
+    validate_signal(sig)
     if flags == 0 and hasattr(signal, "pidfd_send_signal"):
         signal.pidfd_send_signal(fd, sig)
         return
@@ -132,10 +150,14 @@ def close_fd(fd: int) -> None:
 
 
 def kill(pid: int, sig: int) -> None:
+    validate_pid(pid)
+    validate_signal(sig)
     os.kill(pid, sig)
 
 
 def killpg(pgid: int, sig: int) -> None:
+    validate_pid(pgid)
+    validate_signal(sig)
     os.killpg(pgid, sig)
 
 
@@ -173,11 +195,15 @@ def prctl_get_int(option: int) -> int:
     return out.value
 
 
-def waitid_nowait(pid: int) -> None:
-    """Block until child ``pid`` exits, leaving it unreaped (``WEXITED | WNOWAIT``)."""
+def waitid_nowait(pid: int, nohang: bool = False) -> os.waitid_result | None:
+    """Wait for child ``pid`` to exit, leaving it unreaped (``WEXITED | WNOWAIT``).
+
+    Blocks until it exits; with ``nohang`` returns ``None`` at once if it has not exited.
+    """
     if not hasattr(os, "waitid"):
         raise OSError(errno.ENOSYS, "os.waitid is unavailable on this platform")
-    os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+    flags = os.WEXITED | os.WNOWAIT | (os.WNOHANG if nohang else 0)
+    return os.waitid(os.P_PID, pid, flags)
 
 
 def waitpid(pid: int) -> int:
@@ -226,6 +252,9 @@ def _get_libproc() -> Any:
     if _libproc is None:
         _libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
     return _libproc
+
+
+SYSCTL = "/usr/sbin/sysctl"  # absolute: cron's PATH may lack /usr/sbin
 
 
 class DarwinLibproc:
@@ -279,7 +308,10 @@ class DarwinLibproc:
         return [int(p) for p in buf[: got // 4] if p > 0]
 
     def boot_uuid(self) -> str:
-        res = gateway.run(["sysctl", "-n", "kern.bootsessionuuid"], timeout=5)
+        """The boot session UUID; ``""`` if ``sysctl`` fails. May raise ``OSError`` (missing
+        binary) or ``subprocess.TimeoutExpired``: ``DarwinHost.boot_id`` maps both to unavailable.
+        """
+        res = gateway.run([SYSCTL, "-n", "kern.bootsessionuuid"], timeout=5)
         if res.returncode != 0:
             return ""
         return res.stdout.strip()

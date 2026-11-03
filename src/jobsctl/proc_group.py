@@ -8,8 +8,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from .gateway_proc import validate_pid
 from .proc_host import Host, ProcInfo
-from .proc_identity import validate_pid
 
 __all__ = ["GroupProbe", "probe_group"]
 
