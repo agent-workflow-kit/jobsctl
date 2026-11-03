@@ -23,3 +23,28 @@ def run(
         timeout=timeout,
         check=False,
     )
+
+
+def popen(
+    argv: list[str],
+    *,
+    env: dict[str, str],
+    cwd: str | None = None,
+    start_new_session: bool = False,
+) -> subprocess.Popen[str]:
+    """Start ``argv`` without a shell, with text pipes for stdout and stderr and an explicit env.
+
+    The caller owns the child: it records the PID (and, with ``start_new_session``, the group id,
+    which equals the PID) at launch and signals only that exact process or group.
+    """
+    return subprocess.Popen(
+        argv,
+        env=env,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=start_new_session,
+        close_fds=True,
+    )
