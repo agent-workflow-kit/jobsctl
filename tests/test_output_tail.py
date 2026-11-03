@@ -101,7 +101,7 @@ def test_unterminated_string_sequence_is_removed_to_the_end(introducer: str) -> 
 
 def test_masking_happens_after_escape_removal() -> None:
     m = mset(SECRET)
-    assert render(f"tok SECRET\x1b[1m-TOKEN\x1b[0m-9 end\n", m) == "tok *** end\n"
+    assert render("tok SECRET\x1b[1m-TOKEN\x1b[0m-9 end\n", m) == "tok *** end\n"
 
 
 def test_masking_happens_before_control_escaping() -> None:

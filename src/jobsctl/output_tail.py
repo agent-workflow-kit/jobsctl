@@ -15,7 +15,6 @@ from jobsctl.env_mask import MaskingSet
 from jobsctl.textsafe import escape_unsafe, strip_escapes
 
 DROP_MARGIN: Final = 256  # step 1: bytes discarded beyond the longest masked value
-MAX_TAIL_BYTES: Final = 262144
 
 
 @dataclass(frozen=True)
