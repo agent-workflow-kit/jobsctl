@@ -55,6 +55,25 @@ def test_modes_do_not_depend_on_the_umask(state: Path, umask: int) -> None:
     assert mode(state / "state.db") == 0o600
 
 
+@pytest.mark.parametrize(("umask", "ancestor_mode"), [(0o022, 0o755), (0o277, 0o700)])
+def test_created_ancestors_keep_the_umask_mode(
+    tmp_path: Path, umask: int, ancestor_mode: int
+) -> None:
+    root = tmp_path / "a" / "b" / "jobsctl"
+    os.chmod(tmp_path, 0o711)
+    before = mode(tmp_path)
+    old = os.umask(umask)
+    try:
+        prepare_state_dir(root, create=True)
+    finally:
+        os.umask(old)
+    assert mode(tmp_path / "a") == ancestor_mode
+    assert mode(tmp_path / "a" / "b") == ancestor_mode
+    assert mode(root) == 0o700
+    assert mode(root / "shims") == 0o700
+    assert mode(tmp_path) == before  # a pre-existing directory is never changed
+
+
 def test_wal_and_shm_files_are_private_while_open(state: Path) -> None:
     old = os.umask(0)
     try:

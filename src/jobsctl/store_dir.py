@@ -1,11 +1,12 @@
 """The state directory: location, creation and ownership checks (interface.md, Audit and log).
 
 ``<state dir>`` holds ``state.db`` (0600), ``shims/`` and ``diag/`` (0700); the directory itself
-is 0700. Whatever jobsctl creates (these and any missing ancestors) is set to its exact mode with
-chmod right after creation, so neither a permissive nor a restrictive umask (e.g. 0277) changes
-it. A final path component that is a symlink, a directory or file owned by someone else, or a
-database that is not a regular file is refused. A directory we own with group or other permissions
-is tightened. Ancestors of the state directory may be symlinks (``~/.local`` often is).
+is 0700. These are set to their exact mode with chmod right after creation, so neither a
+permissive nor a restrictive umask (e.g. 0277) changes it. Missing ancestors jobsctl creates keep
+the umask-derived mode plus owner rwx; pre-existing directories are never changed. A final
+path component that is a symlink, a directory or file owned by someone else, or a database that
+is not a regular file is refused. A directory we own with group or other permissions is
+tightened. Ancestors of the state directory may be symlinks (``~/.local`` often is).
 """
 
 from __future__ import annotations
@@ -53,35 +54,44 @@ def _unsafe(path: Path, why: str) -> JobsctlError:
     return JobsctlError("internal", f"state path {path} is unsafe: {why}")
 
 
-def _mkdir_private(path: Path) -> None:
-    """Create ``path`` as a 0700 directory regardless of the umask; an existing one is kept."""
+def _mkdir(path: Path, *, private: bool) -> None:
+    """Create ``path``; an existing one is kept.
+
+    A private directory is exactly 0700 regardless of the umask. Otherwise it keeps the
+    umask-derived mode plus owner rwx, so children can be created even under umask 0277.
+    """
     try:
-        os.mkdir(path, 0o700)
+        os.mkdir(path, 0o700 if private else 0o777)
     except FileExistsError:
         return
     except OSError as exc:
         raise JobsctlError("internal", f"cannot create {path}: {exc.strerror}") from exc
     try:
-        os.chmod(path, 0o700)  # the umask may have removed our own bits
+        if private:
+            os.chmod(path, 0o700)  # the umask may have removed our own bits
+        else:
+            created = stat.S_IMODE(os.lstat(path).st_mode)
+            if created & 0o700 != 0o700:
+                os.chmod(path, created | 0o700)
     except OSError as exc:
         raise JobsctlError("internal", f"cannot set the mode of {path}: {exc.strerror}") from exc
 
 
-def _makedirs_private(path: Path) -> None:
-    """``mkdir -p`` where every directory created is 0700 (existing ones are left alone)."""
+def _makedirs(path: Path) -> None:
+    """``mkdir -p`` for ancestors: created ones keep the umask mode plus owner rwx."""
     missing: list[Path] = []
     current = path
     while not os.path.lexists(current) and current != current.parent:
         missing.append(current)
         current = current.parent
     for directory in reversed(missing):
-        _mkdir_private(directory)
+        _mkdir(directory, private=False)
 
 
 def _secure_dir(path: Path, *, create: bool) -> None:
     """Make ``path`` an owned, 0700-or-tighter real directory, creating it when ``create``."""
     if create:
-        _mkdir_private(path)
+        _mkdir(path, private=True)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError as exc:
@@ -103,7 +113,7 @@ def prepare_state_dir(root: Path, *, create: bool) -> StatePaths:
     """Validate (and with ``create``, create) the state directory and its subdirectories."""
     paths = StatePaths(root)
     if create:
-        _makedirs_private(root.parent)
+        _makedirs(root.parent)
     _secure_dir(root, create=create)
     for sub in (paths.shims, paths.diag):
         _secure_dir(sub, create=create)
