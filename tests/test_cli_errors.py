@@ -508,3 +508,40 @@ def test_cwd_with_a_newline_is_a_usage_error(capsys: pytest.CaptureFixture[str])
 def test_leading_zero_duration_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
     assert run_cli(capsys, "add", "--timeout", "05m", "--", "x").code == 2
     assert run_cli(capsys, "add", "--timeout", "5m", "--", "x").code == 1
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["show", "--evn", "SECRET=hunter2"],
+        ["cancel", "--evn", "TOKEN=hunter2"],
+        ["label", "--evn", "SECRET=hunter2", "add"],
+    ],
+)
+@pytest.mark.parametrize("as_json", [False, True])
+def test_env_values_pushed_into_positional_slots_are_never_echoed(
+    capsys: pytest.CaptureFixture[str], argv: list[str], as_json: bool
+) -> None:
+    res = run_cli(capsys, *(["--json"] if as_json else []), *argv)
+    assert res.code == 2
+    assert "hunter2" not in res.out + res.err
+
+
+def test_choice_error_lists_the_real_choices(capsys: pytest.CaptureFixture[str]) -> None:
+    res = run_cli(capsys, "--json", "label", "bogus")
+    message = res.envelope()["error"]["message"]
+    assert "'bogus'" in message
+    assert "add" in message and "remove" in message
+    res = run_cli(capsys, "--json", "list", "--status", "bogus")
+    message = res.envelope()["error"]["message"]
+    assert "'bogus'" in message
+    assert "queued" in message and "canceled" in message
+
+
+@pytest.mark.parametrize("argv", [["label"], ["list", "--status"]])
+def test_choice_and_nested_subparser_errors_cap_huge_input(
+    capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
+    res = run_cli(capsys, *argv, "a" * 5000)
+    assert res.code == 2
+    assert len(res.err) < 400

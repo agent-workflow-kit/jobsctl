@@ -95,8 +95,14 @@ def _bad(message: str) -> argparse.ArgumentTypeError:
 
 
 def _q(text: str) -> str:
-    """An input quoted back in a message: inline-sanitized, capped, in single quotes."""
-    return f"'{echo(text)}'"
+    """An input quoted back in a message: cut at the first `=`, inline-sanitized, capped.
+
+    A mistyped `--env` flag can push `NAME=secret` into any positional, so a value is never
+    echoed; only `unique_key` and label values legitimately contain `=`, and losing their tail
+    is harmless.
+    """
+    name, eq, _ = text.partition("=")
+    return f"'{echo(name)}{'=...' if eq else ''}'"
 
 
 def duration(text: str) -> int:

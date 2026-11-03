@@ -450,7 +450,7 @@ Checks run in this order: usage (exit 2), then not found or ambiguous (10, 21), 
 
 `--verbose` together with `--quiet` exits 2 (`usage`).
 
-The values of `--env` and `--pass-env` are never echoed in any error message, in human or `--json` output; an error names the variable at most.
+The values of `--env` and `--pass-env` are never echoed in any error message, in human or `--json` output; an error names the variable at most. This holds when a mistyped flag pushes a value into a positional or sub-command slot: an echoed input that fails validation is cut at its first `=` and shown as `NAME=...`, and every echoed input is sanitized and capped at 80 characters.
 
 A decision id matches `^[A-Za-z0-9._:@/-]{1,128}$`. A command's decision ids are recorded in its log records (`transition`, `reorder` or `label`, [Audit and log](#audit-and-log)) and, for audited commands, in the audit record.
 
