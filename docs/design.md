@@ -81,7 +81,7 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 |---|---|
 | `cli.py` | entry point: parse, usage checks, config load (`TODO(#3)`), dispatch, exit codes |
 | `cli_surface.py` | the frozen argparse surface (commands, global flags) and the flag-combination usage checks |
-| `cli_values.py` | flag value grammars as `type=` callables: durations, timestamps, names, ids; `TODO(#4)`: the parsing functions move to the shared grammar modules (`durations.py`, `timestamps.py`, `ids.py`), leaving the `type=` adapters here |
+| `cli_values.py` | flag value `type=` adapters (argparse errors, so exit 2) over the grammar modules below |
 | `cli_registry.py` | the `@command` registry and the per-invocation `Context` |
 | `cli_output.py` | the error envelope and JSON line output (stdout with `--json`, stderr otherwise) |
 | `actors.py`, `checks.py`, `errors.py` | the actor grammar and the human-only gate; the usage, lookup, state, human check order; error codes, exit codes and the error envelope |
@@ -97,7 +97,7 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 | `output.py` | planned (output-capture issue): ring buffer, live-flush withholding, masking (the masking set and the `add` secret refusal), sanitizing, compression |
 | `hooks.py` | sync hook execution under the unreaped-leader rule (process groups, timeouts, selectors, output read in memory for `decision_id`, `hook_messages` and the `hook_ran` excerpt), payload building, leaving async events to `_deliver` (D39), stopping a running hook when a CLI command is interrupted (D48) |
 | `config.py` | Pydantic models, drop-ins, precedence (files and flags only), absolute `--config` hand-off; errors name keys, never `env.*` values |
-| `ids.py`, `durations.py`, `timestamps.py` | planned (`TODO(#4)`): id generation (checked against `pruned_ids`) and prefix lookup; duration and timestamp grammars, moved out of `cli_values.py` |
+| `validate.py`, `ids.py`, `durations.py`, `timestamps.py` | pure grammars (queues, labels, unique keys, env names, decision ids), id generation and prefix resolution (the store supplies the `taken` and prefix-lookup callables; `taken` covers `pruned_ids`), duration and timestamp grammars; clocks and randomness are injected |
 | `audit.py` | `audit.jsonl` and `log.jsonl` writers (`seq` allocation, D42), diagnostics files (D43) |
 | `procs.py` | process identity, boot id, liveness, subreaper, pidfds (including group signals where the kernel has them), dumpability, group probing (Linux and macOS) |
 | `gateway.py` | every process spawn, signal, wait, file lock and clock access, so tests replace them with fakes |
