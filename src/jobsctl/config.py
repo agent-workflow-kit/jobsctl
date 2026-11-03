@@ -22,6 +22,7 @@ from pydantic import StringConstraints as Str
 
 # TODO(#4): the duration grammar moves to `durations.py`; this import follows it.
 from jobsctl.cli_values import DurationError, parse_duration
+from jobsctl.textsafe import echo
 
 _QUEUE_PATTERN: Final = r"^[a-z0-9][a-z0-9_-]{0,63}$"
 ENV_NAME_PATTERN: Final = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"
@@ -174,13 +175,19 @@ class PostHookEntry(_HookEntry):
 
 
 def _unique_names(entries: list[Any]) -> list[Any]:
-    seen: set[str] = set()
+    """A duplicate `name`, or two entries with one identity (`name` if set, else `cmd`: an
+    unnamed `{cmd: foo}` next to `{name: foo}`, or two unnamed entries with one `cmd`), is
+    invalid: `hook_id`, `vetoed_by` and `override_hooks` must name exactly one hook."""
+    names: set[str] = set()
+    identities: set[str] = set()
     for entry in entries:
-        if entry.name is None:
-            continue
-        if entry.name in seen:
-            raise ValueError(f"duplicate hook name {entry.name!r} in one list")
-        seen.add(entry.name)
+        if entry.name is not None:
+            if entry.name in names:
+                raise ValueError(f"duplicate hook name {entry.name!r} in one list")
+            names.add(entry.name)
+        if entry.identity in identities:
+            raise ValueError(f"duplicate hook identity {echo(entry.identity, 64)!r} in one list")
+        identities.add(entry.identity)
     return entries
 
 
