@@ -76,3 +76,18 @@ def echo(value: str, limit: int = 80) -> str:
     """An input quoted back in a message: sanitized inline and cut to `limit` characters."""
     clean = sanitize(value, inline=True)
     return clean if len(clean) <= limit else clean[:limit] + "..."
+
+
+def strip_escapes(text: str) -> str:
+    """Masking and sanitizing step 3 alone: remove terminal escape sequences and keep the last
+    segment of `\\r`-rewritten lines. Captured output is masked between this and `escape_unsafe`
+    (step 5), so the two steps are separate."""
+    text = _ESCAPES.sub("", text)
+    lines = [line.rsplit("\r", 1)[-1] for line in text.replace("\r\n", "\n").split("\n")]
+    return "\n".join(lines)
+
+
+def escape_unsafe(text: str) -> str:
+    """Masking and sanitizing step 5 alone: escape control, bidirectional, invisible format and
+    separator characters as `\\uNNNN`, keeping tab and newline."""
+    return "".join(_escape_char(ch) for ch in text)

@@ -7,8 +7,8 @@ fewer than 8 characters are not masked (`short_secret_not_masked`, naming the va
 empty value is neither masked nor warned about. A multi-line value is masked line by line.
 
 This module owns the *set* and the replacement of its members in text. The rest of the masking
-pipeline (windowing, decoding, escape removal, sanitizing) belongs to the output module
-(TODO(#16)), which uses `MaskingSet.mask` and `MaskingSet.longest_bytes`.
+pipeline (windowing, decoding, escape removal, sanitizing) is `output_tail.py`, which uses
+`MaskingSet.mask`, `MaskingSet.spans` and `MaskingSet.longest_bytes`.
 """
 
 from __future__ import annotations
@@ -44,6 +44,12 @@ class MaskingSet:
     def contains_secret(self, text: str) -> bool:
         """Whether `text` contains a masked value (`add`'s `secret_in_argv`/`secret_in_env`)."""
         return self._pattern is not None and self._pattern.search(text) is not None
+
+    def spans(self, text: str) -> list[tuple[int, int]]:
+        """The `(start, end)` of every occurrence `mask` would replace, in order."""
+        if self._pattern is None:
+            return []
+        return [m.span() for m in self._pattern.finditer(text)]
 
     def mask(self, text: str) -> str:
         """Replace every occurrence of a masked value with `***` in one left-to-right pass: at a
