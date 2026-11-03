@@ -282,7 +282,7 @@ def test_a_grandchild_holding_the_pipes_open_never_blocks_the_hook(
     tracker: HookTracker, state_dir: Path
 ) -> None:
     pidfile = state_dir / "pids"
-    res = run(f"(sleep 60; true) & echo $! > {pidfile}; echo out; echo err >&2; exit 1", state_dir)
+    res = run(f"sleep 60 & echo $! > {pidfile}; echo out; echo err >&2; exit 1", state_dir)
     tracker.adopt(pidfile)
     assert res.outcome == "veto" and res.message == "err\n"
 

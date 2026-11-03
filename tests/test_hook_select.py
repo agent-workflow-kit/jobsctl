@@ -8,7 +8,7 @@ from jobsctl.config import Config
 from jobsctl.hook_select import matches, pre_start_event_id, select_hooks
 
 
-def cfg(entries: str) -> Config:
+def cfg(entries: list[dict[str, object]]) -> Config:
     return Config.model_validate({"hooks": {"post-fail": entries}})
 
 
