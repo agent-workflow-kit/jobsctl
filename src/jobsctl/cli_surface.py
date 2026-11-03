@@ -8,12 +8,14 @@ flag-combination rules (exit 2) that argparse cannot express. Behavior lives in
 from __future__ import annotations
 
 import argparse
+import ast
 from collections.abc import Callable
 from typing import Any
 
 from jobsctl import __version__
 from jobsctl import cli_values as v
 from jobsctl.errors import usage_error
+from jobsctl.textsafe import echo
 
 STATUSES = ("queued", "starting", "running", "held", "done", "failed", "canceled")
 MAX_ARGV_ITEMS = 4096
@@ -23,10 +25,45 @@ MAX_LABELS = 32
 
 
 class Parser(argparse.ArgumentParser):
-    """An ArgumentParser whose errors are usage errors, not a print-and-exit."""
+    """An ArgumentParser whose errors are usage errors, not a print-and-exit.
+
+    Messages are built here, not by argparse, wherever argparse would echo input beyond what is
+    needed: an unrecognized argument names only the first token up to `=` (a mistyped
+    `--env` must not leak its value), and an unknown command lists only the visible commands.
+    """
+
+    def parse_args(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self, args: Any = None, namespace: Any = None
+    ) -> Any:
+        parsed, extras = self.parse_known_args(args, namespace)
+        if extras:
+            self.error("unrecognized argument: " + echo(extras[0].partition("=")[0]))
+        return parsed
 
     def error(self, message: str) -> Any:
-        raise usage_error(message)
+        raise usage_error(self._message(message))
+
+    def _message(self, message: str) -> str:
+        if message.startswith("ambiguous option: "):
+            option = message[len("ambiguous option: ") :].rsplit(" could match ", 1)[0]
+            return "ambiguous option: " + echo(option.partition("=")[0])
+        prefix = "argument <command>: invalid choice: "
+        if message.startswith(prefix) and " (choose from" in message:
+            token = message[len(prefix) : message.rindex(" (choose from")]
+            try:  # argparse quotes the input with repr()
+                literal = ast.literal_eval(token)
+            except (ValueError, SyntaxError):
+                literal = token
+            token = literal if isinstance(literal, str) else token
+            shown = echo(token.partition("=")[0])
+            return f"unknown command '{shown}': choose from " + ", ".join(self._visible())
+        return message
+
+    def _visible(self) -> list[str]:
+        for action in self._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                return [name for name in action.choices if not name.startswith("_")]
+        return []
 
 
 def _global_flags(parser: argparse.ArgumentParser, *, suppress: bool) -> None:

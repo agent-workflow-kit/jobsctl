@@ -24,14 +24,16 @@ UNIQUE_KEY_RE: Final = re.compile(r"[A-Za-z0-9._:/#@+=,-]{1,256}\Z")
 ENV_NAME_RE: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
 DECISION_ID_RE: Final = re.compile(r"[A-Za-z0-9._:@/-]{1,128}\Z")
 JOB_ID_PREFIX_RE: Final = re.compile(r"[a-z2-7]{4,8}\Z")
-_DURATION_RE: Final = re.compile(r"([0-9]+)([smhd])\Z")
-_INT_RE: Final = re.compile(r"-?[0-9]{1,18}\Z")
+_DURATION_RE: Final = re.compile(r"([1-9][0-9]*)([smhd])\Z")
+_INT_RE: Final = re.compile(r"-?[0-9]+\Z")
+_MAX_INT_CHARS: Final = 18  # longer is out of every range here; never int() it
 _TIMESTAMP_RE: Final = re.compile(
     r"([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})"
     r"(?:\.([0-9]{1,9}))?([Zz]|[+-][0-9]{2}:[0-9]{2})\Z"
 )
 _UNITS: Final = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 _MAX_DURATION_SECONDS: Final = 100 * 365 * 86400
+_MAX_DURATION_DIGITS: Final = 12  # more digits cannot be within the cap; never int() them
 ENV_VALUE_MAX_BYTES: Final = 128 * 1024
 
 
@@ -39,14 +41,18 @@ class DurationError(ValueError):
     pass
 
 
-def parse_duration(text: str, *, allow_zero: bool = False) -> int:
-    """`<integer><unit>` with unit s, m, h or d, in seconds; zero only with `allow_zero`."""
+def parse_duration(text: str) -> int:
+    """`<integer><unit>` with unit s, m, h or d, in seconds: at least 1, no leading zeros and
+    at most 100 years."""
     match = _DURATION_RE.match(text)
     if match is None:
-        raise DurationError("a duration is <integer><unit> with unit s, m, h or d (e.g. 30s, 10m)")
+        raise DurationError(
+            "a duration is <integer><unit> with unit s, m, h or d, the integer at least 1 "
+            "without leading zeros (e.g. 30s, 10m)"
+        )
+    if len(match.group(1)) > _MAX_DURATION_DIGITS:
+        raise DurationError("a duration is at most 100 years")
     seconds = int(match.group(1)) * _UNITS[match.group(2)]
-    if seconds == 0 and not allow_zero:
-        raise DurationError("a duration must not be zero")
     if seconds > _MAX_DURATION_SECONDS:
         raise DurationError("a duration is at most 100 years")
     return seconds
@@ -68,7 +74,12 @@ def parse_timestamp(text: str) -> dt.datetime:
             raise ValueError("timestamp offset out of range")
         delta = dt.timedelta(hours=off_h, minutes=off_m)
         tz = dt.timezone(-delta if zone[0] == "-" else delta)
-    return dt.datetime(year, month, day, hour, minute, second, micro, tzinfo=tz).astimezone(dt.UTC)
+    try:
+        return dt.datetime(year, month, day, hour, minute, second, micro, tzinfo=tz).astimezone(
+            dt.UTC
+        )
+    except OverflowError:
+        raise ValueError("timestamp out of range") from None
 
 
 def format_timestamp(when: dt.datetime) -> str:
@@ -83,21 +94,21 @@ def _bad(message: str) -> argparse.ArgumentTypeError:
     return argparse.ArgumentTypeError(message)
 
 
+def _q(text: str) -> str:
+    """An input quoted back in a message: inline-sanitized, capped, in single quotes."""
+    return f"'{echo(text)}'"
+
+
 def duration(text: str) -> int:
     try:
         return parse_duration(text)
     except DurationError as exc:
-        raise _bad(f"invalid duration {echo(text)!r}: {exc}") from None
+        raise _bad(f"invalid duration {_q(text)}: {exc}") from None
 
 
 def duration_or_zero(text: str) -> int:
-    """`cancel --wait-timeout`: a duration, or a bare `0` (return at once)."""
-    if text == "0":
-        return 0
-    try:
-        return parse_duration(text, allow_zero=True)
-    except DurationError as exc:
-        raise _bad(f"invalid duration {echo(text)!r}: {exc}") from None
+    """`cancel --wait-timeout`: a duration, or exactly `0` (return at once)."""
+    return 0 if text == "0" else duration(text)
 
 
 def duration_or_none(text: str) -> int | str:
@@ -110,19 +121,19 @@ def timestamp_or_duration(text: str) -> tuple[str, dt.datetime | int]:
         return ("duration", duration(text))
     try:
         return ("timestamp", parse_timestamp(text))
-    except ValueError:
+    except (ValueError, OverflowError):
         raise _bad(
-            f"invalid value {echo(text)!r}: expected an RFC 3339 timestamp or a duration"
+            f"invalid value {_q(text)}: expected an RFC 3339 timestamp or a duration"
         ) from None
 
 
 def _int_in(text: str, low: int, high: int | None, what: str) -> int:
     if _INT_RE.match(text) is None:
-        raise _bad(f"invalid {what} {echo(text)!r}: not an integer")
-    value = int(text)
-    if value < low or (high is not None and value > high):
+        raise _bad(f"invalid {what} {_q(text)}: not an integer")
+    value = int(text) if len(text) <= _MAX_INT_CHARS else None
+    if value is None or value < low or (high is not None and value > high):
         bound = f"at least {low}" if high is None else f"{low} to {high}"
-        raise _bad(f"invalid {what} {echo(text)!r}: must be {bound}")
+        raise _bad(f"invalid {what} {_q(text)}: must be {bound}")
     return value
 
 
@@ -144,24 +155,22 @@ def nonneg_int(text: str) -> int:
 
 def queue_name(text: str) -> str:
     if QUEUE_RE.match(text) is None:
-        raise _bad(f"invalid queue name {echo(text)!r}: use [a-z0-9][a-z0-9_-]{{0,63}}")
+        raise _bad(f"invalid queue name {_q(text)}: use [a-z0-9][a-z0-9_-]{{0,63}}")
     return text
 
 
 def unique_key(text: str) -> str:
     if UNIQUE_KEY_RE.match(text) is None:
-        raise _bad(
-            f"invalid unique key {echo(text)!r}: 1 to 256 characters from [A-Za-z0-9._:/#@+=,-]"
-        )
+        raise _bad(f"invalid unique key {_q(text)}: 1 to 256 characters from [A-Za-z0-9._:/#@+=,-]")
     return text
 
 
 def label_pair(text: str) -> tuple[str, str]:
     key, sep, value = text.partition("=")
     if not sep:
-        raise _bad(f"invalid label {echo(text)!r}: expected key=value")
+        raise _bad(f"invalid label {_q(text)}: expected key=value")
     if LABEL_KEY_RE.match(key) is None:
-        raise _bad(f"invalid label key {echo(key)!r}: use [a-z0-9][a-z0-9_.-]{{0,63}}")
+        raise _bad(f"invalid label key {_q(key)}: use [a-z0-9][a-z0-9_.-]{{0,63}}")
     if LABEL_VALUE_RE.match(value) is None:
         raise _bad(
             f"invalid label value for {key!r}: 0 to 256 characters from [A-Za-z0-9._:/#@+=,-]"
@@ -170,11 +179,16 @@ def label_pair(text: str) -> tuple[str, str]:
 
 
 def env_name(text: str) -> str:
-    """A `--pass-env` name; never echoes more than the name."""
+    """A `--pass-env` name; never echoes more than the name (an entry `NAME=value` is refused)."""
+    if "=" in text:
+        raise _bad(
+            f"invalid variable name {_q(text.partition('=')[0])}: --pass-env takes a name, "
+            "not NAME=value"
+        )
     if ENV_NAME_RE.match(text) is None:
-        raise _bad(f"invalid variable name {echo(text)!r}: use [A-Za-z_][A-Za-z0-9_]{{0,127}}")
+        raise _bad(f"invalid variable name {_q(text)}: use [A-Za-z_][A-Za-z0-9_]{{0,127}}")
     if text.startswith("JOBSCTL_"):
-        raise _bad(f"invalid variable name {echo(text)!r}: JOBSCTL_ is reserved")
+        raise _bad(f"invalid variable name {_q(text)}: JOBSCTL_ is reserved")
     return text
 
 
@@ -193,9 +207,7 @@ def env_assign(text: str) -> tuple[str, str]:
 
 def decision_id(text: str) -> str:
     if DECISION_ID_RE.match(text) is None:
-        raise _bad(
-            f"invalid decision id {echo(text)!r}: 1 to 128 characters from [A-Za-z0-9._:@/-]"
-        )
+        raise _bad(f"invalid decision id {_q(text)}: 1 to 128 characters from [A-Za-z0-9._:@/-]")
     return text
 
 
@@ -210,8 +222,10 @@ def cwd(text: str) -> str:
     """`--cwd`: absolute after lexical normalization (`.` and `..` resolved, symlinks kept)."""
     if "\x00" in text:
         raise _bad("--cwd contains a NUL byte")
+    if "\n" in text:
+        raise _bad("--cwd contains a newline")
     if not text.startswith("/"):
-        raise _bad(f"--cwd must be an absolute path, not {echo(text)!r}")
+        raise _bad(f"--cwd must be an absolute path, not {_q(text)}")
     return posixpath.normpath(text)
 
 
@@ -220,7 +234,7 @@ def job_id(text: str) -> str:
     body = text[3:] if text.startswith("jb-") else text
     if JOB_ID_PREFIX_RE.match(body) is None:
         raise _bad(
-            f"invalid job id {echo(text)!r}: a job id is jb- plus 8 characters of a-z2-7, "
+            f"invalid job id {_q(text)}: a job id is jb- plus 8 characters of a-z2-7, "
             "or a prefix of at least 4 characters"
         )
     return "jb-" + body

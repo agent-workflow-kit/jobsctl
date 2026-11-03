@@ -36,9 +36,24 @@ def test_sanitize(raw: str, clean: str) -> None:
     assert sanitize(raw) == clean
 
 
-def test_sanitize_unterminated_sequences_do_not_swallow_text_forever() -> None:
-    out = sanitize("a\x1b]0;never ends" + "x" * 10)
-    assert "\x1b" not in out
+@pytest.mark.parametrize(
+    "introducer", ["\x1b]", "\x1bP", "\x1b_", "\x1b^", "\x1bX", "\x9d", "\x90"]
+)
+def test_sanitize_removes_an_unterminated_string_sequence_to_the_end(introducer: str) -> None:
+    assert sanitize("a" + introducer + "0;never ends\nand more") == "a"
+
+
+def test_sanitize_line_and_paragraph_separators_are_escaped() -> None:
+    assert sanitize("a\u2028b\u2029c") == "a\\u2028b\\u2029c"
+
+
+def test_sanitize_inline_escapes_cr_and_lf_instead_of_rewriting_lines() -> None:
+    assert sanitize("old\rnew\nnext\r\nx", inline=True) == "old\\rnew\\nnext\\r\\nx"
+    assert sanitize("a\tb", inline=True) == "a\tb"
+
+
+def test_echo_escapes_line_breaks() -> None:
+    assert echo("a\r\nb") == "a\\r\\nb"
 
 
 def test_sanitize_output_is_encodable() -> None:

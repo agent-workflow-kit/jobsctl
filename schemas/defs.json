@@ -57,7 +57,7 @@
     "duration": {
       "type": "string",
       "pattern": "^[1-9][0-9]*[smhd]$",
-      "description": "DURATION: a positive integer and a unit (s, m, h, d)."
+      "description": "DURATION: a positive integer without leading zeros and a unit (s, m, h, d); at most 100 years, which the pattern does not express."
     },
     "seconds": {
       "type": "integer",
@@ -2650,7 +2650,7 @@
         "timeout": {
           "type": "string",
           "pattern": "^[1-9][0-9]*[smhd]$",
-          "description": "DURATION: a positive integer and a unit (s, m, h, d).",
+          "description": "DURATION: a positive integer without leading zeros and a unit (s, m, h, d); at most 100 years, which the pattern does not express.",
           "default": "30s"
         },
         "queues": {
@@ -2705,7 +2705,7 @@
         "timeout": {
           "type": "string",
           "pattern": "^[1-9][0-9]*[smhd]$",
-          "description": "DURATION: a positive integer and a unit (s, m, h, d).",
+          "description": "DURATION: a positive integer without leading zeros and a unit (s, m, h, d); at most 100 years, which the pattern does not express.",
           "default": "30s"
         },
         "queues": {
@@ -2794,7 +2794,7 @@
         "retry_delay": {
           "type": "string",
           "pattern": "^[1-9][0-9]*[smhd]$",
-          "description": "DURATION: a positive integer and a unit (s, m, h, d).",
+          "description": "DURATION: a positive integer without leading zeros and a unit (s, m, h, d); at most 100 years, which the pattern does not express.",
           "default": "60s"
         },
         "kill_grace": {

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from jobsctl import cli_registry, gateway
+from jobsctl import cli_registry, commands, gateway
 from jobsctl.checks import run_checks
 from jobsctl.cli_registry import Context, command
 from jobsctl.errors import JobsctlError, refused
@@ -19,12 +19,22 @@ from tests.helpers import run_cli
 JID = "jb-abcd2345"
 
 
-@pytest.fixture
-def handlers(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, cli_registry.Handler]]:
+def _isolated_table(monkeypatch: pytest.MonkeyPatch) -> dict[str, cli_registry.Handler]:
+    """Import every real command module now, then swap in an empty table for the test.
+
+    The modules stay cached in `sys.modules`, so the `load_all` inside the dispatcher imports
+    nothing again: a real command module never re-registers (no duplicate error) and never
+    registers into the throwaway table, whatever sibling issues add under `commands/`.
+    """
+    commands.load_all()
     table: dict[str, cli_registry.Handler] = {}
     monkeypatch.setattr(cli_registry, "_HANDLERS", table)
-    # load_all would import real command modules into the patched table; none exist yet.
-    yield table
+    return table
+
+
+@pytest.fixture
+def handlers(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, cli_registry.Handler]]:
+    yield _isolated_table(monkeypatch)
 
 
 def test_handler_gets_context_and_its_return_value_is_the_exit_code(
@@ -154,11 +164,39 @@ def test_gate_passes_on_a_tty(
     assert run_cli(capsys, "release", "jb-cccc", "--override-escalation").code == 0
 
 
-def test_load_all_imports_command_modules() -> None:
-    from jobsctl import commands
+@pytest.fixture
+def real_hold_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """A command module another issue could add under `commands/`, registering `hold`."""
+    package_dir = tmp_path / "fakecmds"
+    package_dir.mkdir()
+    (package_dir / "fake_hold.py").write_text(
+        "from jobsctl.cli_registry import command\n\n"
+        "@command('hold')\ndef hold(ctx):\n    return 7\n"
+    )
+    real_table = cli_registry._HANDLERS
+    monkeypatch.setattr(commands, "__path__", [*commands.__path__, str(package_dir)])
+    yield "fake_hold"
+    real_table.pop("hold", None)
+    sys.modules.pop("jobsctl.commands.fake_hold", None)
 
+
+def test_load_all_registers_command_modules_once(real_hold_module: str) -> None:
+    assert "hold" not in cli_registry._HANDLERS
     commands.load_all()
-    commands.load_all()  # idempotent
+    assert cli_registry.lookup("hold") is not None
+    before = dict(cli_registry._HANDLERS)
+    commands.load_all()  # idempotent: no duplicate-registration error, nothing changes
+    assert cli_registry._HANDLERS == before
+
+
+def test_fixture_survives_a_real_module_registering_the_same_command(
+    real_hold_module: str,
+    handlers: dict[str, cli_registry.Handler],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command("hold")(lambda ctx: 0)  # the test's own handler under the real module's name
+    assert run_cli(capsys, "hold", JID).code == 0
+    assert cli_registry.lookup("hold") is not None
 
 
 def test_real_entry_point_version_and_usage_error(tmp_path: Path) -> None:

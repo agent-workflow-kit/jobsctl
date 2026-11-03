@@ -67,9 +67,13 @@ def _context(args: argparse.Namespace) -> Context:
     )
 
 
-def _wants_json(argv: list[str]) -> bool:
+def _has_flag(argv: list[str], flag: str) -> bool:
     end = argv.index("--") if "--" in argv else len(argv)
-    return "--json" in argv[:end]
+    return flag in argv[:end]
+
+
+def _wants_json(argv: list[str]) -> bool:
+    return _has_flag(argv, "--json")
 
 
 def _dispatch(argv: list[str]) -> tuple[int, bool]:
@@ -77,6 +81,12 @@ def _dispatch(argv: list[str]) -> tuple[int, bool]:
     try:
         args = parse_args(argv)
     except JobsctlError as err:
+        print_error(err, as_json=_wants_json(argv))
+        return err.exit_code, _wants_json(argv)
+    except Exception as exc:
+        if _has_flag(argv, "--verbose"):
+            traceback.print_exc()
+        err = JobsctlError("internal", f"internal error: {type(exc).__name__}")
         print_error(err, as_json=_wants_json(argv))
         return err.exit_code, _wants_json(argv)
     try:

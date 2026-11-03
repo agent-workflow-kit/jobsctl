@@ -110,6 +110,7 @@ JID = "jb-abcd2345"
 
 # argv -> subset of attributes the parsed namespace must have.
 VALID: list[tuple[list[str], dict[str, Any]]] = [
+    (["queues", "--quiet"], {"quiet": True}),
     (
         [
             "add",

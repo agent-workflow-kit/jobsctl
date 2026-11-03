@@ -7,6 +7,7 @@ import json
 import pytest
 
 from jobsctl.checks import run_checks
+from jobsctl.cli_output import print_error
 from jobsctl.errors import (
     ERROR_EXIT,
     ExitCode,
@@ -70,6 +71,15 @@ def test_error_constructor_rejects_inconsistent_fields() -> None:
 
 
 @pytest.mark.parametrize(
+    "candidates",
+    [[], ["jb-aaaaaaaa"], ["jb-aaaaaaaa", "jb-b"], ["jb-aaaaaaaa", "jb-BBBBBBBB"], ["x", "y"]],
+)
+def test_ambiguous_needs_two_well_formed_candidates(candidates: list[str]) -> None:
+    with pytest.raises(ValueError):
+        JobsctlError("ambiguous", "x", candidates=candidates)
+
+
+@pytest.mark.parametrize(
     "err",
     [
         usage_error("bad"),
@@ -124,12 +134,42 @@ def test_no_command_is_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_human_error_message_sanitizes_echoed_input(capsys: pytest.CaptureFixture[str]) -> None:
-    res = run_cli(capsys, "list", "--status", "\x1b[31mred\x1b[0m‮\x07")
+    # An unrecognized argument is echoed raw by us (not repr-escaped by argparse).
+    res = run_cli(capsys, "list", "\x1b]0;pwned\x07\x1b[31mred\x1b[0m\u202e\x01")
     assert res.code == 2
-    assert "\x1b" not in res.err
-    assert "\x07" not in res.err
-    assert "‮" not in res.err
-    assert "\\u202e" in res.err
+    assert res.err == "jobsctl: error: unrecognized argument: red\\u202e\\u0001\n"
+
+
+def test_print_error_sanitizes_its_message_and_candidates(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    err = JobsctlError("usage", "a\x1b]0;pwned\x07b\u202e\u2028c")
+    print_error(err, as_json=False)
+    assert capsys.readouterr().err == "jobsctl: error: ab\\u202e\\u2028c\n"
+
+
+def test_print_error_cannot_forge_or_erase_an_error_line(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    print_error(JobsctlError("usage", "x\njobsctl: error: forged\rerased"), as_json=False)
+    err = capsys.readouterr().err
+    assert err == "jobsctl: error: x\\njobsctl: error: forged\\rerased\n"
+    assert len(err.splitlines()) == 1
+
+
+def test_echoed_input_cannot_forge_a_second_error_line(capsys: pytest.CaptureFixture[str]) -> None:
+    res = run_cli(capsys, "list", "x\njobsctl: error: forged\roverwrite")
+    assert res.code == 2
+    assert len(res.err.splitlines()) == 1
+
+
+@pytest.mark.parametrize("argv", [["list", "--status", "x\n\r"], ["show", "jb-\nabcd"]])
+def test_value_errors_escape_line_breaks(
+    capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
+    res = run_cli(capsys, *argv)
+    assert res.code == 2
+    assert len(res.err.splitlines()) == 1
 
 
 def test_surrogate_escaped_argv_does_not_crash(capsys: pytest.CaptureFixture[str]) -> None:
@@ -240,7 +280,8 @@ def test_env_entry_limits(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_cancel_wait_timeout_zero_allowed_with_force(capsys: pytest.CaptureFixture[str]) -> None:
     assert run_cli(capsys, "cancel", JID, "--force", "--wait-timeout", "0").code == 1
-    assert run_cli(capsys, "cancel", JID, "--force", "--wait-timeout", "0s").code == 1
+    for bad in ("0s", "0m", "0d", "00"):
+        assert run_cli(capsys, "cancel", JID, "--force", "--wait-timeout", bad).code == 2
 
 
 def test_yes_changes_nothing(capsys: pytest.CaptureFixture[str]) -> None:
@@ -318,3 +359,152 @@ def test_usage_error_plus_unknown_id_exits_2_through_the_cli(
     # An invalid flag combination is reported before any lookup of the id could run.
     res = run_cli(capsys, "--json", "cancel", "jb-zzzzzzzz", "--wait-timeout", "5s")
     assert res.code == 2
+
+
+# --- value leaks, huge input, unknown commands, parse-stage failures ----------------------
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["add", "--evn", "SECRET=s3cretvalue", "--", "x"],
+        ["add", "--envv=TOKEN=s3cretvalue", "--", "x"],
+        ["--evn", "SECRET=s3cretvalue", "add", "--", "x"],
+        ["add", "--e=SECRET=s3cretvalue", "--", "x"],
+        ["add", "--pass-env", "NAME=s3cretvalue", "--", "x"],
+        ["add", "--env", "bad-name=s3cretvalue", "--", "x"],
+        ["add", "--env", "A=s3cretvalue", "--evn", "B=s3cretvalue2", "--", "x"],
+    ],
+)
+@pytest.mark.parametrize("as_json", [False, True])
+def test_env_values_are_never_echoed_in_any_error(
+    capsys: pytest.CaptureFixture[str], argv: list[str], as_json: bool
+) -> None:
+    res = run_cli(capsys, *(["--json"] if as_json else []), *argv)
+    assert res.code == 2
+    assert "s3cretvalue" not in res.out + res.err
+    if as_json:
+        validate_against("cli/error.json", res.envelope())
+
+
+def test_unrecognized_argument_names_only_the_first_token_up_to_equals(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    res = run_cli(capsys, "--json", "add", "--evn", "SECRET=v", "--other", "--", "x")
+    message = res.envelope()["error"]["message"]
+    assert message == "unrecognized argument: --evn"
+    res = run_cli(capsys, "--json", "add", "--envv=TOKEN=v", "--", "x")
+    assert res.envelope()["error"]["message"] == "unrecognized argument: --envv"
+
+
+def test_unrecognized_argument_is_capped(capsys: pytest.CaptureFixture[str]) -> None:
+    res = run_cli(capsys, "list", "x" * 5000)
+    assert res.code == 2
+    assert len(res.err) < 200
+
+
+def test_unknown_command_lists_only_visible_commands(capsys: pytest.CaptureFixture[str]) -> None:
+    res = run_cli(capsys, "--json", "bogus")
+    assert res.code == 2
+    message = res.envelope()["error"]["message"]
+    assert message.startswith("unknown command 'bogus': choose from add, list, show, ")
+    assert "_shim" not in message
+    assert "_deliver" not in message
+    assert "_kill" not in message
+    assert "queues" in message
+
+
+def test_unknown_command_echo_is_sanitized(capsys: pytest.CaptureFixture[str]) -> None:
+    res = run_cli(capsys, "\x1b[31mbad\n\u202e")
+    assert res.code == 2
+    assert res.err.startswith("jobsctl: error: unknown command 'bad\\n\\u202e': choose from ")
+    assert len(res.err.splitlines()) == 1
+
+
+def test_json_message_has_no_lone_surrogates(capsys: pytest.CaptureFixture[str]) -> None:
+    for argv in (
+        ["--json", "list", "a\udcffb"],
+        ["--json", "list", "--status", "a\udcffb"],
+        ["--json", "show", "a\udcffb"],
+    ):
+        res = run_cli(capsys, *argv)
+        message = json.loads(res.out)["error"]["message"]
+        message.encode("utf-8")
+
+
+def test_print_json_replaces_lone_surrogates_with_text(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    print_error(
+        JobsctlError("usage", "a\udcffb\ud800", details={"k\udcff": ["\udc80"]}), as_json=True
+    )
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["error"]["message"] == "a\\xffb\\ud800"
+    assert doc["error"]["details"] == {"k\\xff": ["\\x80"]}
+
+
+@pytest.mark.parametrize("value", ["9999-12-31T23:59:59-23:59", "0001-01-01T00:00:00+05:00"])
+def test_since_timestamp_overflow_is_a_usage_error(
+    capsys: pytest.CaptureFixture[str], value: str
+) -> None:
+    res = run_cli(capsys, "--json", "export", "--since", value)
+    assert res.code == 2
+    env = res.envelope()
+    validate_against("cli/error.json", env)
+    assert env["error"]["code"] == "usage"
+
+
+def test_unexpected_exception_while_parsing_is_an_internal_envelope(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom() -> None:
+        raise OverflowError("secret detail")
+
+    monkeypatch.setattr("jobsctl.cli.build_parser", boom)
+    res = run_cli(capsys, "--json", "list")
+    assert res.code == 1
+    env = res.envelope()
+    validate_against("cli/error.json", env)
+    assert env["error"] == {"code": "internal", "message": "internal error: OverflowError"}
+    res = run_cli(capsys, "list")
+    assert res.code == 1
+    assert "secret detail" not in res.err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["list", "--limit", "9" * 5000],
+        ["show", JID, "--attempt", "9" * 5000],
+        ["cancel", JID, "--force", "--wait-timeout", "9" * 5000],
+        ["cancel", JID, "--force", "--wait-timeout", "9" * 5000 + "s"],
+        ["add", "--timeout", "9" * 5000 + "m", "--", "x"],
+        ["add", "--priority", "9" * 5000, "--", "x"],
+        ["export", "--since", "9" * 5000 + "h"],
+        ["export", "--since", "9" * 5000],
+    ],
+)
+def test_huge_digit_strings_give_short_usage_errors(
+    capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
+    res = run_cli(capsys, *argv)
+    assert res.code == 2
+    assert len(res.err) < 400
+    for internal in ("ValueError", "parse_duration", "int()", "Traceback"):
+        assert internal not in res.err
+
+
+@pytest.mark.parametrize("flag", [["--attempt"], ["--limit"], ["--max-starts"]])
+def test_counts_need_at_least_one(capsys: pytest.CaptureFixture[str], flag: list[str]) -> None:
+    command = {"--attempt": ["show", JID], "--limit": ["list"], "--max-starts": ["run"]}[flag[0]]
+    for bad in ("0", "-1"):
+        assert run_cli(capsys, *command, *flag, bad).code == 2
+
+
+def test_cwd_with_a_newline_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    assert run_cli(capsys, "add", "--cwd", "/a\nb", "--", "x").code == 2
+
+
+def test_leading_zero_duration_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    assert run_cli(capsys, "add", "--timeout", "05m", "--", "x").code == 2
+    assert run_cli(capsys, "add", "--timeout", "5m", "--", "x").code == 1

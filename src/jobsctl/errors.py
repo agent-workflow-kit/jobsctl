@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import re
 from typing import Any
 
 REFUSAL_REASONS = frozenset(
@@ -19,6 +20,8 @@ REFUSAL_REASONS = frozenset(
         "attempt_mismatch",
     }
 )
+
+_JOB_ID_RE = re.compile(r"^jb-[a-z2-7]{8}\Z")
 
 
 class ExitCode(enum.IntEnum):
@@ -91,6 +94,10 @@ class JobsctlError(Exception):
             raise ValueError(f"unknown refusal reason {reason!r}")
         if (code == "ambiguous") != (candidates is not None):
             raise ValueError("candidates are required with, and only with, code 'ambiguous'")
+        if candidates is not None and (
+            len(candidates) < 2 or not all(_JOB_ID_RE.match(c) for c in candidates)
+        ):
+            raise ValueError("candidates are at least two full job ids (jb- and 8 of a-z2-7)")
         super().__init__(message)
         self.code = code
         self.message = message

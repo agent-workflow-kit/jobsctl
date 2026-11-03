@@ -79,7 +79,13 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 
 | Module | Responsibility |
 |---|---|
-| `cli.py` | argparse, global flags, output formatting, exit codes and error JSON, sanitizing echoed input in human error messages |
+| `cli.py` | entry point: parse, usage checks, config load (`TODO(#3)`), dispatch, exit codes |
+| `cli_surface.py` | the frozen argparse surface (commands, global flags) and the flag-combination usage checks |
+| `cli_values.py` | flag value grammars as `type=` callables: durations, timestamps, names, ids; `TODO(#4)`: the parsing functions move to the shared grammar modules (`durations.py`, `timestamps.py`, `ids.py`), leaving the `type=` adapters here |
+| `cli_registry.py` | the `@command` registry and the per-invocation `Context` |
+| `cli_output.py` | the error envelope and JSON line output (stdout with `--json`, stderr otherwise) |
+| `actors.py`, `checks.py`, `errors.py` | the actor grammar and the human-only gate; the usage, lookup, state, human check order; error codes, exit codes and the error envelope |
+| `textsafe.py` | the sanitizer for human output and echoed input |
 | `commands/` | one module per command group (`add`, `query` (list/show/wait/capacity/queues), `order` (move/pin/priority), `holds` (hold/release/resolve), `cancel`, `retry`, `labels`, `maintenance` (run/reconcile/prune/export), `cron`) |
 | `runner.py` | the pass: runner lease, identity checks, the `pass_requested` claim loop, selection, shim spawning and recording the shim's identity, reaping its own children, hand-off to `_deliver`, batched retention, checkpoint |
 | `shim.py` | `_shim`: schema check, identity confirmation (CAS on `claim_id`, polling while the pass has not recorded it), job lease wait, delivery of earlier events, start sequence (job re-reads and hook polling for cancel, atomic spawn), force-request check at every tail flush, output pump, timeout, signal sequence, result file, final transition |
@@ -88,10 +94,10 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 | `store.py` | connection setup, additive migrations at open (CLI commands only) and schema version checks (D31), transactions, compare-and-set transitions, the hook outbox, counters |
 | `order.py` | position keys, rank computation, the selection algorithm, capacity counts, `blocked_by` |
 | `env.py` | the canonical environment (`PATH` cleaning, ignored names), the job environment, safe `env_file` loading (trust-anchor checks, line format) |
-| `output.py` | ring buffer, live-flush withholding, masking (the masking set and the `add` secret refusal), sanitizing, compression |
+| `output.py` | planned (output-capture issue): ring buffer, live-flush withholding, masking (the masking set and the `add` secret refusal), sanitizing, compression |
 | `hooks.py` | sync hook execution under the unreaped-leader rule (process groups, timeouts, selectors, output read in memory for `decision_id`, `hook_messages` and the `hook_ran` excerpt), payload building, leaving async events to `_deliver` (D39), stopping a running hook when a CLI command is interrupted (D48) |
 | `config.py` | Pydantic models, drop-ins, precedence (files and flags only), absolute `--config` hand-off; errors name keys, never `env.*` values |
-| `ids.py`, `durations.py` | id generation (checked against `pruned_ids`) and prefix lookup; duration grammar |
+| `ids.py`, `durations.py`, `timestamps.py` | planned (`TODO(#4)`): id generation (checked against `pruned_ids`) and prefix lookup; duration and timestamp grammars, moved out of `cli_values.py` |
 | `audit.py` | `audit.jsonl` and `log.jsonl` writers (`seq` allocation, D42), diagnostics files (D43) |
 | `procs.py` | process identity, boot id, liveness, subreaper, pidfds (including group signals where the kernel has them), dumpability, group probing (Linux and macOS) |
 | `gateway.py` | every process spawn, signal, wait, file lock and clock access, so tests replace them with fakes |
