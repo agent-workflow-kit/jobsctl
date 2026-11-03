@@ -18,15 +18,40 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from jobsctl.errors import JobsctlError
 from jobsctl.store_db import Store, Tx
 from jobsctl.store_schema import ALL_STATUSES, NON_TERMINAL_STATUSES
 
 LEASE_TTL_SECONDS = 60  # callers compute `expires_at` = now + this (interface.md, Leases)
 _LEASE_NAME_RE = re.compile(r"^(runner|deliver|job:[a-z0-9-]{1,64})\Z")  # TODO(#4): job id type
+# The store's own fixed-width UTC form (interface.md, Timestamps), so leases compare as strings.
+# TODO(#4): switch to the shared timestamp parser.
+_LEASE_TIME_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z\Z")
+_TAKE_LEASE_TRIES = 3
+_UNIQUE_KEY_CONFLICT = "UNIQUE constraint failed: jobs.unique_key"
 
 # Columns a caller may never set through the generic helpers: identity and the CAS keys.
 _JOB_FROZEN = frozenset({"id", "status"})
 _ATTEMPT_FROZEN = frozenset({"job_id", "n", "claim_id"})
+
+
+class UniqueKeyConflict(JobsctlError):
+    """A transition into a non-terminal status collides with a live job's ``unique_key``.
+
+    Refused (exit 20, ``duplicate_key``) with ``details.job_id`` of the job holding the key
+    (interface.md, Unique keys and ``retry``). Any other constraint violation, such as a
+    duplicate outbox ``event_id``, stays a :class:`sqlite3.IntegrityError`.
+    """
+
+    def __init__(self, job_id: str, holder: str | None) -> None:
+        super().__init__(
+            "refused",
+            f"another non-terminal job ({holder or 'unknown'}) holds the unique key of {job_id}",
+            reason="duplicate_key",
+            details=None if holder is None else {"job_id": holder},
+        )
+        self.job_id = job_id
+        self.holder = holder
 
 
 @dataclass(frozen=True)
@@ -84,6 +109,27 @@ def insert_job(tx: Tx, values: Mapping[str, Any]) -> bool:
     return cur.rowcount == 1
 
 
+def _update_job(
+    tx: Tx, job_id: str, sql: str, params: list[Any], updates: Mapping[str, Any]
+) -> int:
+    """Run a job ``UPDATE``; a live ``unique_key`` collision becomes :class:`UniqueKeyConflict`."""
+    try:
+        return tx.execute(sql, params).rowcount
+    except sqlite3.IntegrityError as exc:
+        if str(exc) != _UNIQUE_KEY_CONFLICT:
+            raise
+        key = updates.get("unique_key")
+        if key is None:
+            row = tx.one("SELECT unique_key FROM jobs WHERE id = ?", [job_id])
+            key = None if row is None else row["unique_key"]
+        live = ", ".join("?" for _ in NON_TERMINAL_STATUSES)
+        holder = tx.one(
+            f"SELECT id FROM jobs WHERE unique_key = ? AND status IN ({live}) AND id != ?",
+            [key, *NON_TERMINAL_STATUSES, job_id],
+        )
+        raise UniqueKeyConflict(job_id, None if holder is None else str(holder["id"])) from exc
+
+
 def transition_job(
     tx: Tx,
     job_id: str,
@@ -97,15 +143,18 @@ def transition_job(
     """Compare-and-set a job's transition on ``(id, status, attempt)``.
 
     One ``UPDATE ... WHERE id = ? AND status = ? AND attempt = ?``. When it wins, ``events`` are
-    inserted in the same transaction; when it loses nothing is written.
+    inserted in the same transaction; when it loses nothing is written. Raises
+    :class:`UniqueKeyConflict` when the job would become non-terminal while another non-terminal
+    job holds its ``unique_key``.
     """
     _check_status(expect_status)
     _check_status(to_status)
-    sets, values = _assignments(tx.store, "jobs", updates or {}, _JOB_FROZEN)
+    updates = updates or {}
+    sets, values = _assignments(tx.store, "jobs", updates, _JOB_FROZEN)
     sql = "UPDATE jobs SET status = ?" + (f", {sets}" if sets else "")
     sql += " WHERE id = ? AND status = ? AND attempt = ?"
-    cur = tx.execute(sql, [to_status, *values, job_id, expect_status, expect_attempt])
-    if cur.rowcount != 1:
+    params = [to_status, *values, job_id, expect_status, expect_attempt]
+    if _update_job(tx, job_id, sql, params, updates) != 1:
         return False
     for event in events:
         outbox_insert(tx, job_id, event)
@@ -128,14 +177,15 @@ def transition_job_by_claim(
     """
     _check_status(expect_status)
     _check_status(to_status)
-    sets, values = _assignments(tx.store, "jobs", updates or {}, _JOB_FROZEN)
+    updates = updates or {}
+    sets, values = _assignments(tx.store, "jobs", updates, _JOB_FROZEN)
     sql = "UPDATE jobs SET status = ?" + (f", {sets}" if sets else "")
     sql += (
         " WHERE id = ? AND status = ? AND EXISTS (SELECT 1 FROM attempts a"
         " WHERE a.job_id = jobs.id AND a.n = jobs.attempt AND a.claim_id = ?)"
     )
-    cur = tx.execute(sql, [to_status, *values, job_id, expect_status, claim_id])
-    if cur.rowcount != 1:
+    params = [to_status, *values, job_id, expect_status, claim_id]
+    if _update_job(tx, job_id, sql, params, updates) != 1:
         return False
     for event in events:
         outbox_insert(tx, job_id, event)
@@ -221,8 +271,16 @@ def counter_incr(tx: Tx, name: str, by: int = 1) -> int:
 
 
 def counter_cas(tx: Tx, name: str, expected: int, new: int) -> bool:
-    """Set the counter to ``new`` only if it is ``expected`` (an absent counter reads 0)."""
-    tx.execute("INSERT INTO counters (name, value) VALUES (?, 0) ON CONFLICT DO NOTHING", [name])
+    """Set the counter to ``new`` only if it is ``expected`` (an absent counter reads 0).
+
+    A lost compare-and-set changes nothing: a missing counter is created only when it wins.
+    """
+    if expected == 0:
+        cur = tx.execute(
+            "INSERT INTO counters (name, value) VALUES (?, ?) ON CONFLICT DO NOTHING", [name, new]
+        )
+        if cur.rowcount == 1:
+            return True
     cur = tx.execute(
         "UPDATE counters SET value = ? WHERE name = ? AND value = ?", [new, name, expected]
     )
@@ -241,6 +299,11 @@ def _check_lease_name(name: str) -> None:
         raise ValueError(f"not a lease name: {name!r}")
 
 
+def _check_lease_time(value: str) -> None:
+    if not _LEASE_TIME_RE.match(value):
+        raise ValueError(f"not a fixed-width UTC timestamp (2026-10-31T12:00:00.000Z): {value!r}")
+
+
 def take_lease(
     store: Store, name: str, holder: str, *, now: str, expires_at: str, is_alive: IsAlive
 ) -> bool:
@@ -250,9 +313,26 @@ def take_lease(
     it only when the liveness check is inconclusive (interface.md, Leases). ``now`` and
     ``expires_at`` are fixed-width UTC timestamps, so they compare as strings. The liveness check
     runs outside any transaction; the single ``UPDATE``/``INSERT`` carries the observed row, so
-    a concurrent taker makes it lose rather than steal.
+    a concurrent taker makes it lose rather than steal. When the row changed between the
+    observation and the compare-and-set (e.g. it was released), the take observes again, up to
+    3 times in all, before it returns ``False``.
     """
     _check_lease_name(name)
+    _check_lease_time(now)
+    _check_lease_time(expires_at)
+    for _ in range(_TAKE_LEASE_TRIES):
+        won = _take_lease_once(
+            store, name, holder, now=now, expires_at=expires_at, is_alive=is_alive
+        )
+        if won is not None:
+            return won
+    return False
+
+
+def _take_lease_once(
+    store: Store, name: str, holder: str, *, now: str, expires_at: str, is_alive: IsAlive
+) -> bool | None:
+    """One observe-then-compare-and-set; ``None`` when the row changed in between."""
     row = store.query_one("SELECT holder_identity, expires_at FROM leases WHERE name = ?", [name])
     if row is None:
         with store.write() as tx:
@@ -261,7 +341,7 @@ def take_lease(
                 "ON CONFLICT (name) DO NOTHING",
                 [name, holder, expires_at],
             )
-            return cur.rowcount == 1
+            return True if cur.rowcount == 1 else None
     observed_holder, observed_expiry = str(row["holder_identity"]), str(row["expires_at"])
     if observed_holder != holder:
         alive = is_alive(observed_holder)
@@ -275,12 +355,13 @@ def take_lease(
             "WHERE name = ? AND holder_identity = ? AND expires_at = ?",
             [holder, expires_at, name, observed_holder, observed_expiry],
         )
-        return cur.rowcount == 1
+        return True if cur.rowcount == 1 else None
 
 
 def lease_renew(tx: Tx, name: str, holder: str, expires_at: str) -> bool:
     """Extend a lease; ``False`` when ``holder`` no longer holds it (it was taken over)."""
     _check_lease_name(name)
+    _check_lease_time(expires_at)
     cur = tx.execute(
         "UPDATE leases SET expires_at = ? WHERE name = ? AND holder_identity = ?",
         [expires_at, name, holder],

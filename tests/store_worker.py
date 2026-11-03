@@ -132,7 +132,7 @@ def cmd_hold(state: str, go: str, wid: str, rest: list[str]) -> int:
 
 
 def cmd_stream(state: str, go: str, wid: str, rest: list[str]) -> int:
-    """Commit (counter, row) pairs forever, until killed."""
+    """Commit (counter, row) pairs forever, until killed; report the first commit."""
     with open_store(state, 20.0) as store:
         say(ready=True)
         while True:
@@ -141,6 +141,8 @@ def cmd_stream(state: str, go: str, wid: str, rest: list[str]) -> int:
                 tx.execute(
                     "INSERT INTO queues_seen (name, first_seen) VALUES (?, ?)", [f"q{n}", NOW]
                 )
+            if n == 1:  # once only, so an unread pipe never blocks the writer
+                say(committed=n)
 
 
 def cmd_internal_open(state: str, go: str, wid: str, rest: list[str]) -> int:

@@ -103,12 +103,20 @@ class Tx:
             raise translate(exc, timeout=self._store.busy_timeout) from exc
 
     def one(self, sql: str, params: Sequence[Any] | dict[str, Any] = ()) -> sqlite3.Row | None:
-        row = self.execute(sql, params).fetchone()
+        cur = self.execute(sql, params)
+        try:  # stepping to the next row can fail too (busy, corrupt page)
+            row = cur.fetchone()
+        except sqlite3.Error as exc:
+            raise translate(exc, timeout=self._store.busy_timeout) from exc
         assert row is None or isinstance(row, sqlite3.Row)
         return row
 
     def all(self, sql: str, params: Sequence[Any] | dict[str, Any] = ()) -> list[sqlite3.Row]:
-        return list(self.execute(sql, params).fetchall())
+        cur = self.execute(sql, params)
+        try:
+            return list(cur.fetchall())
+        except sqlite3.Error as exc:
+            raise translate(exc, timeout=self._store.busy_timeout) from exc
 
     def after_commit(self, callback: Callable[[], None]) -> None:
         """Run ``callback`` after a successful COMMIT (never on rollback): the place to log."""
@@ -168,7 +176,7 @@ class Store:
             raise translate(exc, timeout=busy_timeout) from exc
         conn.row_factory = sqlite3.Row
         try:
-            version = _read_version(conn)
+            version = _refuse_foreign(conn)  # before _configure, so a refused file is untouched
             known = len(migrations)
             if mode is OpenMode.INTERNAL and version < known:
                 raise SchemaOlderError(version, known)
@@ -229,7 +237,7 @@ class Store:
         for callback in tx._callbacks:
             try:
                 callback()
-            except Exception as exc:  # run every callback, then report the first failure
+            except BaseException as exc:  # run every callback (even after Ctrl-C), report the first
                 first = first or exc
         if first is not None:
             raise first
@@ -324,6 +332,24 @@ def _read_version(conn: sqlite3.Connection) -> int:
     return int(row[0])
 
 
+def _refuse_foreign(conn: sqlite3.Connection) -> int:
+    """Refuse a database jobsctl did not create: a negative version, or version 0 with tables.
+
+    Returns the version. It and the table count come from one statement, so a migration another
+    process commits in between cannot make a fresh database look foreign.
+    """
+    version, count = conn.execute(
+        "SELECT (SELECT user_version FROM pragma_user_version),"
+        " (SELECT count(*) FROM sqlite_master)"
+    ).fetchone()
+    version = int(version)
+    if version < 0:
+        raise JobsctlError("internal", f"state.db is not a jobsctl database (version {version})")
+    if version == 0 and count:
+        raise JobsctlError("internal", "state.db is not a jobsctl database (unversioned)")
+    return version
+
+
 def _configure(conn: sqlite3.Connection, busy_timeout: float) -> None:
     """Per-connection pragmas; WAL is persistent, set outside any transaction."""
     conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout * 1000)}")
@@ -356,11 +382,7 @@ def _migrate(conn: sqlite3.Connection, migrations: tuple[tuple[str, ...], ...]) 
             check_additive(statement)
     conn.execute("BEGIN IMMEDIATE")
     try:
-        current = _read_version(conn)  # another process may have migrated while we waited
-        if current == 0:
-            (count,) = conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
-            if count:
-                raise JobsctlError("internal", "state.db is not a jobsctl database (unversioned)")
+        current = _refuse_foreign(conn)  # another process may have migrated while we waited
         for target in range(current, len(migrations)):
             for statement in migrations[target]:
                 conn.execute(statement)

@@ -21,12 +21,11 @@ from typing import Any
 
 import pytest
 
-from jobsctl import gateway
 from jobsctl.errors import JobsctlError
 from jobsctl.store_db import OpenMode, Store
 from jobsctl.store_schema import MIGRATIONS
 from tests.conftest import validate_against
-from tests.store_helpers import insert_row, job_values
+from tests.store_helpers import insert_row, job_values, popen
 
 WORKER = Path(__file__).with_name("store_worker.py")
 TIMEOUT = 90
@@ -66,7 +65,7 @@ class Pool:
 
     def spawn(self, state: Path, cmd: str, *args: str, wid: str | None = None) -> Worker:
         n = len(self.workers)
-        proc = gateway.popen(
+        proc = popen(
             [sys.executable, "-I", str(WORKER), cmd, str(state), str(self.go_file),
              wid or f"w{n:02d}", *args],
             env=self.env,
@@ -223,14 +222,15 @@ def test_a_busy_database_is_exit_1_busy(pool: Pool, state: Path) -> None:
     Store.open(state).close()
     holder = pool.spawn(state, "hold")
     assert holder.read_line() == {"ready": True, "in_tx": True}
-    with Store.open(state, busy_timeout=0.3) as store:
+    busy_timeout = 0.3
+    with Store.open(state, busy_timeout=busy_timeout) as store:
         started = time.monotonic()
         with pytest.raises(JobsctlError) as err, store.write():
             pass
         waited = time.monotonic() - started
     assert err.value.code == "busy"
     assert err.value.exit_code == 1
-    assert 0.25 <= waited < 5  # it waited out the busy timeout, then gave up
+    assert 0.25 <= waited < busy_timeout + 10  # it waited out the busy timeout, then gave up
     validate_against("cli/error.json", err.value.envelope())
     # readers still work, and see no uncommitted row
     with Store.open(state, busy_timeout=0.3) as reader:
@@ -274,13 +274,15 @@ def test_sigkill_while_committing_streams_keeps_transactions_atomic(
     Store.open(state).close()
     for round_ in range(6):
         writer = pool.spawn(state, "stream")
-        writer.read_line()
-        time.sleep(0.05 + 0.03 * round_)
+        assert writer.read_line() == {"ready": True}
+        assert writer.read_line() == {"committed": 1}  # kill only once something committed
+        time.sleep(0.01 * round_)
         pool.kill(writer)
         with Store.open(state, busy_timeout=2) as store:
             counter = store.query_one("SELECT value FROM counters WHERE name = 'stream'")
             rows = store.query_all("SELECT name FROM queues_seen")
             total = 0 if counter is None else counter["value"]
+            assert total >= 1  # at least the reported transaction is there
             assert len(rows) == total  # the counter and its row commit together or not at all
             assert {r["name"] for r in rows} == {f"q{i}" for i in range(1, total + 1)}
             assert store.query_one("PRAGMA integrity_check")[0] == "ok"  # type: ignore[index]

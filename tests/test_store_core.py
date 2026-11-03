@@ -40,7 +40,7 @@ def test_state_dir_defaults_and_ignores_relative_xdg() -> None:
     assert resolve_state_dir({**env, "XDG_STATE_HOME": ""}) == Path("/h/.local/state/jobsctl")
 
 
-@pytest.mark.parametrize("umask", [0o000, 0o077, 0o022])
+@pytest.mark.parametrize("umask", [0o000, 0o077, 0o022, 0o277])
 def test_modes_do_not_depend_on_the_umask(state: Path, umask: int) -> None:
     old = os.umask(umask)
     try:
@@ -93,11 +93,12 @@ def test_a_symlinked_state_dir_is_refused(tmp_path: Path, state: Path) -> None:
     assert list(target.iterdir()) == []
 
 
-def test_a_symlinked_subdirectory_is_refused(tmp_path: Path, state: Path) -> None:
+@pytest.mark.parametrize("sub", ["shims", "diag"])
+def test_a_symlinked_subdirectory_is_refused(tmp_path: Path, state: Path, sub: str) -> None:
     target = tmp_path / "elsewhere"
     target.mkdir()
     state.mkdir(parents=True)
-    (state / "shims").symlink_to(target)
+    (state / sub).symlink_to(target)
     with pytest.raises(JobsctlError, match="unsafe"):
         Store.open(state)
 
@@ -247,6 +248,41 @@ def test_commit_and_rollback(state: Path) -> None:
         ids = [r["id"] for r in store.query_all("SELECT id FROM jobs")]
         assert ids == ["jb-aaaaaaaa"]
         assert not store.conn.in_transaction
+
+
+def test_an_interrupt_in_a_commit_callback_still_runs_the_others(state: Path) -> None:
+    calls: list[str] = []
+
+    def interrupted() -> None:
+        raise KeyboardInterrupt
+
+    def bad() -> None:
+        raise OSError("log failed")
+
+    with Store.open(state) as store:
+        with pytest.raises(KeyboardInterrupt), store.write() as tx:
+            tx.after_commit(interrupted)
+            tx.after_commit(lambda: calls.append("second"))
+            tx.after_commit(bad)
+            tx.after_commit(lambda: calls.append("fourth"))
+        assert calls == ["second", "fourth"]
+
+
+def test_a_fetch_time_error_is_translated(state: Path) -> None:
+    def boom(x: int) -> int:
+        if x == 2:
+            raise ValueError("boom")
+        return x
+
+    sql = "SELECT boom(column1) AS v FROM (VALUES (1), (2))"
+    with Store.open(state) as store:
+        store.conn.create_function("boom", 1, boom)
+        # execute() steps to row 1; the error comes from stepping to row 2 during the fetch
+        for opener in (store.write, store.read):
+            for fetch in ("all", "one"):
+                with opener() as tx, pytest.raises(JobsctlError) as err:
+                    getattr(tx, fetch)(sql)
+                assert err.value.code == "internal"
 
 
 def test_after_commit_runs_only_after_a_commit(state: Path) -> None:
@@ -453,6 +489,55 @@ def test_an_unversioned_foreign_database_is_refused(state: Path) -> None:
         assert [r[0] for r in check.execute("SELECT name FROM sqlite_master")] == ["precious"]
     finally:
         check.close()
+
+
+def foreign_db(state: Path, *, version: int = 0, table: bool = True) -> Path:
+    prepare_state_dir(state, create=True)
+    db = state / "state.db"
+    foreign = sqlite3.connect(db)
+    if table:
+        foreign.execute("CREATE TABLE precious (x)")
+    foreign.execute(f"PRAGMA user_version = {version}")
+    foreign.commit()
+    foreign.close()
+    return db
+
+
+def journal_mode(db: Path) -> str:
+    check = sqlite3.connect(db)
+    try:
+        return str(check.execute("PRAGMA journal_mode").fetchone()[0])
+    finally:
+        check.close()
+
+
+@pytest.mark.parametrize("open_mode", [OpenMode.CLI, OpenMode.INTERNAL])
+def test_a_foreign_database_is_refused_unchanged_by_every_open(
+    state: Path, open_mode: OpenMode
+) -> None:
+    db = foreign_db(state)
+    before = db.read_bytes()
+    with pytest.raises(JobsctlError, match="not a jobsctl database") as err:
+        Store.open(state, mode=open_mode)
+    assert not isinstance(err.value, SchemaOlderError)
+    assert err.value.code == "internal"
+    assert db.read_bytes() == before
+    assert journal_mode(db) == "delete"  # never switched to WAL
+    assert not (state / "state.db-wal").exists()
+
+
+@pytest.mark.parametrize("open_mode", [OpenMode.CLI, OpenMode.INTERNAL])
+@pytest.mark.parametrize("table", [True, False])
+def test_a_negative_schema_version_is_refused(
+    state: Path, open_mode: OpenMode, table: bool
+) -> None:
+    db = foreign_db(state, version=-1, table=table)
+    before = db.read_bytes()
+    with pytest.raises(JobsctlError, match="not a jobsctl database") as err:
+        Store.open(state, mode=open_mode)
+    assert not isinstance(err.value, SchemaOlderError)
+    assert db.read_bytes() == before
+    assert journal_mode(db) == "delete"
 
 
 @pytest.mark.parametrize(

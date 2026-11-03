@@ -1,10 +1,11 @@
 """The state directory: location, creation and ownership checks (interface.md, Audit and log).
 
 ``<state dir>`` holds ``state.db`` (0600), ``shims/`` and ``diag/`` (0700); the directory itself
-is 0700. Everything is created with an explicit mode, independent of the umask. A final path
-component that is a symlink, a directory or file owned by someone else, or a database that is not
-a regular file is refused. A directory we own with group or other permissions is tightened.
-Ancestors of the state directory may be symlinks (``~/.local`` often is).
+is 0700. Whatever jobsctl creates (these and any missing ancestors) is set to its exact mode with
+chmod right after creation, so neither a permissive nor a restrictive umask (e.g. 0277) changes
+it. A final path component that is a symlink, a directory or file owned by someone else, or a
+database that is not a regular file is refused. A directory we own with group or other permissions
+is tightened. Ancestors of the state directory may be symlinks (``~/.local`` often is).
 """
 
 from __future__ import annotations
@@ -52,15 +53,35 @@ def _unsafe(path: Path, why: str) -> JobsctlError:
     return JobsctlError("internal", f"state path {path} is unsafe: {why}")
 
 
+def _mkdir_private(path: Path) -> None:
+    """Create ``path`` as a 0700 directory regardless of the umask; an existing one is kept."""
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        return
+    except OSError as exc:
+        raise JobsctlError("internal", f"cannot create {path}: {exc.strerror}") from exc
+    try:
+        os.chmod(path, 0o700)  # the umask may have removed our own bits
+    except OSError as exc:
+        raise JobsctlError("internal", f"cannot set the mode of {path}: {exc.strerror}") from exc
+
+
+def _makedirs_private(path: Path) -> None:
+    """``mkdir -p`` where every directory created is 0700 (existing ones are left alone)."""
+    missing: list[Path] = []
+    current = path
+    while not os.path.lexists(current) and current != current.parent:
+        missing.append(current)
+        current = current.parent
+    for directory in reversed(missing):
+        _mkdir_private(directory)
+
+
 def _secure_dir(path: Path, *, create: bool) -> None:
     """Make ``path`` an owned, 0700-or-tighter real directory, creating it when ``create``."""
     if create:
-        try:
-            os.mkdir(path, 0o700)
-        except FileExistsError:
-            pass
-        except OSError as exc:
-            raise JobsctlError("internal", f"cannot create {path}: {exc.strerror}") from exc
+        _mkdir_private(path)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError as exc:
@@ -82,10 +103,7 @@ def prepare_state_dir(root: Path, *, create: bool) -> StatePaths:
     """Validate (and with ``create``, create) the state directory and its subdirectories."""
     paths = StatePaths(root)
     if create:
-        try:
-            os.makedirs(root.parent, mode=0o700, exist_ok=True)
-        except OSError as exc:
-            raise JobsctlError("internal", f"cannot create {root.parent}: {exc.strerror}") from exc
+        _makedirs_private(root.parent)
     _secure_dir(root, create=create)
     for sub in (paths.shims, paths.diag):
         _secure_dir(sub, create=create)
@@ -94,12 +112,22 @@ def prepare_state_dir(root: Path, *, create: bool) -> StatePaths:
 
 def prepare_db_file(db: Path, *, create: bool) -> None:
     """Make sure ``db`` is a private regular file we own; create it empty (0600) when ``create``."""
-    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_CREAT if create else 0)
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+    created = False
     try:
-        fd = os.open(db, flags, 0o600)
+        if create:
+            try:
+                fd = os.open(db, flags | os.O_CREAT | os.O_EXCL, 0o600)
+                created = True
+            except FileExistsError:
+                fd = os.open(db, flags)
+        else:
+            fd = os.open(db, flags)
     except OSError as exc:
         raise _unsafe(db, f"cannot open ({exc.strerror})") from exc
     try:
+        if created:
+            os.fchmod(fd, 0o600)  # the umask may have removed our own bits
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise _unsafe(db, "not a regular file")

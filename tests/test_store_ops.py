@@ -14,6 +14,7 @@ import pytest
 from jobsctl.store_db import Store
 from jobsctl.store_ops import (
     OutboxEvent,
+    UniqueKeyConflict,
     counter_cas,
     counter_get,
     counter_incr,
@@ -227,10 +228,45 @@ def test_a_failing_event_insert_rolls_back_the_transition(store: Store) -> None:
 def test_a_transition_into_a_live_unique_key_conflict_raises(store: Store) -> None:
     seed(store, id="jb-aaaaaaaa", unique_key="k", status="done")
     seed(store, id="jb-bbbbbbbb", unique_key="k", status="queued")
-    with pytest.raises(sqlite3.IntegrityError), store.write() as tx:
+    with pytest.raises(UniqueKeyConflict) as err, store.write() as tx:
         transition_job(
             tx, "jb-aaaaaaaa", expect_status="done", expect_attempt=0, to_status="queued"
         )
+    assert (err.value.code, err.value.reason) == ("refused", "duplicate_key")
+    assert err.value.details == {"job_id": "jb-bbbbbbbb"}
+    assert err.value.exit_code == 20
+    assert status_of(store, "jb-aaaaaaaa") == ("done", 0)
+
+
+def test_a_transition_that_sets_a_live_unique_key_names_its_holder(store: Store) -> None:
+    seed(store, id="jb-aaaaaaaa", status="queued")
+    seed(store, id="jb-bbbbbbbb", unique_key="k", status="running")
+    with pytest.raises(UniqueKeyConflict) as err, store.write() as tx:
+        transition_job(
+            tx,
+            "jb-aaaaaaaa",
+            expect_status="queued",
+            expect_attempt=0,
+            to_status="held",
+            updates={"unique_key": "k"},
+        )
+    assert err.value.details == {"job_id": "jb-bbbbbbbb"}
+
+
+def test_a_duplicate_event_id_is_not_a_unique_key_conflict(store: Store) -> None:
+    seed(store, unique_key="k", status="done")
+    with pytest.raises(sqlite3.IntegrityError) as err, store.write() as tx:
+        transition_job(
+            tx,
+            "jb-aaaaaaaa",
+            expect_status="done",
+            expect_attempt=0,
+            to_status="queued",
+            events=[event("dup"), event("dup")],
+        )
+    assert not isinstance(err.value, UniqueKeyConflict)
+    assert "hook_outbox.event_id" in str(err.value)
+    assert status_of(store) == ("done", 0)
 
 
 def test_claim_based_transition_and_attempt_update(store: Store) -> None:
@@ -376,6 +412,14 @@ def test_counter_cas(store: Store) -> None:
         assert counter_get(tx, "other") == 0
 
 
+def test_a_lost_counter_cas_on_a_missing_counter_leaves_no_row(store: Store) -> None:
+    with store.write() as tx:
+        assert not counter_cas(tx, "missing", 1, 2)
+        assert tx.one("SELECT 1 FROM counters WHERE name = 'missing'") is None
+        assert counter_cas(tx, "made", 0, 0)  # expected 0 on a missing counter wins
+        assert counter_get(tx, "made") == 0
+
+
 # -- leases ----------------------------
 
 T0, T1, T2 = "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:30.000Z", "2026-01-01T00:01:00.000Z"
@@ -445,7 +489,9 @@ def test_a_takeover_that_loses_the_race_does_not_steal(store: Store) -> None:
     """The row changes between the observation and the compare-and-set: the take loses."""
     take_lease(store, "runner", "A", now=T0, expires_at=T2, is_alive=lambda _h: False)
 
-    def alive_then_racer_wins(_holder: str) -> bool:
+    def alive_then_racer_wins(holder: str) -> bool:
+        if holder == "C":
+            return True  # B re-observes after losing: C is alive, so B gives up
         other = Store.open(store.paths.root)
         try:
             assert take_lease(
@@ -459,6 +505,64 @@ def test_a_takeover_that_loses_the_race_does_not_steal(store: Store) -> None:
         store, "runner", "B", now=T1, expires_at=T3, is_alive=alive_then_racer_wins
     )
     assert lease_row(store) == ("C", T3)
+
+
+def test_a_take_that_loses_to_a_release_retries_and_wins(store: Store) -> None:
+    """The holder releases between the observation and the compare-and-set: re-observe, take."""
+    take_lease(store, "runner", "A", now=T0, expires_at=T2, is_alive=lambda _h: False)
+    seen: list[str] = []
+
+    def dead_and_released(holder: str) -> bool:
+        seen.append(holder)
+        other = Store.open(store.paths.root)
+        try:
+            with other.write() as tx:
+                assert lease_release(tx, "runner", "A")
+        finally:
+            other.close()
+        return False
+
+    assert take_lease(store, "runner", "B", now=T1, expires_at=T3, is_alive=dead_and_released)
+    assert seen == ["A"]
+    assert lease_row(store) == ("B", T3)
+
+
+def test_a_take_gives_up_after_bounded_retries(store: Store) -> None:
+    take_lease(store, "runner", "A", now=T0, expires_at=T2, is_alive=lambda _h: False)
+    calls = 0
+
+    def always_changed(_holder: str) -> bool:
+        nonlocal calls
+        calls += 1
+        other = Store.open(store.paths.root)
+        try:  # bump the expiry so every compare-and-set loses
+            with other.write() as tx:
+                tx.execute("UPDATE leases SET expires_at = ?", [f"2026-01-01T00:1{calls}:00.000Z"])
+        finally:
+            other.close()
+        return False
+
+    assert not take_lease(store, "runner", "B", now=T1, expires_at=T3, is_alive=always_changed)
+    assert calls == 3
+    assert lease_row(store)[0] == "A"  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00.000+00:00", "2026-1-01T00:00:00.000Z",
+     "2026-01-01 00:00:00.000Z", "2026-01-01T00:00:00.0000Z", "", "later"],
+)  # fmt: skip
+def test_lease_timestamps_must_be_fixed_width_utc(store: Store, bad: str) -> None:
+    alive = lambda _h: False  # noqa: E731
+    with pytest.raises(ValueError):
+        take_lease(store, "runner", "A", now=bad, expires_at=T2, is_alive=alive)
+    with pytest.raises(ValueError):
+        take_lease(store, "runner", "A", now=T0, expires_at=bad, is_alive=alive)
+    assert lease_row(store) is None
+    take_lease(store, "runner", "A", now=T0, expires_at=T2, is_alive=alive)
+    with store.write() as tx, pytest.raises(ValueError):
+        lease_renew(tx, "runner", "A", bad)
+    assert lease_row(store) == ("A", T2)
 
 
 @pytest.mark.parametrize("name", ["", "runner2", "job:", "job:A", "job:x y", "x'; --", "Runner"])
