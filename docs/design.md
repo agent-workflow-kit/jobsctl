@@ -91,7 +91,10 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 | `shim.py` | `_shim`: schema check, identity confirmation (CAS on `claim_id`, polling while the pass has not recorded it), job lease wait, delivery of earlier events, start sequence (job re-reads and hook polling for cancel, atomic spawn), force-request check at every tail flush, output pump, timeout, signal sequence, result file, final transition |
 | `kill.py` | `_kill`: the signal sequence and finalization for a forced cancel of a `shim_lost` job, under the job lease (D38) |
 | `deliver.py` | `_deliver`: under the `deliver` lease, delivers undelivered synchronous hook events in order, skipping jobs whose `job:<id>` lease has a live holder (D29), and runs async hooks as their parent (at most 8, one per job; D39) |
-| `store.py` | connection setup, additive migrations at open (CLI commands only) and schema version checks (D31), transactions, compare-and-set transitions, the hook outbox, counters |
+| `store_dir.py` | the state directory: `XDG_STATE_HOME` resolution, creation with explicit modes (0700 directories, 0600 `state.db`), refusal of symlinked or foreign-owned final components |
+| `store_schema.py` | the schema as an ordered tuple of additive migrations, and the check that refuses a non-additive statement |
+| `store_db.py` | connection setup (WAL, `synchronous=NORMAL`, busy timeout, `journal_size_limit`, `autocommit=True`), `BEGIN IMMEDIATE` write transactions with after-commit callbacks, migrations at open (CLI commands only) and schema version checks (`SchemaOlderError`, `version_skew`) (D31) |
+| `store_ops.py` | compare-and-set transitions on `(id, status, attempt)` and on `claim_id`, the hook outbox, counters (the gap-free `seq` allocator) and leases with an injected liveness check |
 | `order.py` | position keys, rank computation, the selection algorithm, capacity counts, `blocked_by` |
 | `env.py` | the canonical environment (`PATH` cleaning, ignored names), the job environment, safe `env_file` loading (trust-anchor checks, line format) |
 | `output.py` | planned (output-capture issue): ring buffer, live-flush withholding, masking (the masking set and the `add` secret refusal), sanitizing, compression |
@@ -219,3 +222,6 @@ Plan-level choices that do not change the interface (review pass 3):
 - A duplicate hook `name` within one hook list is `config_invalid`.
 - `run --max-starts N` counts claims across the pass's repeated claim loop.
 - `export --since` and `--after-seq` combine with AND; `--since` accepts RFC 3339 timestamps with any offset.
+- State store (#5): a newer schema is not an error at open, because additive migrations keep older code working (an old shim runs against a migrated database); only long-lived processes report `version_skew`, through `Store.raise_if_newer()` before each iteration. An internal process on an older schema raises `SchemaOlderError` (exit 1) before it writes anything and never creates the database.
+- State store (#5): the outbox's `seq` is its autoincrement key (delivery order) and `event_id` is the payload's id, supplied by the caller. Child tables of `jobs` (`job_labels`, `attempts`, `outputs`, `hook_outbox`) cascade on delete, so `prune` deletes a job in one statement. `PRAGMA foreign_keys` is on for every connection.
+- State store (#5): SQLite 3.35 or later is required (`UPSERT` and `RETURNING`); an older library is refused at open with an `internal` error.
