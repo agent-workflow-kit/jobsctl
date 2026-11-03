@@ -16,7 +16,7 @@ Jobs run detached under a per-job **shim** ([Shim](#shim)), so a job outlives th
 
 A job id is `jb-` followed by 8 characters from the lowercase base32 alphabet `a-z2-7` (`^jb-[a-z2-7]{8}$`). Ids are random, checked for collisions and never reused: [`prune`](#prune) keeps the ids it deletes in a compact table that id generation also checks.
 
-Every command that takes a job id accepts any unique prefix of at least 4 characters after `jb-`; the `jb-` itself is optional in input. A shorter prefix exits 2 (`usage`), a prefix matching several jobs exits 21 (`ambiguous`), an unknown id or a pruned job exits 10 (`not_found`). Output always uses the full id.
+Every command that takes a job id accepts any unique prefix of at least 4 characters after `jb-`; the `jb-` itself is optional in input. A shorter prefix, or an input that is not `jb-` (optional) followed by 4 to 8 characters of `a-z2-7` (uppercase, other characters, a longer id), exits 2 (`usage`); a well-formed id or prefix is normalised to carry `jb-`. A prefix matching several jobs exits 21 (`ambiguous`), a well-formed id or prefix matching no job, or a pruned job, exits 10 (`not_found`). Output always uses the full id.
 
 ### Queues
 
@@ -355,9 +355,9 @@ Applied to the kept raw window every time a tail is produced, in this order (the
 
 1. If output was dropped before the window, discard the window up to and including its first newline; if the window has no newline, discard its first (longest masked value + 256) bytes.
 2. Decode as UTF-8 with `backslashreplace` (invalid bytes become `\xNN`).
-3. Remove terminal escape sequences: CSI, OSC (including titles, clipboard writes and hyperlinks), DCS, SOS/PM/APC, and their 8-bit forms; keep only the last segment of `\r`-rewritten lines.
+3. Remove terminal escape sequences: CSI, OSC (including titles, clipboard writes and hyperlinks), DCS, SOS/PM/APC, and their 8-bit forms; keep only the last segment of `\r`-rewritten lines. A string sequence (OSC, DCS, SOS, PM or APC) that is never terminated is removed to the end of the text.
 4. **Mask:** replace every occurrence of the **masked values** with `***`, longest values first; a multi-line value is masked line by line. The masked values are the values of the variables in `mask_env` (in the canonical environment of the masking process) and of every variable defined in `env_file` (as the masking process read it); a shim adds the `--pass-env` values it read at start sequence step 5 (the union of both reads). Values shorter than 8 characters are not masked (masking them would destroy ordinary output) and produce a `short_secret_not_masked` warning in the log at start.
-5. Escape the remaining control characters (C0 except tab and newline, DEL, C1), bidirectional overrides and invisible format characters as `\uNNNN`.
+5. Escape the remaining control characters (C0 except tab and newline, DEL, C1), bidirectional overrides, invisible format characters and the line and paragraph separators U+2028 and U+2029 as `\uNNNN`.
 6. Cut to the tail size on a line boundary.
 
 Masking is best-effort: it does not catch encoded forms (base64, hex, URL encoding), secrets broken by newlines, slices of a secret, or secrets a job obtains itself ([Residual risks](#residual-risks)). The stored tail is **untrusted**; [`show`](#show) sanitizes it again before printing, and the `--json` field is marked untrusted. Hook stdout and stderr go through the same masking and sanitizing before they are stored or logged ([Hooks](#hooks)).
@@ -446,9 +446,15 @@ All commands support `--json`, `--config <path>`, `--verbose` and `--quiet` ([Gl
 
 Checks run in this order: usage (exit 2), then not found or ambiguous (10, 21), then state refusals (20), then the [human-only](#human-only-flags) check (13), which applies only when the flag would take effect.
 
+`--attempt`, `--limit` and `--max-starts` take integers of at least 1: `0` or a negative number exits 2 (`usage`), including `show --attempt 0`. An attempt number of at least 1 that does not exist exits 10 (`not_found`).
+
+`--verbose` together with `--quiet` exits 2 (`usage`).
+
+The values of `--env` and `--pass-env` are never echoed in any error message, in human or `--json` output; an error names the variable at most. This holds when a mistyped flag pushes a value into a positional or sub-command slot: an echoed input that fails validation is cut at its first `=` and shown as `NAME=...`, and every echoed input is sanitized and capped at 80 characters.
+
 A decision id matches `^[A-Za-z0-9._:@/-]{1,128}$`. A command's decision ids are recorded in its log records (`transition`, `reorder` or `label`, [Audit and log](#audit-and-log)) and, for audited commands, in the audit record.
 
-**Human output** sanitizes every string field (job fields, output tails, notes, hook messages) and every echoed input in error messages with the sanitizer of [Masking and sanitizing](#masking-and-sanitizing) before printing, and so does the [TUI](#tui). Human `add` prints only the job id on stdout; all other human output is unstable and not for parsing.
+**Human output** sanitizes every string field (job fields, output tails, notes, hook messages) and every echoed input in error messages with the sanitizer of [Masking and sanitizing](#masking-and-sanitizing) before printing (in an error message a carriage return or newline is escaped as `\r` or `\n` instead of rewriting the line), and so does the [TUI](#tui). Human `add` prints only the job id on stdout; all other human output is unstable and not for parsing.
 
 ### Human-only flags
 
@@ -514,7 +520,7 @@ Blocks until the job is terminal or `held`, checking about once a second, then p
 | 22 | `wait`'s own `--timeout` expired first (the job is printed in its current status) |
 | 130 | interrupted by Ctrl-C (the job is printed in its current status) |
 
-A job waiting for an automatic retry is `queued`, so `wait` keeps waiting. Exit 22 (`wait_timeout`) is jobsctl's only tool-specific exit code. Output: `schemas/cli/show.json` (exits 0, 12, 13, 20, 22, 130). If jobsctl is upgraded to a newer schema while `wait` waits, it exits 12 with the error `version_skew` instead ([Upgrades](#upgrades), [Errors](#errors)).
+A job waiting for an automatic retry is `queued`, so `wait` keeps waiting. Exit 22 (`wait_timeout`) is jobsctl's only tool-specific exit code; it is an exit code only, with no `--json` error envelope and so no error `code` (the job is printed). Output: `schemas/cli/show.json` (exits 0, 12, 13, 20, 22, 130). If jobsctl is upgraded to a newer schema while `wait` waits, it exits 12 with the error `version_skew` instead ([Upgrades](#upgrades), [Errors](#errors)).
 
 ### `move`
 
@@ -601,7 +607,7 @@ Reports [Capacity](#capacity) for one queue (known or not) or for every known qu
 
 ### Durations
 
-A duration is `<integer><unit>` with unit `s`, `m`, `h` or `d` (e.g. `30s`, `10m`, `2h`, `30d`); zero is invalid, except `cancel --wait-timeout 0`. Config durations use the same grammar. In JSON output durations are integer seconds. `~` at the start of `env_file` and `env.path_prepend` entries expands to the user's home directory.
+A duration is `<integer><unit>` with unit `s`, `m`, `h` or `d` (e.g. `30s`, `10m`, `2h`, `30d`); the integer is at least 1 with no leading zeros (`05m` and `0s` are invalid), and a duration is at most 100 years (`36500d`), which also applies to config durations; the only zero is the bare `0` of `cancel --wait-timeout 0`. Config durations use the same grammar. In JSON output durations are integer seconds. `~` at the start of `env_file` and `env.path_prepend` entries expands to the user's home directory.
 
 ### Timestamps
 
