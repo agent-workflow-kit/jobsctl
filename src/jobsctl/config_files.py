@@ -1,17 +1,21 @@
 """Find, read, merge and validate the config files (interface.md, Config).
 
 `~/.config/jobsctl/config.yaml` (`XDG_CONFIG_HOME` respected) or `--config PATH`, then the
-`config.d/*.yaml` drop-ins next to it in lexical order. Maps merge, hook lists append, every other
-value (scalars and other lists) is replaced by the later file. Config comes only from files: no
-environment variable other than `XDG_CONFIG_HOME` and `HOME` (where the default file lives) is read.
+`config.d/*.yaml` drop-ins next to it in byte-wise lexical order. Maps merge, hook lists append,
+every other value (scalars and other lists) is replaced by the later file. Config comes only from
+files: no environment variable other than `XDG_CONFIG_HOME` and `HOME` (where the default file
+lives) is read.
 
 Every failure is `JobsctlError("config_invalid")` naming the file and the key, never an input
 value: YAML parser messages quote the input, so they are replaced by the position alone.
+Scalars resolve by the YAML 1.2 core schema; anchors, aliases, explicit tags, non-string keys and
+duplicate keys are refused.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import stat
 from pathlib import Path
 from typing import Any, Final
@@ -19,12 +23,13 @@ from typing import Any, Final
 import yaml
 from pydantic import ValidationError
 
-from jobsctl.config import HOOK_NAMES, Config
+from jobsctl.config import ENV_NAME_PATTERN, HOOK_NAMES, Config
 from jobsctl.errors import JobsctlError
 from jobsctl.textsafe import echo, sanitize
 
-MAX_FILE_BYTES: Final = 1024 * 1024
+MAX_FILE_BYTES: Final = 256 * 1024
 MAX_DROP_INS: Final = 256
+MAX_TOTAL_BYTES: Final = 1024 * 1024  # the main file and every drop-in together
 _MAX_ERRORS_SHOWN: Final = 5
 
 
@@ -48,42 +53,76 @@ def handoff_args(config_path: Path | None) -> list[str]:
     absolute path of an explicit `--config`, nothing when the default config is in use."""
     if config_path is None:
         return []
-    return ["--config", os.path.abspath(config_path)]
+    return ["--config", str(absolute(config_path))]
+
+
+def absolute(path: str | os.PathLike[str]) -> Path:
+    """`path` joined to the working directory when relative, without collapsing `..` (the kernel
+    resolves `link/..` through the symlink; a lexical collapse would name another file)."""
+    text = os.fspath(path)
+    return Path(text if os.path.isabs(text) else os.path.join(os.getcwd(), text))
+
+
+def _at(mark: Any) -> str:
+    return f"line {mark.line + 1}, column {mark.column + 1}"
 
 
 class _Rejected(Exception):
-    def __init__(self, message: str, line: int | None = None) -> None:
-        super().__init__(message)
-        self.line = line
+    """A refusal whose message already carries its position and never an input value."""
 
 
 class _StrictLoader(yaml.SafeLoader):
-    """SafeLoader without anchors and aliases (no expansion bombs) and without duplicate keys."""
+    """SafeLoader with YAML 1.2 core-schema scalars and without anchors, aliases (no expansion
+    bombs), explicit tags, non-string keys and duplicate keys."""
+
+    yaml_implicit_resolvers: dict[Any, Any] = {}  # noqa: RUF012 (PyYAML's class-level table)
 
     def compose_node(self, parent: Any, index: Any) -> Any:
         event = self.peek_event()
-        line = event.start_mark.line + 1
+        where = _at(event.start_mark)
         if isinstance(event, yaml.AliasEvent):
-            raise _Rejected("aliases are not allowed", line)
+            raise _Rejected(f"aliases are not allowed at {where}")
         if getattr(event, "anchor", None) is not None:
-            raise _Rejected("anchors are not allowed", line)
+            raise _Rejected(f"anchors are not allowed at {where}")
+        if getattr(event, "tag", None) is not None:
+            raise _Rejected(f"YAML tags are not allowed at {where}")
         return super().compose_node(parent, index)
 
+    def construct_object(self, node: Any, deep: bool = False) -> Any:
+        try:
+            return super().construct_object(node, deep)
+        except (ValueError, OverflowError):
+            raise _Rejected(f"invalid value at {_at(node.start_mark)}") from None
+
     def construct_mapping(self, node: Any, deep: bool = False) -> dict[Any, Any]:
-        self.flatten_mapping(node)
-        seen: set[Any] = set()
+        seen: set[str] = set()
         for key_node, _ in node.value:
             key = self.construct_object(key_node, deep=True)
-            try:
-                duplicate = key in seen
-                seen.add(key)
-            except TypeError:
-                continue  # unhashable: the base class reports it
-            if duplicate:
+            if not isinstance(key, str):
                 raise _Rejected(
-                    f"duplicate key {echo(str(key), 64)!r}", key_node.start_mark.line + 1
+                    f"mapping key at {_at(key_node.start_mark)} must be a string (quote it)"
                 )
+            if key in seen:
+                raise _Rejected(f"duplicate key at {_at(key_node.start_mark)}")
+            seen.add(key)
         return super().construct_mapping(node, deep)
+
+
+# YAML 1.2 core schema, narrowed: decimal integers without leading zeros or `_`.
+for _tag, _pattern, _first in (
+    ("bool", r"^(?:true|True|TRUE|false|False|FALSE)\Z", "tTfF"),
+    ("int", r"^[-+]?(?:0|[1-9][0-9]*)\Z", "-+0123456789"),
+    (
+        "float",
+        r"^(?:[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?"
+        r"|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))\Z",
+        "-+0123456789.",
+    ),
+    ("null", r"^(?:~|null|Null|NULL|)\Z", ["~", "n", "N", ""]),
+):
+    _StrictLoader.add_implicit_resolver(
+        f"tag:yaml.org,2002:{_tag}", re.compile(_pattern), list(_first)
+    )
 
 
 def _read_regular(path: Path) -> bytes:
@@ -111,22 +150,28 @@ def _read_regular(path: Path) -> bytes:
 
 def read_yaml_file(path: Path) -> dict[Any, Any]:
     """One config file as a mapping (an empty file is `{}`)."""
-    name = _name(path)
+    return _parse(_read_regular(path), _name(path))
+
+
+def _parse(data: bytes, name: str) -> dict[Any, Any]:
     try:
-        text = _read_regular(path).decode("utf-8")
+        text = data.decode("utf-8")
     except UnicodeDecodeError:
         raise _invalid(f"{name}: not valid UTF-8") from None
     try:
         document = yaml.load(text, Loader=_StrictLoader)  # noqa: S506 (a SafeLoader subclass)
     except _Rejected as exc:
-        where = f" at line {exc.line}" if exc.line else ""
-        raise _invalid(f"{name}: {exc}{where}") from None
+        raise _invalid(f"{name}: {exc}") from None
     except yaml.YAMLError as exc:
         mark = getattr(exc, "problem_mark", None)
-        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        where = f" at {_at(mark)}" if mark else ""
         raise _invalid(f"{name}: invalid YAML{where}") from None
-    except (RecursionError, ValueError, OverflowError):
-        raise _invalid(f"{name}: invalid YAML (too deeply nested or out of range)") from None
+    except RecursionError:
+        raise _invalid(f"{name}: invalid YAML (too deeply nested)") from None
+    except (ValueError, OverflowError):
+        raise _invalid(f"{name}: invalid value") from None
+    except Exception:  # noqa: BLE001 (any parser failure; its text may quote the input)
+        raise _invalid(f"{name}: invalid YAML") from None
     if document is None:
         return {}
     if not isinstance(document, dict):
@@ -154,7 +199,17 @@ def merge(base: dict[Any, Any], over: dict[Any, Any], path: tuple[Any, ...] = ()
 
 
 def _location(loc: tuple[Any, ...]) -> str:
-    parts = [echo(str(part), 64) for part in loc if part != "[key]"]
+    """`loc` as a dotted key; an `env.set` key outside the name grammar is not echoed (it may be
+    a `NAME=value` with a secret in it)."""
+    parts: list[str] = []
+    for index, part in enumerate(loc):
+        if part == "[key]":
+            continue
+        text = str(part)
+        if loc[index - 2 : index] == ("env", "set") and not re.fullmatch(ENV_NAME_PATTERN, text):
+            parts.append("<invalid name>")
+        else:
+            parts.append(echo(text, 64))
     return ".".join(parts) if parts else "(top level)"
 
 
@@ -172,7 +227,7 @@ def validate(document: dict[Any, Any], source: str) -> Config:
 
 def _dropin_paths(directory: Path) -> list[Path]:
     try:
-        entries = sorted(os.listdir(directory))
+        entries = sorted(os.listdir(directory), key=os.fsencode)
     except FileNotFoundError:
         return []
     except NotADirectoryError:
@@ -185,13 +240,29 @@ def _dropin_paths(directory: Path) -> list[Path]:
     return [directory / n for n in names]
 
 
+def _cross_file_duplicates(sources: dict[str, list[tuple[Any, str]]]) -> None:
+    """A hook name used in two files (one file's own duplicates fail its own validation)."""
+    for hook, entries in sources.items():
+        first: dict[str, str] = {}
+        for name, file in entries:
+            if not isinstance(name, str):
+                continue
+            if name in first:
+                raise _invalid(
+                    f"hooks.{hook}: duplicate hook name {echo(name, 64)!r} "
+                    f"(in {first[name]} and {file})"
+                )
+            first[name] = file
+
+
 def load_config(explicit: Path | None = None) -> Config:
     """Load, merge and validate the config.
 
     `explicit` is the `--config` file (it must exist); without it the default file may be absent,
     which gives the built-in defaults. Drop-ins are read from `config.d/` next to the file, also
     when the file itself is absent. Each file is validated on its own (so an error names its
-    file), then the merge is validated as a whole (duplicate hook names across files).
+    file), then the merge is validated as a whole. Each file is at most `MAX_FILE_BYTES` and all
+    of them together at most `MAX_TOTAL_BYTES`.
     """
     path = explicit if explicit is not None else default_config_path()
     files: list[Path] = []
@@ -199,8 +270,20 @@ def load_config(explicit: Path | None = None) -> Config:
         files.append(path)
     files.extend(_dropin_paths(path.parent / "config.d"))
     merged: dict[Any, Any] = {}
+    sources: dict[str, list[tuple[Any, str]]] = {hook: [] for hook in HOOK_NAMES}
+    total = 0
     for file in files:
-        document = read_yaml_file(file)
-        validate(document, _name(file))
+        name = _name(file)
+        data = _read_regular(file)
+        total += len(data)
+        if total > MAX_TOTAL_BYTES:
+            raise _invalid(
+                f"{name}: the config files together are larger than {MAX_TOTAL_BYTES} bytes"
+            )
+        document = _parse(data, name)
+        validate(document, name)
+        for hook, entries in document.get("hooks", {}).items():
+            sources[hook].extend((entry.get("name"), name) for entry in entries)
         merged = merge(merged, document)
+    _cross_file_duplicates(sources)
     return validate(merged, "merged config" if len(files) > 1 else _name(path))

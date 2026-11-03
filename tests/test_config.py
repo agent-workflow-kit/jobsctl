@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -12,7 +13,13 @@ from jsonschema import Draft202012Validator
 
 from jobsctl.cli_values import parse_duration
 from jobsctl.config import Config
-from jobsctl.config_files import MAX_FILE_BYTES, handoff_args, load_config
+from jobsctl.config_files import (
+    MAX_FILE_BYTES,
+    MAX_TOTAL_BYTES,
+    handoff_args,
+    load_config,
+    read_yaml_file,
+)
 from jobsctl.errors import JobsctlError
 from tests.conftest import SCHEMAS, validate_against
 from tests.helpers import run_cli
@@ -144,7 +151,9 @@ def test_duplicate_hook_name_across_files_is_invalid(tmp_path: Path) -> None:
     with pytest.raises(JobsctlError) as info:
         load_config(base)
     assert info.value.code == "config_invalid"
-    assert "post-fail" in info.value.message
+    message = info.value.message
+    assert "hooks.post-fail: duplicate hook name 'n'" in message
+    assert f"(in {base} and {tmp_path / 'config.d' / 'x.yaml'})" in message
 
 
 def test_same_name_in_different_hooks_is_fine(tmp_path: Path) -> None:
@@ -165,6 +174,8 @@ def test_dropin_filtering(tmp_path: Path) -> None:
     write(tmp_path / "config.d" / "notes.txt", "this is not yaml: [\n")
     write(tmp_path / "config.d" / ".hidden.yaml", "default_cap: 99\n")
     write(tmp_path / "config.d" / "a.yml", "default_cap: 98\n")
+    write(tmp_path / "config.d" / ".yaml", "default_cap: 97\n")
+    write(tmp_path / "config.d" / "x.YAML", "default_cap: 96\n")
     assert load_config(base).default_cap == 1
 
 
@@ -290,7 +301,7 @@ def test_jobsctl_variables_change_nothing(tmp_path: Path, monkeypatch: pytest.Mo
         ("hooks_strip_env: ['A=B']", "hooks_strip_env.0"),
         ("env: {inherit: ['LC_*', 'LC_*']}", "env.inherit"),
         ("env: {inherit: ['*']}", "env.inherit.0"),
-        ("env: {set: {'1X': a}}", "env.set.1X"),
+        ("env: {set: {'1X': a}}", "env.set.<invalid name>"),
         ("env: {path_prepend: ['relative/bin']}", "env.path_prepend.0"),
         ("env: {path_prepend: ['~other/bin']}", "env.path_prepend.0"),
         ('env: {path_prepend: ["/a\\nb"]}', "env.path_prepend.0"),
@@ -399,7 +410,7 @@ def test_nul_is_refused(tmp_path: Path) -> None:
     assert "env_file" in invalid(tmp_path, 'env_file: "/a\\0b"\n')
 
 
-@pytest.mark.parametrize("value", ["42", "[a, b]", "{k: v}", "null", "true", "2026-01-01", "1.5"])
+@pytest.mark.parametrize("value", ["42", "[a, b]", "{k: v}", "null", "true", "1.5"])
 def test_env_set_wrong_types_name_the_key(tmp_path: Path, value: str) -> None:
     assert "env.set.TOKEN" in invalid(tmp_path, f"env:\n  set:\n    TOKEN: {value}\n")
 
@@ -588,7 +599,9 @@ def test_deeply_nested_yaml_is_config_invalid(tmp_path: Path) -> None:
 
 
 def test_huge_integer_is_config_invalid(tmp_path: Path) -> None:
-    invalid(tmp_path, "default_cap: " + "9" * 5000 + "\n")
+    assert "invalid value at line 1, column 14" in invalid(
+        tmp_path, "default_cap: " + "9" * 5000 + "\n"
+    )
 
 
 def test_oversize_file_is_refused(tmp_path: Path) -> None:
@@ -696,3 +709,387 @@ def test_invalid_default_config_fails_every_command(
     result = run_cli(capsys, "queues", "--json")
     assert result.code == 2
     assert result.envelope()["error"]["code"] == "config_invalid"
+
+
+# --- review round 1 ---------------------------------------------------------------------------
+
+INT_MAX = 2**31 - 1
+BIG = 131072
+
+
+def _schema_ok(document: dict[str, Any]) -> bool:
+    schema = json.loads((SCHEMAS / "config.json").read_text(encoding="utf-8"))
+    return Draft202012Validator(schema).is_valid(document)
+
+
+def _model_ok(document: dict[str, Any]) -> bool:
+    try:
+        Config.model_validate(document)
+    except ValueError:
+        return False
+    return True
+
+
+# Documents that schemas/config.json and the models must judge alike. Left out on purpose
+# (documented loader-only or validator-semantics differences): byte (not character) limits on
+# multi-byte text, lone surrogates, `1.0` (an integer to JSON Schema), a trailing newline before
+# `$` (Python `re` in jsonschema only), cross-file duplicate hook names and the size caps.
+DIFFERENTIAL = [
+    ({}, True),
+    ({"default_cap": None, "global_cap": 0}, True),
+    ({"default_cap": INT_MAX, "global_cap": INT_MAX, "tail_lines": INT_MAX}, True),
+    ({"default_cap": INT_MAX + 1}, False),
+    ({"global_cap": INT_MAX + 1}, False),
+    ({"tail_lines": INT_MAX + 1}, False),
+    ({"default_cap": -1}, False),
+    ({"tail_bytes": 262145}, False),
+    ({"tail_bytes": None}, False),
+    ({"tail_lines": None}, False),
+    ({"kill_grace": None}, False),
+    ({"retention": None}, True),
+    ({"me": {"name": None}}, True),
+    ({"queues": {"a": {"cap": None, "timeout": None}}}, True),
+    ({"queues": {"a": {"cap": INT_MAX, "tail_lines": INT_MAX, "tail_bytes": 1}}}, True),
+    ({"queues": {"a": {"cap": INT_MAX + 1}}}, False),
+    ({"queues": {"a": {"tail_lines": INT_MAX + 1}}}, False),
+    ({"queues": {"a": {"kill_grace": None}}}, False),
+    ({"queues": {"a": {"tail_bytes": None}}}, False),
+    ({"queues": {"a": {"tail_lines": None}}}, False),
+    ({"queues": {"a": {"retry_delay": None}}}, False),
+    ({"queues": {"a": {"kill_grace": "1m"}}}, True),
+    ({"hooks": {"post-fail": [{"cmd": "x", "name": None}]}}, False),
+    ({"hooks": {"post-fail": [{"cmd": "x", "queues": None}]}}, True),
+    ({"hooks": {"post-fail": [{"cmd": "x", "exclude_queues": None}]}}, False),
+    ({"hooks": {"pre-start": [{"cmd": "x", "async": True}]}}, False),
+    ({"hooks": {"post-fail": [{"cmd": ""}]}}, False),
+    ({"hooks": {"post-fail": [{"cmd": "x" * BIG}]}}, True),
+    ({"hooks": {"post-fail": [{"cmd": "x" * (BIG + 1)}]}}, False),
+    ({"hooks": {"post-fail": [{"cmd": "a\x00b"}]}}, False),
+    ({"env": {"set": {"A": "x" * BIG}}}, True),
+    ({"env": {"set": {"A": "x" * (BIG + 1)}}}, False),
+    ({"env": {"set": {"A": "a\x00b"}}}, False),
+    ({"env": {"set": {"A": None}}}, False),
+    ({"env": {"set": {"1A": "x"}}}, False),
+    ({"env_file": "/a\x00b"}, False),
+    ({"env_file": "~/env"}, True),
+    ({"env": {"path_prepend": ["/a\x00b"]}}, False),
+    ({"env": {"path_prepend": ["/opt/bin", "~/bin"]}}, True),
+]
+
+
+@pytest.mark.parametrize(("document", "valid"), DIFFERENTIAL)
+def test_schema_and_models_agree(document: dict[str, Any], valid: bool) -> None:
+    assert (_schema_ok(document), _model_ok(document)) == (valid, valid)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "auto_run: !!bool hunter2\n",
+        "env:\n  set:\n    X: !!bool hunter2\n",
+        "env:\n  set:\n    X: !!str hunter2\n",
+        "env: !foo {set: {X: hunter2}}\n",
+        "queues: !!map {a: {}}\n",
+        "mask_env: !!seq [hunter2]\n",
+        "env:\n  set:\n    X: ! hunter2\n",
+    ],
+)
+def test_explicit_tags_are_refused(tmp_path: Path, text: str) -> None:
+    message = invalid(tmp_path, text)
+    assert "YAML tags are not allowed at line" in message
+    assert "hunter2" not in message
+
+
+@pytest.mark.parametrize(
+    "text", ["auto_run: !!bool hunter2\n", "env:\n  set:\n    X: !!bool hunter2\n"]
+)
+def test_tagged_value_never_leaks_through_verbose(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], text: str
+) -> None:
+    path = write(tmp_path / "c.yaml", text)
+    result = run_cli(capsys, "--config", str(path), "--verbose", "--json", "queues")
+    assert result.code == 2
+    assert result.envelope()["error"]["code"] == "config_invalid"
+    assert "hunter2" not in result.out + result.err
+
+
+def test_unexpected_parser_error_is_config_invalid_without_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import jobsctl.config_files as config_files
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise KeyError(SECRET)
+
+    monkeypatch.setattr(config_files.yaml, "load", boom)
+    with pytest.raises(JobsctlError) as info:
+        load(tmp_path, "default_cap: 1\n")
+    assert info.value.code == "config_invalid"
+    assert "invalid YAML" in info.value.message
+    assert SECRET not in info.value.message
+    assert info.value.__cause__ is None and info.value.__suppress_context__
+
+
+@pytest.mark.parametrize(
+    ("text", "where"),
+    [
+        ("2024: 1\n", "line 1, column 1"),
+        ("queues:\n  2024: {}\n", "line 2, column 3"),
+        ("queues: {1.5: {}}\n", "line 1, column 10"),
+        ("~: 1\n", "line 1, column 1"),
+        ("true: 1\n", "line 1, column 1"),
+        ("? [a]\n: b\n", "line 1, column 3"),
+        ("env:\n  set:\n    12345678: x\n", "line 3, column 5"),
+    ],
+)
+def test_non_string_keys_are_refused(tmp_path: Path, text: str, where: str) -> None:
+    message = invalid(tmp_path, text)
+    assert f"mapping key at {where} must be a string (quote it)" in message
+    assert "12345678" not in message and "2024" not in message
+
+
+def test_yaml11_words_and_dates_are_string_keys(tmp_path: Path) -> None:
+    cfg = load(tmp_path, "queues: {on: {cap: 2}, no: {}, 2024-01-01: {}}\n")
+    assert cfg.queues["on"].cap == 2
+    assert set(cfg.queues) == {"on", "no", "2024-01-01"}
+
+
+def test_queues_list_item_no_is_a_string(tmp_path: Path) -> None:
+    message = invalid(tmp_path, "queues: [no]\n")
+    assert "queues: Input should be a valid dictionary" in message
+    cfg = load(tmp_path, "hooks: {post-fail: [{cmd: x, queues: [no, off]}]}\n")
+    assert cfg.hooks.post_fail[0].queues == ["no", "off"]
+
+
+@pytest.mark.parametrize(
+    ("scalar", "expected"),
+    [
+        ("yes", "yes"),
+        ("no", "no"),
+        ("on", "on"),
+        ("off", "off"),
+        ("y", "y"),
+        ("True", True),
+        ("true", True),
+        ("TRUE", True),
+        ("false", False),
+        ("False", False),
+        ("FALSE", False),
+        ("tRUE", "tRUE"),
+        ("0", 0),
+        ("-7", -7),
+        ("+5", 5),
+        ("010", 10.0),
+        ("0x10", "0x10"),
+        ("0o10", "0o10"),
+        ("0b10", "0b10"),
+        ("1_000", "1_000"),
+        ("1:30", "1:30"),
+        ("1.5", 1.5),
+        (".5", 0.5),
+        ("1e3", 1000.0),
+        ("-2.5E-1", -0.25),
+        ("1_0.5", "1_0.5"),
+        (".inf", float("inf")),
+        ("-.Inf", float("-inf")),
+        ("+.INF", float("inf")),
+        ("~", None),
+        ("null", None),
+        ("Null", None),
+        ("NULL", None),
+        ("", None),
+        ("nUll", "nUll"),
+        ("2024-01-01", "2024-01-01"),
+        ("2020-99-99", "2020-99-99"),
+        ("2001-12-14t21:59:43.10-05:00", "2001-12-14t21:59:43.10-05:00"),
+    ],
+)
+def test_yaml_12_core_scalars(tmp_path: Path, scalar: str, expected: object) -> None:
+    value = read_yaml_file(write(tmp_path / "c.yaml", f"v: {scalar}\n"))["v"]
+    assert type(value) is type(expected)
+    assert value == expected
+
+
+def test_nan_scalar(tmp_path: Path) -> None:
+    value = read_yaml_file(write(tmp_path / "c.yaml", "v: .NaN\n"))["v"]
+    assert isinstance(value, float) and value != value
+
+
+@pytest.mark.parametrize(
+    ("text", "key"),
+    [
+        ("strict_queues: yes", "strict_queues"),
+        ("auto_run: on", "auto_run"),
+        ("default_cap: 010", "default_cap"),
+        ("default_cap: 0x10", "default_cap"),
+        ("default_cap: 1_000", "default_cap"),
+        ("tail_lines: 1e3", "tail_lines"),
+        ("env: {set: {A: .inf}}", "env.set.A"),
+        ("env: {set: {A: ~}}", "env.set.A"),
+    ],
+)
+def test_yaml11_forms_fail_type_checks_naming_the_key(tmp_path: Path, text: str, key: str) -> None:
+    assert f"{key}:" in invalid(tmp_path, text + "\n")
+
+
+def test_yaml11_forms_are_strings_where_strings_are_expected(tmp_path: Path) -> None:
+    cfg = load(
+        tmp_path,
+        "env: {set: {A: 1:30, B: 2020-99-99, C: 2024-01-01, D: yes, E: 0x10}}\nme: {name: 0o10}\n",
+    )
+    assert cfg.env.set == {
+        "A": "1:30",
+        "B": "2020-99-99",
+        "C": "2024-01-01",
+        "D": "yes",
+        "E": "0x10",
+    }
+    assert cfg.me.name == "0o10"
+
+
+def test_invalid_env_set_name_is_not_echoed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    message = invalid(tmp_path, "env: {set: {'TOKEN=hunter2': x}}\n")
+    assert "env.set.<invalid name>" in message
+    assert "hunter2" not in message
+    path = write(tmp_path / "c.yaml", "env: {set: {'TOKEN=hunter2': x}}\n")
+    result = run_cli(capsys, "--config", str(path), "--json", "queues")
+    assert result.code == 2
+    assert "hunter2" not in result.out + result.err
+
+
+def test_valid_env_set_name_is_still_named(tmp_path: Path) -> None:
+    assert "env.set.TOKEN:" in invalid(tmp_path, "env: {set: {TOKEN: 1}}\n")
+
+
+def test_duplicate_key_message_echoes_no_key(tmp_path: Path) -> None:
+    message = invalid(tmp_path, "env:\n  set:\n    TOKEN_hunter2: a\n    TOKEN_hunter2: b\n")
+    assert "duplicate key at line 4, column 5" in message
+    assert "hunter2" not in message
+
+
+@pytest.mark.parametrize(
+    ("text", "key"),
+    [
+        ('env: {set: {A: "x\\ud800y"}}\n', "env.set.A"),
+        ('hooks: {post-fail: [{cmd: "\\udfff"}]}\n', "hooks.post-fail.0.cmd"),
+        ('env_file: "/a\\ud800"\n', "env_file"),
+        ('env: {path_prepend: ["/a\\udc80"]}\n', "env.path_prepend.0"),
+    ],
+)
+def test_lone_surrogates_are_refused(tmp_path: Path, text: str, key: str) -> None:
+    assert f"{key}:" in invalid(tmp_path, text)
+
+
+def test_env_set_value_and_cmd_byte_limits(tmp_path: Path) -> None:
+    load(tmp_path, f"env: {{set: {{A: '{'x' * BIG}'}}}}\n")
+    load(tmp_path, f"hooks: {{post-fail: [{{cmd: '{'x' * BIG}'}}]}}\n")
+    assert "env.set.A" in invalid(tmp_path, f"env: {{set: {{A: '{'x' * (BIG + 1)}'}}}}\n")
+    # bytes, not characters: 65537 two-byte characters are 131074 bytes
+    assert "env.set.A" in invalid(tmp_path, f"env: {{set: {{A: '{'é' * 65537}'}}}}\n")
+    assert "hooks.post-fail.0.cmd" in invalid(
+        tmp_path, f"hooks: {{post-fail: [{{cmd: '{'é' * 65537}'}}]}}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"default_cap: {INT_MAX}",
+        f"global_cap: {INT_MAX}",
+        f"tail_lines: {INT_MAX}",
+        f"queues: {{a: {{cap: {INT_MAX}, tail_lines: {INT_MAX}}}}}",
+    ],
+)
+def test_int_max_is_accepted(tmp_path: Path, text: str) -> None:
+    load(tmp_path, text + "\n")
+
+
+@pytest.mark.parametrize(
+    ("text", "key"),
+    [
+        (f"default_cap: {INT_MAX + 1}", "default_cap"),
+        (f"global_cap: {INT_MAX + 1}", "global_cap"),
+        (f"tail_lines: {INT_MAX + 1}", "tail_lines"),
+        (f"queues: {{a: {{cap: {INT_MAX + 1}}}}}", "queues.a.cap"),
+        (f"queues: {{a: {{tail_lines: {INT_MAX + 1}}}}}", "queues.a.tail_lines"),
+        ("default_cap: " + "1" + "0" * 26, "default_cap"),
+    ],
+)
+def test_int_max_plus_one_is_refused(tmp_path: Path, text: str, key: str) -> None:
+    assert key in invalid(tmp_path, text + "\n")
+
+
+@pytest.mark.parametrize(
+    ("text", "key"),
+    [
+        ("queues: {a: {kill_grace: null}}", "queues.a.kill_grace"),
+        ("queues: {a: {tail_bytes: null}}", "queues.a.tail_bytes"),
+        ("queues: {a: {tail_lines: null}}", "queues.a.tail_lines"),
+        ("hooks: {post-fail: [{cmd: x, name: null}]}", "hooks.post-fail.0.name"),
+        ("hooks: {pre-start: [{cmd: x, name: ~}]}", "hooks.pre-start.0.name"),
+    ],
+)
+def test_explicit_null_is_refused_where_the_schema_refuses_it(
+    tmp_path: Path, text: str, key: str
+) -> None:
+    assert key in invalid(tmp_path, text + "\n")
+
+
+def test_absent_queue_overrides_still_take_the_global_value(tmp_path: Path) -> None:
+    settings = load(tmp_path, "kill_grace: 2m\nqueues: {a: {}}\n").queue("a")
+    assert (settings.kill_grace, settings.tail_bytes, settings.tail_lines) == (120, 16384, 200)
+
+
+def test_config_path_keeps_dotdot_for_the_kernel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from jobsctl import cli_registry, commands
+    from jobsctl.cli_registry import Context
+
+    write(tmp_path / "real" / "sub" / ".keep", "")
+    write(tmp_path / "real" / "c.yaml", "default_cap: 7\n")
+    write(tmp_path / "c.yaml", "default_cap: 3\n")
+    (tmp_path / "link").symlink_to(tmp_path / "real" / "sub")
+    monkeypatch.chdir(tmp_path)
+    assert handoff_args(Path("link/../c.yaml")) == ["--config", f"{tmp_path}/link/../c.yaml"]
+
+    commands.load_all()
+    table: dict[str, cli_registry.Handler] = {}
+    monkeypatch.setattr(cli_registry, "_HANDLERS", table)
+    seen: list[Context] = []
+    table["queues"] = lambda ctx: seen.append(ctx) or 0
+    assert run_cli(capsys, "--config", "link/../c.yaml", "queues").code == 0
+    assert str(seen[0].config_path) == f"{tmp_path}/link/../c.yaml"
+    assert seen[0].config.default_cap == 7  # the file the kernel opens: real/c.yaml
+
+
+def test_tilde_with_empty_home_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", "")
+    assert "env_file" in invalid(tmp_path, "env_file: ~/x\n")
+    assert "env.path_prepend.0" in invalid(tmp_path, "env: {path_prepend: ['~/bin']}\n")
+
+
+def _filler(size: int) -> str:
+    return "#" + "x" * (size - 2) + "\n"
+
+
+def test_per_file_cap_boundary(tmp_path: Path) -> None:
+    assert MAX_FILE_BYTES == 256 * 1024
+    assert load(tmp_path, _filler(MAX_FILE_BYTES)) == Config()
+    assert f"larger than {MAX_FILE_BYTES} bytes" in invalid(tmp_path, _filler(MAX_FILE_BYTES + 1))
+
+
+def test_total_cap_boundary(tmp_path: Path) -> None:
+    assert MAX_TOTAL_BYTES == 1024 * 1024
+    base = write(tmp_path / "config.yaml", _filler(MAX_FILE_BYTES))
+    for name in ("a", "b", "c"):
+        write(tmp_path / "config.d" / f"{name}.yaml", _filler(MAX_FILE_BYTES))
+    assert load_config(base) == Config()
+    write(tmp_path / "config.d" / "d.yaml", "\n")
+    with pytest.raises(JobsctlError) as info:
+        load_config(base)
+    assert info.value.code == "config_invalid"
+    assert str(tmp_path / "config.d" / "d.yaml") in info.value.message
+    assert f"{MAX_TOTAL_BYTES} bytes" in info.value.message

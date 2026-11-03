@@ -10,6 +10,7 @@
         "null"
       ],
       "minimum": 0,
+      "maximum": 2147483647,
       "default": 1,
       "description": "Cap of a queue with no configured cap; null: unbounded."
     },
@@ -19,6 +20,7 @@
         "null"
       ],
       "minimum": 0,
+      "maximum": 2147483647,
       "default": null,
       "description": "Total running jobs across queues; null: none."
     },
@@ -53,6 +55,7 @@
     "tail_lines": {
       "type": "integer",
       "minimum": 1,
+      "maximum": 2147483647,
       "default": 200
     },
     "tail_flush_interval": {
@@ -117,7 +120,10 @@
             "$ref": "#/$defs/env_name"
           },
           "additionalProperties": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 131072,
+            "description": "No NUL; at most 128 KiB as UTF-8 (maxLength approximates it in characters)."
           },
           "default": {},
           "description": "Fixed, non-secret values for jobs. PATH set here also replaces the inherited PATH in the canonical environment (hooks and jobsctl's own processes); recommended, since an inherited PATH comes from the process that started the chain."
@@ -269,8 +275,8 @@
   "$defs": {
     "config_path": {
       "type": "string",
-      "pattern": "^(/|~/)[^\\n]*$",
-      "description": "Absolute path, or a path starting with ~/ (expanded to the user's home)."
+      "pattern": "^(/|~/)[^\\n\\u0000]*$",
+      "description": "Absolute path, or a path starting with ~/ (expanded to the user's home); no newline or NUL."
     },
     "duration": {
       "type": "string",
@@ -298,7 +304,9 @@
         "cmd": {
           "type": "string",
           "minLength": 1,
-          "description": "Runs via /bin/sh -c in its own process group."
+          "maxLength": 131072,
+          "pattern": "^[^\\u0000]*$",
+          "description": "Runs via /bin/sh -c in its own process group. No NUL; at most 128 KiB as UTF-8 (maxLength approximates it in characters)."
         },
         "timeout": {
           "type": "string",
@@ -363,7 +371,9 @@
         "cmd": {
           "type": "string",
           "minLength": 1,
-          "description": "Runs via /bin/sh -c in its own process group."
+          "maxLength": 131072,
+          "pattern": "^[^\\u0000]*$",
+          "description": "Runs via /bin/sh -c in its own process group. No NUL; at most 128 KiB as UTF-8 (maxLength approximates it in characters)."
         },
         "timeout": {
           "type": "string",
@@ -421,6 +431,7 @@
             "null"
           ],
           "minimum": 0,
+          "maximum": 2147483647,
           "description": "Absent: default_cap. null: unbounded. 0 holds the queue (nothing starts)."
         },
         "priority": {
@@ -469,6 +480,7 @@
         "tail_lines": {
           "type": "integer",
           "minimum": 1,
+          "maximum": 2147483647,
           "description": "Absent: the global tail_lines."
         }
       },

@@ -24,9 +24,12 @@ from pydantic import StringConstraints as Str
 from jobsctl.cli_values import DurationError, parse_duration
 
 _QUEUE_PATTERN: Final = r"^[a-z0-9][a-z0-9_-]{0,63}$"
-_ENV_NAME_PATTERN: Final = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+ENV_NAME_PATTERN: Final = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"
 _LABEL_PATTERN: Final = r"^[a-z0-9][a-z0-9_.-]{0,63}=[A-Za-z0-9._:/#@+=,-]{0,256}$"
 _PATH_PATTERN: Final = r"^(/|~/)[^\n]*$"
+
+INT_MAX: Final = 2**31 - 1  # SQLite-safe bound for integer settings
+MAX_TEXT_BYTES: Final = 131072  # an env.set value or hook cmd, as UTF-8 (the --env cap)
 
 HOOK_NAMES: Final = (
     "pre-start",
@@ -75,6 +78,26 @@ def _no_nul(value: str) -> str:
     return value
 
 
+def _utf8(value: str) -> str:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("must be valid UTF-8 text (no lone surrogates)") from None
+    return value
+
+
+def _at_most_128k(value: str) -> str:
+    if len(value.encode("utf-8")) > MAX_TEXT_BYTES:
+        raise ValueError(f"must be at most {MAX_TEXT_BYTES} bytes (UTF-8)")
+    return value
+
+
+def _not_null(value: Any) -> Any:
+    if value is None:
+        raise ValueError("must not be null")
+    return value
+
+
 def _unique(values: list[Any]) -> list[Any]:
     if len(set(values)) != len(values):
         raise ValueError("entries must be unique")
@@ -82,12 +105,13 @@ def _unique(values: list[Any]) -> list[Any]:
 
 
 def _expand_home(value: str) -> str:
-    """`~/rest` becomes `<home>/rest`; an absolute path stays; NUL is refused."""
-    _no_nul(value)
+    """`~/rest` becomes `<home>/rest`; an absolute path stays; NUL and lone surrogates are
+    refused. An empty or relative `HOME` is an unknown home."""
+    _utf8(_no_nul(value))
     if not value.startswith("~/"):
         return value
     home = os.path.expanduser("~")
-    if not home.startswith("/"):
+    if os.environ.get("HOME") == "" or not home.startswith("/"):
         raise ValueError("~ cannot be expanded: the home directory is unknown")
     return home.rstrip("/") + value[1:]
 
@@ -95,13 +119,16 @@ def _expand_home(value: str) -> str:
 Duration = Annotated[int, BeforeValidator(_seconds)]
 OptionalDuration = Annotated[int | None, BeforeValidator(_seconds_or_null)]
 QueueName = Annotated[str, Str(pattern=_QUEUE_PATTERN)]
-EnvName = Annotated[str, Str(pattern=_ENV_NAME_PATTERN)]
+EnvName = Annotated[str, Str(pattern=ENV_NAME_PATTERN)]
 Label = Annotated[str, Str(pattern=_LABEL_PATTERN)]
 ConfigPath = Annotated[str, Str(pattern=_PATH_PATTERN), AfterValidator(_expand_home)]
 EnvPattern = Annotated[str, Str(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,127}\*?$")]
-Cap = Annotated[int, Field(ge=0)]
+Cap = Annotated[int, Field(ge=0, le=INT_MAX)]
 TailBytes = Annotated[int, Field(ge=1, le=262144)]
-TailLines = Annotated[int, Field(ge=1)]
+TailLines = Annotated[int, Field(ge=1, le=INT_MAX)]
+Text128K = Annotated[
+    str, AfterValidator(_no_nul), AfterValidator(_utf8), AfterValidator(_at_most_128k)
+]
 
 
 class _Model(BaseModel):
@@ -112,13 +139,17 @@ class EnvConfig(_Model):
     inherit: Annotated[list[EnvPattern], AfterValidator(_unique)] = Field(
         default_factory=lambda: list(DEFAULT_ENV_INHERIT)
     )
-    set: dict[EnvName, Annotated[str, AfterValidator(_no_nul)]] = Field(default_factory=dict)
+    set: dict[EnvName, Text128K] = Field(default_factory=dict)
     path_prepend: list[ConfigPath] = Field(default_factory=list)
 
 
 class _HookEntry(_Model):
-    name: Annotated[str, Str(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")] | None = None
-    cmd: Annotated[str, Str(min_length=1), AfterValidator(_no_nul)]
+    # Absent is unset; an explicit null is refused, as in schemas/config.json.
+    name: Annotated[
+        Annotated[str, Str(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")] | None,
+        BeforeValidator(_not_null),
+    ] = None
+    cmd: Annotated[Text128K, Str(min_length=1)]
     timeout: Duration = 30
     queues: Annotated[list[QueueName], AfterValidator(_unique)] | None = None
     exclude_queues: Annotated[list[QueueName], AfterValidator(_unique)] = Field(
@@ -177,16 +208,19 @@ class MeConfig(_Model):
 
 
 class QueueConfig(_Model):
-    """One `queues.<name>` entry; an absent key means the global value (see `Config.queue`)."""
+    """One `queues.<name>` entry; an absent key means the global value (see `Config.queue`).
+
+    `kill_grace`, `tail_bytes` and `tail_lines` default to `None` (absent) but refuse an explicit
+    null, as `schemas/config.json` does."""
 
     cap: Cap | None = None
     priority: Annotated[int, Field(ge=-1000, le=1000)] = 0
     timeout: OptionalDuration = None
     max_retries: Annotated[int, Field(ge=0, le=100)] = 0
     retry_delay: Duration = 60
-    kill_grace: Duration | None = None
-    tail_bytes: TailBytes | None = None
-    tail_lines: TailLines | None = None
+    kill_grace: Annotated[int | None, BeforeValidator(_seconds)] = None
+    tail_bytes: Annotated[TailBytes | None, BeforeValidator(_not_null)] = None
+    tail_lines: Annotated[TailLines | None, BeforeValidator(_not_null)] = None
 
 
 @dataclass(frozen=True)
