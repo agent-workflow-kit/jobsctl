@@ -13,7 +13,8 @@ from :meth:`~jobsctl.store_db.Tx.after_commit`. A writer used inside a transacti
 
 Never written: ``--pass-env`` or ``env_file`` values, argv, raw hook output, output tails or
 ``--env`` values. The record builders accept only schema fields, refuse ``details`` keys that
-would carry those, and replace every value of the masking set in any string with ``***``.
+would carry those, check each record against its schema, and replace every value of the
+masking set in the free text of log records with ``***``.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from jobsctl.log_records import (
     encode_line,
     format_ts,
     masking_set,
+    utf8_bytes,
 )
 from jobsctl.store_db import Store
 from jobsctl.store_ops import counter_cas, counter_get, counter_incr
@@ -45,12 +47,12 @@ _WARN_PREFIX = "warn:"
 
 def warn_counter_name(key: str) -> str:
     """The counter that remembers the last state logged for ``key`` (a bounded, safe name)."""
-    return _WARN_PREFIX + hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()[:32]
+    return _WARN_PREFIX + hashlib.sha256(utf8_bytes(key)).hexdigest()[:32]
 
 
 def _state_fingerprint(state: str) -> int:
     """A positive 63-bit number for ``state``; 0 is reserved for "no warning outstanding"."""
-    digest = hashlib.sha256(state.encode("utf-8", "surrogateescape")).digest()
+    digest = hashlib.sha256(utf8_bytes(state)).digest()
     return (int.from_bytes(digest[:8], "big") & 0x7FFF_FFFF_FFFF_FFFF) or 1
 
 
@@ -83,6 +85,7 @@ class RecordWriter:
         fields: Mapping[str, Any] | None = None,
     ) -> int:
         """Append one ``log.jsonl`` record and return its ``seq``."""
+        self._require_no_transaction()
         body = build_log_record(event, level, fields, self._masked)
         return self._append(LOG_FILE, LOG_COUNTER, body, durable=False)
 
@@ -101,6 +104,7 @@ class RecordWriter:
         Audit records are synced to disk (they are kept forever; interface.md leaves the
         policy open, and they are rare).
         """
+        self._require_no_transaction()
         body = build_audit_record(
             action=action,
             actor=actor,
@@ -108,7 +112,6 @@ class RecordWriter:
             target=target,
             inputs=inputs,
             result=result,
-            masked=self._masked,
         )
         return self._append(AUDIT_FILE, AUDIT_COUNTER, body, durable=True)
 
@@ -129,10 +132,16 @@ class RecordWriter:
         kept in ``state.db``, so repeated passes in different processes log it once; of
         several racing processes exactly one logs. Call it outside a transaction.
 
-        The state is recorded before the record is appended: a crash in between loses the
-        warning rather than repeating it.
+        The record is built and checked first, so a refused record records nothing. The state
+        is then recorded before the record is appended: a failed append that this process
+        survives puts the earlier state back (the next call logs the warning), and only a
+        crash in between loses the warning rather than repeating it.
         """
         self._require_no_transaction()
+        body: dict[str, Any] | None = None
+        if state is not None:
+            body = build_log_record(event, level, fields, self._masked)
+            _check_size(LOG_FILE, body)
         name = warn_counter_name(key)
         wanted = 0 if state is None else _state_fingerprint(state)
         with self._store.write() as tx:
@@ -141,9 +150,13 @@ class RecordWriter:
                 return False
             if not counter_cas(tx, name, current, wanted):  # cannot lose under BEGIN IMMEDIATE
                 raise JobsctlError("internal", "warning state changed under the write lock")
-        if state is None:
+        if body is None:
             return False
-        self.log(event, level=level, fields=fields)
+        try:
+            self._append(LOG_FILE, LOG_COUNTER, body, durable=False)
+        except BaseException:
+            self._restore_warning(name, wanted, current)
+            raise
         return True
 
     # -- internals -------------------------------------------------------------------------
@@ -157,7 +170,7 @@ class RecordWriter:
 
     def _append(self, filename: str, counter: str, body: dict[str, Any], *, durable: bool) -> int:
         self._require_no_transaction()
-        encode_line({"seq": 0, "ts": "", **body}, shrink_details=filename == LOG_FILE)
+        _check_size(filename, body)
         path = self._store.paths.root / filename
         with locked(path) as fd:
             with self._store.write() as tx:  # its own short transaction, under the file lock
@@ -179,3 +192,16 @@ class RecordWriter:
                 counter_cas(tx, counter, seq, seq - 1)
         except BaseException:  # a gap is allowed; never mask the original error
             pass
+
+    def _restore_warning(self, name: str, wanted: int, previous: int) -> None:
+        """Put back the warning state a failed append recorded, so the warning is not lost."""
+        try:
+            with self._store.write() as tx:
+                counter_cas(tx, name, wanted, previous)
+        except BaseException:  # then the warning is lost, as after a crash; keep the error
+            pass
+
+
+def _check_size(filename: str, body: dict[str, Any]) -> None:
+    """Raise :class:`~jobsctl.log_records.RecordTooLarge` before a ``seq`` is taken."""
+    encode_line({"seq": 0, "ts": "", **body}, shrink_details=filename == LOG_FILE)

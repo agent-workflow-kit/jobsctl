@@ -27,8 +27,10 @@ from jobsctl.log_records import (
 )
 from jobsctl.log_writer import RecordWriter
 from jobsctl.store_db import Store
-from jobsctl.store_ops import counter_get
+from jobsctl.store_ops import counter_cas, counter_get
 from tests.conftest import SCHEMAS, validate_against
+
+pytestmark = pytest.mark.usefixtures("validated_records")
 
 JOB = "jb-aaaaaaaa"
 FIXED = dt.datetime(2026, 11, 3, 12, 0, 0, 123456, tzinfo=dt.UTC)
@@ -349,23 +351,24 @@ def test_hostile_text_cannot_add_lines_or_control_characters(
     assert "\x1b" not in rec["message"] and "\n" not in rec["message"]
 
 
-def test_hostile_text_in_audit_inputs_is_cleaned(writer: RecordWriter, store: Store) -> None:
-    writer.audit(
-        action="retry",
-        actor="human:me",
-        target=JOB,
-        result="queued",
-        inputs={
-            "argv_sha256": "0" * 64,
-            "attempt": 1,
-            "queue": "q",
-            "unique_key": None,
-            "note": "x\n\x1b[2Jy",
-        },
-    )
-    raw = (store.paths.root / "audit.jsonl").read_bytes()
-    assert raw.count(b"\n") == 1
-    assert "\x1b" not in json.loads(raw)["inputs"]["note"]
+@pytest.mark.parametrize(
+    "inputs",
+    [
+        {"queue": "q\n\x1b[2Jy"},
+        {"unique_key": 'k\n{"seq":9}'},
+        {"argv_sha256": "0" * 63 + "\n"},
+        {"note": "x\n\x1b[2Jy"},  # not an audit input
+    ],
+)
+def test_hostile_text_in_audit_inputs_is_refused(
+    writer: RecordWriter, store: Store, inputs: dict[str, Any]
+) -> None:
+    base = {"argv_sha256": "0" * 64, "attempt": 1, "queue": "q", "unique_key": None}
+    with pytest.raises(ValueError):
+        writer.audit(
+            action="retry", actor="human:me", target=JOB, result="queued", inputs={**base, **inputs}
+        )
+    assert not (store.paths.root / "audit.jsonl").exists()
 
 
 def test_masked_values_never_reach_the_files(store: Store) -> None:
@@ -382,7 +385,7 @@ def test_masked_values_never_reach_the_files(store: Store) -> None:
         target=JOB,
         result="queued",
         decision_id=[],
-        inputs={"argv_sha256": "0" * 64, "attempt": 1, "queue": "q", "unique_key": f"k:{secret}"},
+        inputs={"argv_sha256": "0" * 64, "attempt": 1, "queue": "q", "unique_key": "k:1"},
     )
     writer.log("pass", fields={"message": "a short word"})
     for name in ("log.jsonl", "audit.jsonl"):
@@ -662,18 +665,395 @@ def test_warning_keys_and_states_may_hold_anything(writer: RecordWriter, store: 
     assert all(len(n) <= 64 for n in names)
 
 
-def test_a_warning_lost_to_a_failed_append_is_not_repeated(
+@pytest.mark.parametrize(
+    "exc", [JobsctlError("internal", "disk full"), OSError(28, "No space left on device")]
+)
+def test_a_warning_whose_append_fails_is_written_by_the_next_call(
+    writer: RecordWriter, store: Store, monkeypatch: pytest.MonkeyPatch, exc: Exception
+) -> None:
+    real = log_writer.append_line
+
+    def fail(*_a: object, **_k: object) -> None:
+        raise exc
+
+    monkeypatch.setattr(log_writer, "append_line", fail)
+    with pytest.raises(type(exc)):
+        warn(writer, "bad")
+    monkeypatch.setattr(log_writer, "append_line", real)
+    assert warn(writer, "bad") is True  # the process survived: the earlier state was restored
+    assert warn(writer, "bad") is False
+    assert [r["message"] for r in records(store, "log.jsonl")] == ["state bad"]
+
+
+def test_a_failed_append_restores_the_previous_state_not_zero(
     writer: RecordWriter, store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    assert warn(writer, "first") is True
+    real = log_writer.append_line
     monkeypatch.setattr(
-        writer, "log", lambda *a, **k: (_ for _ in ()).throw(JobsctlError("internal", "x"))
+        log_writer,
+        "append_line",
+        lambda *a, **k: (_ for _ in ()).throw(JobsctlError("internal", "x")),
     )
     with pytest.raises(JobsctlError):
-        warn(writer, "bad")
-    monkeypatch.undo()
-    assert warn(writer, "bad") is False  # at most once: the state was recorded first
+        warn(writer, "second")
+    monkeypatch.setattr(log_writer, "append_line", real)
+    assert warn(writer, "first") is False  # still "first": not re-armed by the failure
+    assert warn(writer, "second") is True
 
 
-def test_warn_once_validates_before_recording(writer: RecordWriter) -> None:
+@pytest.mark.parametrize(
+    ("event", "fields"),
+    [
+        ("no_such_event", {"message": "m"}),
+        ("env_file_unsafe", {"bogus": 1}),
+        ("env_file_unsafe", {"details": {"argv": "x"}}),
+        ("env_file_unsafe", {"job_id": "nope"}),
+    ],
+)
+def test_a_refused_warning_does_not_record_its_state(
+    writer: RecordWriter, store: Store, event: str, fields: dict[str, Any]
+) -> None:
     with pytest.raises(ValueError):
-        writer.warn_once("k", "s", "no_such_event")
+        writer.warn_once("k", "s", event, fields=fields)
+    assert writer.warn_once("k", "s", "env_file_unsafe", fields={"message": "m"}) is True
+    assert writer.warn_once("k", "s", "env_file_unsafe", fields={"message": "m"}) is False
+    assert len(records(store, "log.jsonl")) == 1
+
+
+def test_a_crash_after_recording_loses_the_warning_rather_than_repeating_it(
+    writer: RecordWriter, store: Store
+) -> None:
+    # A dead process cannot restore the state: record it as warn_once does, then append nothing.
+    with store.write() as tx:
+        counter_cas(tx, log_writer.warn_counter_name("k"), 0, log_writer._state_fingerprint("s"))
+    assert writer.warn_once("k", "s", "env_file_unsafe") is False
+    assert not (store.paths.root / "log.jsonl").exists()
+
+
+def test_warning_keys_and_states_with_lone_surrogates(writer: RecordWriter) -> None:
+    assert warn(writer, "\ud800 state", key="\ud800 key") is True
+    assert warn(writer, "\ud800 state", key="\ud800 key") is False
+
+
+# -- review round 1 ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "ARGV\x1b[0m",
+        "sec\x1b[mret",
+        "pass-env",
+        "env-file",
+        "STDERR",
+        "ａrgv",  # fullwidth a
+        "stdout ",
+        " ENVIRON\t",
+        "output​",
+        "ta­il",  # soft hyphen (a format character)
+        "val\nues",
+    ],
+)
+def test_forbidden_keys_are_refused_after_normalization(
+    writer: RecordWriter, store: Store, key: str
+) -> None:
+    with pytest.raises(ValueError, match="must not carry"):
+        writer.log("pass", fields={"details": {"ok": {key: "x"}}})
+    with pytest.raises(ValueError, match="must not carry"):
+        writer.audit(
+            action="retry",
+            actor="human:me",
+            target=JOB,
+            result="queued",
+            inputs={key: "x", "argv_sha256": "0" * 64, "attempt": 1, "queue": "q"},
+        )
+    assert not (store.paths.root / "log.jsonl").exists()
+    assert not (store.paths.root / "audit.jsonl").exists()
+
+
+def test_allowed_keys_close_to_forbidden_ones_are_kept(writer: RecordWriter, store: Store) -> None:
+    writer.log("pass", fields={"details": {"argv_sha256": "0" * 64, "env_name": "X", "vars": 1}})
+    assert set(records(store, "log.jsonl")[0]["details"]) == {"argv_sha256", "env_name", "vars"}
+
+
+TRANSITION_EXTRA: dict[str, Any] = {
+    "attempt_status": "failed",
+    "attempt_reason": "exit",
+    "retry_pending": True,
+    "to": "queued",
+}
+HOOK_RAN: dict[str, Any] = {
+    "job_id": JOB,
+    "hook": "post-fail",
+    "hook_id": "notify",
+    "outcome": "failed",
+    "exit": 1,
+    "decision_ids": [],
+}
+LABEL: dict[str, Any] = {"job_id": JOB, "queue": "q", "actor": "human:me", "decision_ids": []}
+RECONCILE: dict[str, Any] = {"job_id": None, "finding": "pruned", "action": "deleted"}
+MINIMAL: dict[str, dict[str, Any]] = {
+    "transition": TRANSITION,
+    "reorder": LABEL,
+    "label": LABEL,
+    "hook_ran": HOOK_RAN,
+    "reconcile": RECONCILE,
+}
+
+
+def test_every_event_has_a_minimal_valid_record(writer: RecordWriter, store: Store) -> None:
+    for event in sorted(LOG_EVENTS):
+        writer.log(event, fields=MINIMAL.get(event, {}))
+    recs = records(store, "log.jsonl")
+    assert [r["event"] for r in recs] == sorted(LOG_EVENTS)
+    for rec in recs:
+        validate_against("log.json", rec)
+    writer.log("transition", fields={**TRANSITION, **TRANSITION_EXTRA})
+    writer.log("hook_ran", fields={**HOOK_RAN, "outcome": "timeout", "exit": None, "stderr": "t"})
+    for rec in records(store, "log.jsonl"):
+        validate_against("log.json", rec)
+
+
+def _without(fields: dict[str, Any], name: str) -> dict[str, Any]:
+    return {k: v for k, v in fields.items() if k != name}
+
+
+@pytest.mark.parametrize(
+    ("event", "fields"),
+    [
+        # transition: required, non-null, types and enums
+        *[("transition", _without(TRANSITION, name)) for name in TRANSITION],
+        *[
+            ("transition", {**TRANSITION, name: None})
+            for name in ("job_id", "queue", "from", "to", "attempt", "actor")
+        ],
+        ("transition", {**TRANSITION, "attempt": "x"}),
+        ("transition", {**TRANSITION, "attempt": -1}),
+        ("transition", {**TRANSITION, "attempt": True}),
+        ("transition", {**TRANSITION, "reason": "bogus"}),
+        ("transition", {**TRANSITION, "hold_reason": "later"}),
+        ("transition", {**TRANSITION, "to": "paused"}),
+        ("transition", {**TRANSITION, "from": "deleted"}),
+        ("transition", {**TRANSITION, "queue": "Bad Queue"}),
+        ("transition", {**TRANSITION, "decision_ids": "d-1"}),
+        ("transition", {**TRANSITION, **TRANSITION_EXTRA, "retry_pending": "yes"}),
+        ("transition", {**TRANSITION, **TRANSITION_EXTRA, "attempt_status": "running"}),
+        ("transition", {**TRANSITION, **TRANSITION_EXTRA, "attempt_reason": "bogus"}),
+        ("transition", {**TRANSITION, **TRANSITION_EXTRA, "to": "starting"}),
+        ("transition", {**TRANSITION, **TRANSITION_EXTRA, "attempt_reason": "canceled"}),
+        ("transition", {**TRANSITION, **TRANSITION_EXTRA, "attempt_status": "done"}),
+        ("transition", {**TRANSITION, "attempt_status": "done"}),  # dependentRequired
+        ("transition", {**TRANSITION, "attempt_reason": None}),
+        ("transition", {**TRANSITION, "retry_pending": False}),
+        ("transition", {**TRANSITION, "finding": "pruned"}),
+        # reorder and label
+        *[(ev, _without(LABEL, name)) for ev in ("reorder", "label") for name in LABEL],
+        *[(ev, {**LABEL, name: None}) for ev in ("reorder", "label") for name in LABEL],
+        ("label", {**LABEL, "actor": "root"}),
+        ("reorder", {**LABEL, "attempt_status": "done"}),
+        # hook_ran
+        *[("hook_ran", _without(HOOK_RAN, name)) for name in HOOK_RAN],
+        *[("hook_ran", {**HOOK_RAN, name: None}) for name in ("job_id", "hook", "hook_id")],
+        ("hook_ran", {**HOOK_RAN, "outcome": None}),
+        ("hook_ran", {**HOOK_RAN, "hook": "pre-flight"}),
+        ("hook_ran", {**HOOK_RAN, "hook_id": ""}),
+        ("hook_ran", {**HOOK_RAN, "outcome": "maybe"}),
+        ("hook_ran", {**HOOK_RAN, "exit": 256}),
+        ("hook_ran", {**HOOK_RAN, "exit": "1"}),
+        ("hook_ran", {**HOOK_RAN, "stderr": 5}),
+        ("hook_ran", {**HOOK_RAN, "outcome": "allow", "exit": 0, "stderr": "x"}),
+        ("hook_ran", {**HOOK_RAN, "outcome": "timeout", "exit": 1}),
+        ("pass", {"stderr": "x"}),
+        ("pass", {"exit": 1}),
+        ("pass", {"hook": "pre-start"}),
+        # reconcile
+        *[("reconcile", _without(RECONCILE, name)) for name in RECONCILE],
+        ("reconcile", {**RECONCILE, "finding": None}),
+        ("reconcile", {**RECONCILE, "action": "nuked"}),
+        ("reconcile", {**RECONCILE, "finding": "gone"}),
+        ("pass", {"finding": "pruned"}),
+        ("pass", {"action": "deleted"}),
+        # every event: field types
+        ("pass", {"message": 5}),
+        ("pass", {"queue": "x" * 65}),
+        ("pass", {"attempt": 1.5}),
+        ("pass", {"from": "nope"}),
+        ("pass", {"reason": "bogus"}),
+    ],
+)
+def test_records_that_break_the_log_schema_are_refused(
+    writer: RecordWriter, store: Store, event: str, fields: dict[str, Any]
+) -> None:
+    with pytest.raises(ValueError):
+        writer.log(event, fields=fields)
+    assert not (store.paths.root / "log.jsonl").exists()
+    assert counter_get_now(store, "seq:log") == 0
+
+
+AUDIT_INPUTS: dict[str, Any] = {
+    "argv_sha256": "0" * 64,
+    "attempt": 0,
+    "unique_key": None,
+    "queue": "q",
+}
+PRUNE_INPUTS: dict[str, Any] = {"ids": [JOB], "older_than": 60, "trigger": "command"}
+
+
+@pytest.mark.parametrize(
+    ("action", "inputs"),
+    [
+        *[("retry", _without(AUDIT_INPUTS, name)) for name in AUDIT_INPUTS],
+        ("retry", {**AUDIT_INPUTS, "argv_sha256": "A" * 64}),
+        ("retry", {**AUDIT_INPUTS, "attempt": -1}),
+        ("retry", {**AUDIT_INPUTS, "attempt": False}),
+        ("retry", {**AUDIT_INPUTS, "unique_key": "has space"}),
+        ("retry", {**AUDIT_INPUTS, "unique_key": ""}),
+        ("retry", {**AUDIT_INPUTS, "queue": None}),
+        ("retry", {**AUDIT_INPUTS, "ids": [JOB]}),
+        ("retry", {**AUDIT_INPUTS, "overrides": {}}),
+        ("retry", {**AUDIT_INPUTS, "overrides": {"timeout": 0}}),
+        ("retry", {**AUDIT_INPUTS, "overrides": {"timeout": "forever"}}),
+        ("retry", {**AUDIT_INPUTS, "overrides": {"max_retries": 101}}),
+        ("retry", {**AUDIT_INPUTS, "overrides": {"kill_grace": 0}}),
+        ("retry", {**AUDIT_INPUTS, "overrides": {"cap": 1}}),
+        ("resolve", {**AUDIT_INPUTS, "overrides": {"max_retries": 1}}),
+        *[("prune", _without(PRUNE_INPUTS, name)) for name in PRUNE_INPUTS],
+        ("prune", {**PRUNE_INPUTS, "ids": []}),
+        ("prune", {**PRUNE_INPUTS, "ids": ["nope"]}),
+        ("prune", {**PRUNE_INPUTS, "older_than": 0}),
+        ("prune", {**PRUNE_INPUTS, "trigger": "cron"}),
+        ("prune", {**PRUNE_INPUTS, "queue": "q"}),
+    ],
+)
+def test_audit_inputs_that_break_the_schema_are_refused(
+    writer: RecordWriter, store: Store, action: str, inputs: dict[str, Any]
+) -> None:
+    prune = action == "prune"
+    with pytest.raises(ValueError):
+        writer.audit(
+            action=action,
+            actor="human:me",
+            target=None if prune else JOB,
+            result="deleted" if prune else "done",
+            inputs=inputs,
+        )
+    assert counter_get_now(store, "seq:audit") == 0
+
+
+def test_audit_target_and_result_follow_the_schema(writer: RecordWriter) -> None:
+    with pytest.raises(ValueError):  # deleted is only for prune
+        writer.audit(
+            action="resolve", actor="human:me", target=JOB, result="deleted", inputs=AUDIT_INPUTS
+        )
+
+
+def test_masking_leaves_identifier_and_enum_fields_intact(
+    store: Store,
+) -> None:
+    writer = RecordWriter(store, masked_values=["starting", "deadbeef", "jobsctl-"])
+    writer.log(
+        "transition",
+        fields={
+            **TRANSITION,
+            "queue": "deadbeef",
+            "actor": "auto:deadbeef",
+            "decision_ids": ["deadbeef", "starting"],
+            "message": "now starting deadbeef",
+            "details": {"k": "starting", "deadbeef": 1},
+        },
+    )
+    writer.log("hook_ran", fields={**HOOK_RAN, "hook_id": "run deadbeef", "stderr": "deadbeef!"})
+    writer.audit(
+        action="retry",
+        actor="human:deadbeef",
+        target=JOB,
+        result="starting",
+        decision_id=["deadbeef"],
+        inputs={**AUDIT_INPUTS, "argv_sha256": "deadbeef" * 8, "queue": "deadbeef"},
+    )
+    first, second = records(store, "log.jsonl")
+    assert (first["to"], first["queue"], first["actor"]) == (
+        "starting",
+        "deadbeef",
+        "auto:deadbeef",
+    )
+    assert first["decision_ids"] == ["deadbeef", "starting"]
+    assert first["message"] == "now *** ***"
+    assert first["details"] == {"k": "***", "***": 1}
+    assert (second["hook_id"], second["stderr"]) == ("run ***", "***!")
+    audit = records(store, "audit.jsonl")[0]
+    assert audit["inputs"]["argv_sha256"] == "deadbeef" * 8
+    assert (audit["actor"], audit["result"], audit["decision_id"]) == (
+        "human:deadbeef",
+        "starting",
+        ["deadbeef"],
+    )
+
+
+def test_a_failed_write_never_extends_a_file_that_shrank_meanwhile(
+    writer: RecordWriter, store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writer.log("pass", fields={"message": "x" * 500})
+    path = store.paths.root / "log.jsonl"
+
+    def shrink_then_fail(fd: int, data: bytes) -> int:
+        os.truncate(path, 0)  # an external copytruncate between the size check and the write
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "write", shrink_then_fail)
+    with pytest.raises(JobsctlError):
+        writer.log("pass")
+    monkeypatch.undo()
+    assert path.stat().st_size == 0  # not padded back to the old length with NUL bytes
+
+
+def test_details_keys_that_clean_to_the_same_text_are_kept_apart(store: Store) -> None:
+    writer = RecordWriter(store, masked_values=["secretvalue1", "secretvalue2"])
+    writer.log(
+        "pass",
+        fields={
+            "details": {
+                "a\n": 1,
+                "a\\n": 2,
+                "a\\n~2": 3,
+                "secretvalue1": 4,
+                "secretvalue2": 5,
+                "n": {"x\r": 6, "x\\r": 7},
+            }
+        },
+    )
+    assert records(store, "log.jsonl")[0]["details"] == {
+        "a\\n": 1,
+        "a\\n~2": 2,
+        "a\\n~2~2": 3,
+        "***": 4,
+        "***~2": 5,
+        "n": {"x\\r": 6, "x\\r~2": 7},
+    }
+
+
+def test_argv_sha256_accepts_every_python_string() -> None:
+    import hashlib
+
+    assert argv_sha256(["\udcff"]) == hashlib.sha256(b"\xff\0").hexdigest()  # os.fsencode form
+    assert argv_sha256(["\ud800"]) == hashlib.sha256(b"\xed\xa0\x80\0").hexdigest()
+    assert (
+        argv_sha256(["a", "\udcff\ud800"])
+        == hashlib.sha256(  # surrogatepass for both
+            b"a\0\xed\xb3\xbf\xed\xa0\x80\0"
+        ).hexdigest()
+    )
+
+
+def test_free_text_fields_are_clipped_and_identifiers_are_grammar_checked(
+    writer: RecordWriter, store: Store
+) -> None:
+    writer.log("hook_ran", fields={**HOOK_RAN, "hook_id": "h" * 300_000})
+    assert len(records(store, "log.jsonl")[0]["hook_id"]) == 4096
+    with pytest.raises(ValueError) as err:
+        writer.log("unknown_queue_selector", level="warn", fields={"queue": "q" * 300_000})
+    assert not isinstance(err.value, RecordTooLarge)  # refused by the grammar, not by the size
+    writer.log("unknown_queue_selector", level="warn", fields={"details": {"q" * 300_000: 1}})
+    assert records(store, "log.jsonl")[1]["details"] == {"truncated": True}
+    assert counter_get_now(store, "seq:log") == 2

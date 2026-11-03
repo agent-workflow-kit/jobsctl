@@ -48,3 +48,22 @@ def validate_against(schema_name: str, instance: object) -> None:
     """Validate ``instance`` against ``schemas/<schema_name>`` (e.g. ``cli/error.json``)."""
     doc = json.loads((SCHEMAS / schema_name).read_text(encoding="utf-8"))
     Draft202012Validator(doc, registry=_registry()).validate(instance)
+
+
+@pytest.fixture
+def validated_records(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Validate every record a ``RecordWriter`` appends in this process against its schema.
+
+    Audit appends are the durable ones, so ``durable`` tells the two files apart. A record that
+    does not match fails the test (``ValidationError`` is not a ``ValueError``). Tests that write
+    foreign or torn lines straight to a file bypass the writer and are not checked.
+    """
+    from jobsctl import log_writer
+
+    real = log_writer.append_line
+
+    def checked(fd: int, data: bytes, *, durable: bool) -> None:
+        validate_against("audit.json" if durable else "log.json", json.loads(data))
+        real(fd, data, durable=durable)
+
+    monkeypatch.setattr(log_writer, "append_line", checked)

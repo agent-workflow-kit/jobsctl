@@ -2,8 +2,9 @@
 
 Only the current file is read (rotated files are the operator's). Torn or foreign lines (a
 crashed writer's fragment, a line that is not a JSON object with an integer ``seq`` and a
-``ts``, an over-long line) are skipped, as is a last line without its newline, which may be an
-append in progress. Records are printed re-serialized as ASCII-only JSON, so nothing in the
+``ts``, a line with a number JSON cannot print (``NaN``, ``Infinity``, an overflowing float such
+as ``1e999``), an over-long line) are skipped, as is a last line without its newline, which may
+be an append in progress. Records are printed re-serialized as ASCII-only JSON, so nothing in the
 file can reach the terminal as a raw control character.
 """
 
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import os
 import stat
 from collections.abc import Iterator
@@ -71,12 +73,23 @@ def read_records(path: Path) -> Iterator[dict[str, Any]]:
                 yield record
 
 
+def _reject_constant(name: str) -> float:
+    raise ValueError(f"{name} is not valid JSON")
+
+
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):  # 1e999 parses as infinity, which dumps refuses
+        raise ValueError("number out of range")
+    return value
+
+
 def _parse(line: bytes) -> dict[str, Any] | None:
     if not line.strip():
         return None
     try:
-        record = json.loads(line)
-    except (ValueError, RecursionError):
+        record = json.loads(line, parse_constant=_reject_constant, parse_float=_finite_float)
+    except (ValueError, RecursionError):  # ValueError also covers an over-long integer
         return None
     seq = record.get("seq") if isinstance(record, dict) else None
     if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
@@ -99,4 +112,11 @@ def export_lines(
             assert when is not None
             if when < since:
                 continue
-        yield dumps(record)
+        try:
+            line = dumps(record)
+        except (
+            ValueError,
+            RecursionError,
+        ):  # cannot be printed as JSON: skip it like a foreign line
+            continue
+        yield line

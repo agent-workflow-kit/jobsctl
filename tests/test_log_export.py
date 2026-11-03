@@ -18,6 +18,8 @@ from jobsctl.store_dir import resolve_state_dir
 from tests.conftest import validate_against
 from tests.helpers import run_cli
 
+pytestmark = pytest.mark.usefixtures("validated_records")
+
 T0 = dt.datetime(2026, 11, 1, 12, 0, 0, tzinfo=dt.UTC)
 
 
@@ -246,3 +248,15 @@ def test_export_without_a_state_directory_prints_nothing(
     res = run_cli(capsys, "export", "--log")
     assert (res.code, res.out, res.err) == (0, "", "")
     assert not resolve_state_dir().exists()  # it creates nothing
+
+
+@pytest.mark.parametrize("number", ["NaN", "-Infinity", "Infinity", "1e999", "-1e999", "9" * 5000])
+def test_lines_with_numbers_json_cannot_print_are_skipped(
+    store: Store, capsys: pytest.CaptureFixture[str], number: str
+) -> None:
+    path = store.paths.root / "log.jsonl"
+    bad = '{"seq":1,"ts":"2026-11-01T12:00:00.000Z","x":' + number + "}\n"
+    nested = '{"seq":2,"ts":"2026-11-01T12:00:00.000Z","d":{"x":[' + number + "]}}\n"
+    good = '{"seq":3,"ts":"2026-11-01T12:00:00.000Z","level":"info","event":"pass"}\n'
+    path.write_text(bad + nested + good)
+    assert [r["seq"] for r in cli_lines(capsys, "export", "--log")] == [3]

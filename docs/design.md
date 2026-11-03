@@ -102,7 +102,7 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 | `config.py` | Pydantic models, drop-ins, precedence (files and flags only), absolute `--config` hand-off; errors name keys, never `env.*` values |
 | `ids.py`, `durations.py`, `timestamps.py` | planned (`TODO(#4)`): id generation (checked against `pruned_ids`) and prefix lookup; duration and timestamp grammars, moved out of `cli_values.py` |
 | `log_records.py`, `log_files.py`, `log_writer.py`, `log_export.py` | the `audit.jsonl` and `log.jsonl` writers (D42): record shapes, cleaning (masking set, sanitizer) and serialization; safe open (0600, no symlink or FIFO), `flock` and the single append with torn-line repair; `seq` allocation under the lock and once-per-state warnings (state kept in `state.db` counters); the `export` reader |
-| `audit.py` | planned: diagnostics files (D43) |
+| `diag.py` | planned: diagnostics files (D43) |
 | `procs.py` | process identity, boot id, liveness, subreaper, pidfds (including group signals where the kernel has them), dumpability, group probing (Linux and macOS) |
 | `gateway.py` | every process spawn, signal, wait, file lock and clock access, so tests replace them with fakes |
 | `tui/` | `browse` (optional extra) |
@@ -119,7 +119,7 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 - `outputs`: `(job_id, n)`, `tail` (BLOB; zlib above 4 KiB), `compressed`, `bytes_seen`, `truncated`, `updated_at`. A separate table keeps `list` fast (spike B6).
 - `hook_outbox`: `event_id`, `job_id`, `seq`, `hook`, `payload` (JSON, including the labels at transition time), `async` (the hook entry is async, D39), `created_at`, `delivered_at` (for an async hook, when its hook process ended). Post hooks only; `pre-start` runs in the shim (D22).
 - `leases`: `name` (`runner`, `deliver`, `job:<id>`), `holder_identity`, `expires_at`.
-- `counters`: `name`, `value` (`pass_requested`, D28; one `seq` counter per log file, D42).
+- `counters`: `name`, `value` (`pass_requested`, D28; one `seq` counter per log file, D42; `warn:<digest>` fingerprints of the last state logged per once-per-state warning, `0` = cleared).
 - `queues_seen`: `name`, `first_seen`; a row is deleted at retention when its queue is not configured and has no jobs left.
 - `pruned_ids`: `id`, so ids are never reused after prune (one row per pruned id).
 

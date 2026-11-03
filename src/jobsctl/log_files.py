@@ -109,7 +109,8 @@ def append_line(fd: int, data: bytes, *, durable: bool) -> None:
 
     A last line without its newline (a writer crashed mid-append) is terminated first, so the
     new record starts on its own line; readers skip the torn fragment. A failed write cuts the
-    file back to its earlier length, so no partial record stays behind.
+    file back to its earlier length (never longer than it now is), so no partial record stays
+    behind.
     """
     size = os.fstat(fd).st_size
     prefix = b""
@@ -123,10 +124,19 @@ def append_line(fd: int, data: bytes, *, durable: bool) -> None:
         if durable:
             os.fsync(fd)
     except OSError as exc:
-        with contextlib.suppress(OSError):
-            os.ftruncate(fd, size)
+        _cut_back(fd, size)
         raise JobsctlError("internal", f"cannot append to the record file: {exc.strerror}") from exc
     except BaseException:
-        with contextlib.suppress(OSError):
-            os.ftruncate(fd, size)
+        _cut_back(fd, size)
         raise
+
+
+def _cut_back(fd: int, size: int) -> None:
+    """Remove a partial record after a failed append, never extending the file.
+
+    An external ``copytruncate`` may have shrunk the file since ``size`` was read; truncating
+    to ``size`` then would pad it with NUL bytes, so the file is only ever shortened.
+    """
+    with contextlib.suppress(OSError):
+        if os.fstat(fd).st_size > size:
+            os.ftruncate(fd, size)

@@ -24,6 +24,8 @@ from jobsctl.store_db import Store
 from tests.conftest import validate_against
 from tests.store_helpers import popen
 
+pytestmark = pytest.mark.usefixtures("validated_records")
+
 WORKER = Path(__file__).with_name("log_worker.py")
 TIMEOUT = 120
 
