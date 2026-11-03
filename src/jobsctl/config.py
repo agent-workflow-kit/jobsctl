@@ -20,8 +20,7 @@ from typing import Annotated, Any, Final
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field
 from pydantic import StringConstraints as Str
 
-# TODO(#4): the duration grammar moves to `durations.py`; this import follows it.
-from jobsctl.cli_values import DurationError, parse_duration
+from jobsctl.durations import DurationError, parse_duration
 
 _QUEUE_PATTERN: Final = r"^[a-z0-9][a-z0-9_-]{0,63}$"
 ENV_NAME_PATTERN: Final = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"

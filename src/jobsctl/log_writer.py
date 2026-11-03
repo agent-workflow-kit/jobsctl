@@ -21,22 +21,22 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from jobsctl import gateway
+from jobsctl.env_mask import MaskingSet
 from jobsctl.errors import JobsctlError
 from jobsctl.log_files import append_line, locked
 from jobsctl.log_records import (
     build_audit_record,
     build_log_record,
     encode_line,
-    format_ts,
-    masking_set,
     utf8_bytes,
 )
 from jobsctl.store_db import Store
 from jobsctl.store_ops import counter_cas, counter_get, counter_incr
+from jobsctl.timestamps import format_timestamp
 
 AUDIT_FILE = "audit.jsonl"
 LOG_FILE = "log.jsonl"
@@ -59,20 +59,19 @@ def _state_fingerprint(state: str) -> int:
 class RecordWriter:
     """Appends records to ``audit.jsonl`` and ``log.jsonl`` of one store's state directory.
 
-    ``masked_values`` is the masking set (values of ``mask_env``, ``--pass-env`` and
-    ``env_file`` variables); ``clock`` returns the current UTC time.
+    ``masking`` is the masking set of :mod:`jobsctl.env_mask` (values of ``mask_env``,
+    ``--pass-env`` and ``env_file`` variables); ``clock`` returns the current UTC time.
     """
 
     def __init__(
         self,
         store: Store,
         *,
-        masked_values: Iterable[str] = (),
+        masking: MaskingSet | None = None,
         clock: Callable[[], dt.datetime] = gateway.utc_now,
     ) -> None:
-        # TODO(#8): the masking set comes from the env module (mask_env, pass-env, env_file).
         self._store = store
-        self._masked = masking_set(masked_values)
+        self._masked = () if masking is None else masking.values
         self._clock = clock
 
     # -- public API ------------------------------------------------------------------------
@@ -189,7 +188,7 @@ class RecordWriter:
             with self._store.write() as tx:  # its own short transaction, under the file lock
                 seq = counter_incr(tx, counter)
             try:
-                record = {"seq": seq, "ts": format_ts(self._clock()), **body}
+                record = {"seq": seq, "ts": format_timestamp(self._clock()), **body}
                 line = encode_line(record, shrink_details=filename == LOG_FILE)
                 append_line(fd, line, durable=durable)
             except BaseException:

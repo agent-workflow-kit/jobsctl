@@ -20,6 +20,7 @@ import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Final
 
+from jobsctl.ids import is_job_id
 from jobsctl.textsafe import echo, is_invisible, sanitize, strip_escapes
 
 LEVELS: Final = frozenset({"info", "warn", "error"})
@@ -67,19 +68,9 @@ class RecordTooLarge(ValueError):
     """The serialized record exceeds :data:`MAX_RECORD_BYTES`."""
 
 
-def format_ts(when: dt.datetime) -> str:
-    """UTC with ``Z`` and millisecond precision. TODO(#4): ``timestamps.format_timestamp``."""
-    if when.tzinfo is None:
-        raise ValueError("timestamps must be timezone-aware")
-    utc = when.astimezone(dt.UTC)
-    return (
-        f"{utc.year:04d}-{utc.month:02d}-{utc.day:02d}T"
-        f"{utc.hour:02d}:{utc.minute:02d}:{utc.second:02d}.{utc.microsecond // 1000:03d}Z"
-    )
-
-
 def parse_ts(text: object) -> dt.datetime | None:
-    """A record's fixed-width ``ts``, or ``None`` when it is not one. TODO(#4)."""
+    """A record's fixed-width ``ts`` (the form ``timestamps.format_timestamp`` writes), or ``None``
+    when it is not one; stricter than ``timestamps.parse_timestamp``, which accepts any offset."""
     if not isinstance(text, str):
         return None
     match = _TS_RE.match(text)
@@ -242,7 +233,7 @@ _REASON_NAMES = (
 )  # fmt: skip
 _STATUS_NAMES = ("queued", "starting", "running", "held", "done", "failed", "canceled")
 
-_is_job_id = _pattern(r"jb-[a-z2-7]{8}")  # TODO(#4): the shared job-id grammar
+_is_job_id = lambda v: isinstance(v, str) and is_job_id(v)  # noqa: E731
 _is_queue = _pattern(r"[a-z0-9][a-z0-9_-]{0,63}")
 _is_actor = _pattern(r"(human|auto):[A-Za-z0-9._@-]{1,64}")
 _is_decision_ids = _array_of(_pattern(r"[A-Za-z0-9._:@/-]{1,128}"))

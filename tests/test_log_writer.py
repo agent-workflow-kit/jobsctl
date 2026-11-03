@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from jobsctl import log_writer
+from jobsctl.env_mask import masking_set_of
 from jobsctl.errors import JobsctlError
 from jobsctl.log_records import (
     AUDIT_ACTIONS,
@@ -374,7 +375,7 @@ def test_hostile_text_in_audit_inputs_is_refused(
 
 def test_masked_values_never_reach_the_files(store: Store) -> None:
     secret = "s3cr3t-token-value"
-    writer = RecordWriter(store, masked_values=[secret, "short", secret])
+    writer = RecordWriter(store, masking=masking_set_of([secret, "short", secret]))
     writer.log(
         "env_file_line_invalid",
         level="warn",
@@ -399,7 +400,7 @@ def test_masked_values_never_reach_the_files(store: Store) -> None:
 
 def test_a_masked_value_split_by_the_sanitizer_is_still_masked(store: Store) -> None:
     secret = "tok​en-abcdef"  # holds a zero-width character the sanitizer escapes
-    writer = RecordWriter(store, masked_values=[secret])
+    writer = RecordWriter(store, masking=masking_set_of([secret]))
     writer.log("pass", fields={"message": f"x {secret} y"})
     assert records(store, "log.jsonl")[0]["message"] == "x *** y"
 
@@ -971,7 +972,7 @@ def test_audit_target_and_result_follow_the_schema(writer: RecordWriter) -> None
 def test_masking_leaves_identifier_and_enum_fields_intact(
     store: Store,
 ) -> None:
-    writer = RecordWriter(store, masked_values=["starting", "deadbeef", "jobsctl-"])
+    writer = RecordWriter(store, masking=masking_set_of(["starting", "deadbeef", "jobsctl-"]))
     writer.log(
         "transition",
         fields={
@@ -1029,7 +1030,7 @@ def test_a_failed_write_never_extends_a_file_that_shrank_meanwhile(
 
 
 def test_details_keys_that_clean_to_the_same_text_are_kept_apart(store: Store) -> None:
-    writer = RecordWriter(store, masked_values=["secretvalue1", "secretvalue2"])
+    writer = RecordWriter(store, masking=masking_set_of(["secretvalue1", "secretvalue2"]))
     writer.log(
         "pass",
         fields={

@@ -231,3 +231,14 @@ def test_huge_value_and_many_values() -> None:
     many = {f"V{i}": f"value-number-{i:06d}" for i in range(3000)}
     result = mset(cfg(), {}, NOFILE, {"BIG": big, **many})
     assert result.mask("a" + big + "b value-number-002999") == "a***b ***"
+
+
+def test_masking_set_of_plain_values() -> None:
+    from jobsctl.env_mask import masking_set_of
+
+    got = masking_set_of(["short", "longer-secret-1", "line-one-secret\nline-two-secret", ""])
+    assert got.contains_secret("x longer-secret-1 y")
+    assert got.contains_secret("line-two-secret")
+    assert not got.contains_secret("short")  # under 8 characters: never masked
+    assert got.mask("a longer-secret-1 b") == "a *** b"
+    assert masking_set_of([]).values == ()

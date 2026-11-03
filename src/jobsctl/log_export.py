@@ -23,15 +23,6 @@ from jobsctl.errors import JobsctlError
 from jobsctl.log_records import MAX_RECORD_BYTES, dumps, parse_ts
 
 
-def since_cutoff(seconds_back: int, now: dt.datetime) -> dt.datetime:
-    """The instant ``seconds_back`` before ``now``.
-
-    TODO(#4): replace with ``jobsctl.timestamps.since_cutoff`` and catch its ``TimestampError``
-    where ``OverflowError`` is caught here; both end as a ``usage`` error.
-    """
-    return now.astimezone(dt.UTC) - dt.timedelta(seconds=seconds_back)
-
-
 def _open_regular(path: Path) -> int | None:
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
     try:
