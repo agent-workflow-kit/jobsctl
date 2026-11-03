@@ -20,6 +20,7 @@ from jobsctl.env_canonical import (
     CanonicalEnv,
     matches,
     path_entry_usable,
+    prepend_entries,
     prepend_path,
 )
 from jobsctl.env_file import EnvFile
@@ -71,9 +72,10 @@ def build_job_env(
 
     values = {k: v for k, v in canonical.values.items() if matches(k, config.env.inherit)}
     values.update(config.env.set)
-    if config.env.path_prepend:
-        # The entries canonical cleaning keeps; the canonical step already warned about the rest.
-        kept = [e for e in config.env.path_prepend if path_entry_usable(e)]
+    # The entries canonical cleaning keeps (split on `:` the same way); the canonical step already
+    # warned about the rest. If none is kept, PATH stays as it is rather than become empty.
+    kept = [e for e in prepend_entries(config.env.path_prepend) if path_entry_usable(e)]
+    if kept:
         values["PATH"] = prepend_path(kept, values.get("PATH"))
     values.update(env)
 

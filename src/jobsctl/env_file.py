@@ -51,14 +51,15 @@ Status = Literal["not_configured", "available", "unavailable"]
 class EnvWarning:
     """A state warning for `log.jsonl`. Never holds file content.
 
-    `reason` is one of a fixed set of codes (only for `env_file_unsafe`); `line` is the 1-based
-    line number (line warnings); `entry`/`variable` are only used by other env modules."""
+    `reason` is one of a fixed set of codes (`env_file_unsafe`, `path_entry_dropped`); `line` is
+    the 1-based line number (line warnings); `path`/`variable` are only used by other env modules
+    (`path` matches the `path` field of the schema's warning)."""
 
     code: str
     line: int | None = None
     reason: str | None = None
     variable: str | None = None
-    entry: str | None = None
+    path: str | None = None
 
 
 def _euid() -> int:
@@ -81,8 +82,17 @@ def _dir_trusted(mode: int, uid: int, euid: int) -> bool:
     return stat.S_ISDIR(mode) and uid in (euid, 0) and mode & 0o022 == 0
 
 
-def _file_trusted(mode: int, uid: int, size: int, euid: int) -> bool:
-    return stat.S_ISREG(mode) and uid == euid and mode & 0o066 == 0 and size <= MAX_BYTES
+def _file_untrusted_reason(mode: int, uid: int, size: int, euid: int) -> str | None:
+    """Why the opened file is not trusted (an `env_file_unsafe` reason), or None if it is."""
+    if not stat.S_ISREG(mode):
+        return "not_regular"
+    if uid != euid:
+        return "owner"
+    if mode & 0o066:
+        return "mode"
+    if size > MAX_BYTES:
+        return "size"
+    return None
 
 
 @dataclass(frozen=True)
@@ -101,8 +111,9 @@ class EnvFile:
 
     @property
     def state_key(self) -> tuple[object, ...]:
-        """Equal for equal warnings: log a warning only when this changes."""
-        return tuple(self.warnings)
+        """Equal for equal warnings, the hook-environment `env_file_line_ignored` ones included:
+        log a warning only when this changes."""
+        return (tuple(self.warnings), self.hook_values()[1])
 
     def hook_values(self) -> tuple[dict[str, str], tuple[EnvWarning, ...]]:
         """The values a hook environment gets: everything but the ignored names (PATH, HOME, ...),
@@ -164,14 +175,9 @@ def _open_trusted(path: str, trust_from: str | None) -> tuple[int | None, str]:
 def _read_trusted(fd: int) -> tuple[bytes | None, str]:
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            return None, "not_regular"
-        if st.st_uid != _euid():
-            return None, "owner"
-        if st.st_mode & 0o066:
-            return None, "mode"
-        if st.st_size > MAX_BYTES:
-            return None, "size"
+        untrusted = _file_untrusted_reason(st.st_mode, st.st_uid, st.st_size, _euid())
+        if untrusted is not None:
+            return None, untrusted
         chunks: list[bytes] = []
         total = 0
         while total <= MAX_BYTES:  # the file may have grown since fstat

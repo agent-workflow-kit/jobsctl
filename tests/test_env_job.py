@@ -105,10 +105,33 @@ def test_canonical_path_with_prepend_is_not_duplicated(dirs: list[str]) -> None:
     assert result.values["PATH"] == f"{dirs[1]}:{dirs[0]}"
 
 
-def test_prepend_entries_that_canonical_cleaning_drops_stay_dropped(tmp_path: Path) -> None:
-    config = cfg(env={"path_prepend": [str(tmp_path / "gone")]})
+def test_prepend_entries_that_canonical_cleaning_drops_stay_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the directory exists, so only the (patched) temporary rule can drop it
+    temp = tmp_path / "tmproot"
+    (temp / "bin").mkdir(parents=True)
+    monkeypatch.setattr(ec, "_TEMP_ROOTS", (str(temp),))
+    config = cfg(env={"path_prepend": [str(temp / "bin")]})
+    canonical = ec.build_canonical_env(config, {"PATH": "/usr/bin"})
+    assert [(w.path, w.reason) for w in canonical.warnings] == [(str(temp / "bin"), "temporary")]
     result = build(config, {"PATH": "/usr/bin"})
     assert result["PATH"] == "/usr/bin"
+
+
+def test_prepend_entry_with_colon_split_like_canonical(dirs: list[str]) -> None:
+    config = cfg(env={"path_prepend": [f"{dirs[0]}:/jobsctl-test-tmp/evil:{dirs[1]}"]})
+    assert build(config, {"PATH": dirs[2]})["PATH"] == f"{dirs[0]}:{dirs[1]}:{dirs[2]}"
+    canonical = ec.build_canonical_env(config, {"PATH": dirs[2]})
+    result = ej.build_job_env(
+        config, canonical, NOFILE, job_id="jb-abcdefgh", attempt=1, env={}, pass_env=[]
+    )
+    assert result.values["PATH"] == canonical.values["PATH"] == f"{dirs[0]}:{dirs[1]}:{dirs[2]}"
+
+
+def test_prepend_all_dropped_never_leaves_an_empty_path(dirs: list[str]) -> None:
+    config = cfg(env={"inherit": [], "path_prepend": ["/jobsctl-test-tmp/x"]})
+    assert "PATH" not in build(config, {})
 
 
 def test_env_entry_overrides_path(dirs: list[str]) -> None:

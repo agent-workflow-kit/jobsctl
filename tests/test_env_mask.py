@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import random
+import string
+import time
 from pathlib import Path
 
 from jobsctl import env_canonical as ec
@@ -151,16 +153,70 @@ def test_contains_masked_value_for_add_refusal() -> None:
     assert not result.contains_secret("curl -H nothing")
 
 
-def test_hostile_large_input_is_linear_enough() -> None:
+def reference_mask(secrets: list[str], text: str) -> str:
+    """Leftmost match, longest at a position, no re-scan: the rule `mask` implements."""
+    ordered = sorted(set(secrets), key=len, reverse=True)
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        hit = next((s for s in ordered if text.startswith(s, i)), None)
+        if hit is None:
+            out.append(text[i])
+            i += 1
+        else:
+            out.append(em.REPLACEMENT)
+            i += len(hit)
+    return "".join(out)
+
+
+def test_matches_reference_on_random_overlapping_secrets() -> None:
+    rng = random.Random(99)
+    for _ in range(300):
+        secrets = [
+            "".join(rng.choice("ab") for _ in range(rng.randint(8, 12)))
+            for _ in range(rng.randint(1, 12))
+        ]
+        result = mset(cfg(), {}, NOFILE, {f"S{i}": s for i, s in enumerate(secrets)})
+        text = "".join(rng.choice("ab*") for _ in range(rng.randint(0, 80)))
+        assert result.mask(text) == reference_mask(secrets, text)
+        assert result.contains_secret(text) == any(s in text for s in secrets)
+
+
+def test_secrets_that_prefix_each_other_deeply() -> None:
+    # every value is a prefix of the next, and a deep branching chain: the matcher must not
+    # depend on nesting the secrets in one deep expression
+    chain = {f"C{n}": "x" * n for n in range(8, 1600)}
+    result = mset(cfg(), {}, NOFILE, chain)
+    assert result.mask("x" * 1599) == "***"
+    assert result.mask("y" + "x" * 1600 + "y") == "y***xy"
+    branches = {f"B{i}": "a" * i + "b" + "c" * 8 for i in range(800)}
+    result = mset(cfg(), {}, NOFILE, branches)
+    assert result.mask("aaa" + "a" * 500 + "bcccccccc!") == "***!"
+    assert result.mask("a" * 900 + "bcccccccc") == "a" * 101 + "***"
+
+
+def test_masking_is_fast_on_hostile_inputs() -> None:
+    # Before the trie matcher, the many-secrets case alone took more than 100 s.
+    rng = random.Random(5)
+    alphabet = string.ascii_letters + string.digits
+    secrets = {f"S{i}": "".join(rng.choices(alphabet, k=9)) for i in range(50_000)}
+    text = "".join(rng.choices(alphabet, k=256 * 1024))
+    start = time.monotonic()
+    result = mset(cfg(), {}, NOFILE, secrets)
+    assert result.mask(text + " " + secrets["S7"]).endswith(" ***")
+    assert time.monotonic() - start < 10
+
+    start = time.monotonic()
     result = mset(cfg(), {}, NOFILE, {"A": "a" * 8 + "b"})
     text = "a" * 2_000_000
     assert result.mask(text) == text
+    assert time.monotonic() - start < 10
 
 
 def test_random_embeddings_always_masked() -> None:
     rng = random.Random(1234)
     secrets = ["s3cr3t-token-A", "pa$$word.*1234", "tokén-中文-xx"]
-    result = mset(cfg(), {}, NOFILE, dict(enumerate(map(str, secrets))))  # type: ignore[arg-type]
+    result = mset(cfg(), {}, NOFILE, {f"S{i}": s for i, s in enumerate(secrets)})
     for _ in range(200):
         pieces = [
             rng.choice(secrets + ["noise", " ", "\n", "x" * rng.randint(0, 9)]) for _ in range(8)

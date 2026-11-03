@@ -13,6 +13,7 @@ pipeline (windowing, decoding, escape removal, sanitizing) belongs to the output
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -24,6 +25,7 @@ from jobsctl.env_file import EnvFile, EnvWarning
 
 MIN_MASKED_LENGTH: Final = 8
 REPLACEMENT: Final = "***"
+_MAX_NESTING: Final = 48  # well inside the regex compiler's recursion limit
 
 
 @dataclass(frozen=True)
@@ -90,5 +92,42 @@ def masking_values(
         chosen.update(c for c in _candidates(value) if len(c) >= MIN_MASKED_LENGTH)
 
     ordered = tuple(sorted(chosen, key=lambda v: (-len(v), v)))
-    pattern = re.compile("|".join(re.escape(v) for v in ordered)) if ordered else None
+    pattern = re.compile(_trie_pattern(sorted(chosen), 0)) if ordered else None
     return MaskingSet(ordered, tuple(warnings), pattern)
+
+
+def _trie_pattern(strings: list[str], depth: int) -> str:
+    """A regex matching the longest of `strings` (sorted, distinct; `""` means "a value may end
+    here") at a position, shaped as a prefix tree so its cost per text position does not grow
+    with the number of values.
+
+    Each node lists its children (distinct first characters, so at most one can match) before
+    the empty end-of-value option, so the regex engine settles on the longest value along the one
+    path the text selects. Chains are collapsed into literals. Below `_MAX_NESTING` levels the
+    rest of a subtree is a flat alternation, longest first (same result, no deeper nesting), so a
+    hostile set of values that prefix each other cannot exhaust the regex compiler's recursion.
+    """
+    if depth >= _MAX_NESTING:
+        return "(?:" + "|".join(re.escape(s) for s in sorted(strings, key=len, reverse=True)) + ")"
+    branches: list[str] = []
+    ends_here = False
+    i = 0
+    while i < len(strings):
+        first = strings[i]
+        if first == "":
+            ends_here = True
+            i += 1
+            continue
+        j = i + 1
+        while j < len(strings) and strings[j][0] == first[0]:
+            j += 1
+        group = strings[i:j]
+        prefix = os.path.commonprefix([group[0], group[-1]])  # of the whole group, as it is sorted
+        branch = re.escape(prefix)
+        if len(group) > 1:
+            branch += _trie_pattern([g[len(prefix) :] for g in group], depth + 1)
+        branches.append(branch)
+        i = j
+    if ends_here:
+        branches.append("")
+    return "(?:" + "|".join(branches) + ")"

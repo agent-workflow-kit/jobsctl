@@ -6,9 +6,11 @@ import os
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from jobsctl import env_canonical as ec
 from jobsctl.config import Config
+from tests.conftest import _registry
 
 
 def cfg(**env: object) -> Config:
@@ -111,9 +113,9 @@ def test_path_cleaning_drops_each_kind(bins: list[str], tmp_path: Path) -> None:
     )
     result = build(cfg(), {"PATH": path})
     assert result.values["PATH"] == bins[0]
-    dropped = {(w.entry, w.reason) for w in result.warnings}
+    dropped = {(w.path, w.reason) for w in result.warnings}
     assert dropped == {
-        ("", "empty"),
+        (None, "empty"),
         ("rel/bin", "relative"),
         (".", "relative"),
         (missing, "missing"),
@@ -128,7 +130,7 @@ def test_path_cleaning_drops_each_kind(bins: list[str], tmp_path: Path) -> None:
 )
 def test_temporary_entries_variants(entry: str) -> None:
     result = build(cfg(), {"PATH": entry})
-    assert "PATH" not in result.values or result.values["PATH"] == ""
+    assert result.values.get("PATH") != ""
     assert [w.reason for w in result.warnings] in (["temporary"], ["missing"])
 
 
@@ -156,16 +158,64 @@ def test_existing_file_entry_kept_and_duplicates_kept(bins: list[str]) -> None:
     assert result.warnings == ()
 
 
-def test_all_entries_dropped_gives_empty_path() -> None:
+def test_all_entries_dropped_falls_back_to_system_dirs() -> None:
+    # an empty PATH makes POSIX shells search the current directory
     result = build(cfg(), {"PATH": "rel"})
-    assert result.values.get("PATH", "") == ""
+    expected = ":".join(d for d in ("/usr/bin", "/bin") if os.path.isdir(d))
+    assert result.values["PATH"] == expected
+    assert [w.reason for w in result.warnings] == ["relative"]
 
 
-def test_warning_entry_is_sanitized() -> None:
+def test_fallback_entries_are_cleaned_too(monkeypatch: pytest.MonkeyPatch, bins: list[str]) -> None:
+    monkeypatch.setattr(ec, "_FALLBACK_PATH", ("/jobsctl-no-such-dir", bins[0]))
+    assert build(cfg(), {"PATH": "rel"}).values["PATH"] == bins[0]
+
+
+def test_no_usable_fallback_removes_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ec, "_FALLBACK_PATH", ("/jobsctl-no-such-dir", "/tmp"))
+    assert "PATH" not in build(cfg(), {"PATH": "rel"}).values
+
+
+def test_path_prepend_entry_with_colon_is_split(bins: list[str]) -> None:
+    config = cfg(path_prepend=[f"{bins[0]}:/jobsctl-test-tmp/evil"])
+    result = build(config, {"PATH": bins[1]})
+    assert result.values["PATH"] == f"{bins[0]}:{bins[1]}"
+
+
+def test_warning_path_is_sanitized() -> None:
     result = build(cfg(), {"PATH": "evil\x1b[31m\nbin"})
     (w,) = result.warnings
-    assert w.entry is not None
-    assert "\x1b" not in w.entry and "\n" not in w.entry
+    assert w.path is not None
+    assert "\x1b" not in w.path and "\n" not in w.path
+
+
+def warning_validator() -> Draft202012Validator:
+    schema = {"$ref": "jobsctl/defs.json#/$defs/warning"}
+    return Draft202012Validator(schema, registry=_registry())
+
+
+@pytest.mark.parametrize("entry", ["", "rel", "/jobsctl-test-tmp/x", "/jobsctl-no-such-dir"])
+def test_dropped_warning_matches_schema(bins: list[str], entry: str) -> None:
+    (w,) = build(cfg(), {"PATH": f"{bins[0]}:{entry}"}).warnings
+    instance = {"code": w.code, "message": "PATH entry dropped", "reason": w.reason}
+    if w.path is not None:
+        instance["path"] = w.path
+    validator = warning_validator()
+    validator.validate(instance)
+
+
+def test_schema_requires_path_unless_the_entry_was_empty() -> None:
+    validator = warning_validator()
+    base = {"code": "path_entry_dropped", "message": "PATH entry dropped"}
+    assert validator.is_valid({**base, "reason": "empty"})
+    assert not validator.is_valid({**base, "reason": "relative"})
+
+
+def test_repr_hides_values() -> None:
+    result = build(cfg(inherit=["TOKEN"]), {"TOKEN": "super-secret-value"})
+    assert result.values["TOKEN"] == "super-secret-value"
+    assert "super-secret-value" not in repr(result)
+    assert "super-secret-value" not in str(result)
 
 
 def test_never_contains_env_file_values(bins: list[str]) -> None:

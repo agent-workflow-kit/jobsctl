@@ -231,11 +231,24 @@ def test_ancestor_trust_rules() -> None:
 
 def test_file_trust_rules() -> None:
     me = 1000
-    assert ef._file_trusted(stat.S_IFREG | 0o600, me, 10, me)
-    assert not ef._file_trusted(stat.S_IFREG | 0o600, 0, 10, me)  # even root-owned
-    assert not ef._file_trusted(stat.S_IFREG | 0o640, me, 10, me)
-    assert not ef._file_trusted(stat.S_IFREG | 0o600, me, ef.MAX_BYTES + 1, me)
-    assert not ef._file_trusted(stat.S_IFIFO | 0o600, me, 0, me)
+    assert ef._file_untrusted_reason(stat.S_IFREG | 0o600, me, 10, me) is None
+    assert ef._file_untrusted_reason(stat.S_IFREG | 0o600, 0, 10, me) == "owner"  # even root
+    assert ef._file_untrusted_reason(stat.S_IFREG | 0o640, me, 10, me) == "mode"
+    assert ef._file_untrusted_reason(stat.S_IFREG | 0o600, me, ef.MAX_BYTES + 1, me) == "size"
+    assert ef._file_untrusted_reason(stat.S_IFIFO | 0o600, me, 0, me) == "not_regular"
+
+
+def test_read_uses_the_file_trust_rules(secret_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+
+    def rules(mode: int, uid: int, size: int, euid: int) -> str | None:
+        calls.append(size)
+        return "owner"
+
+    monkeypatch.setattr(ef, "_file_untrusted_reason", rules)
+    result = load_in(secret_dir, "A=1\n")
+    assert calls == [4]
+    assert [(w.code, w.reason) for w in result.warnings] == [("env_file_unsafe", "owner")]
 
 
 @pytest.mark.parametrize("bad", ["relative/env", "", "/a/../b/env", "/a/./b"])
@@ -267,6 +280,14 @@ def test_state_key_changes_with_state(secret_dir: Path) -> None:
     bad = load_in(secret_dir, "A=1\n", 0o644)
     assert good.state_key == same.state_key
     assert good.state_key != bad.state_key
+
+
+def test_state_key_changes_with_hook_ignored_lines(secret_dir: Path) -> None:
+    plain = load_in(secret_dir, "A=1\n")
+    ignored = load_in(secret_dir, "A=1\nPATH=x\n")
+    assert plain.warnings == ignored.warnings == ()
+    assert plain.state_key != ignored.state_key
+    assert ignored.state_key == load_in(secret_dir, "A=2\nPATH=y\n").state_key
 
 
 # hook environment

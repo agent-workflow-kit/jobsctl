@@ -96,8 +96,11 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 | `store_db.py` | connection setup (WAL, `synchronous=NORMAL`, busy timeout, `journal_size_limit`, `autocommit=True`), `BEGIN IMMEDIATE` write transactions with after-commit callbacks, migrations at open (CLI commands only) and schema version checks (`SchemaOlderError`, `version_skew`) (D31) |
 | `store_ops.py` | compare-and-set transitions on `(id, status, attempt)` and on `claim_id`, the hook outbox, counters (the gap-free `seq` allocator) and leases with an injected liveness check |
 | `order.py` | position keys, rank computation, the selection algorithm, capacity counts, `blocked_by` |
-| `env.py` | the canonical environment (`PATH` cleaning, ignored names), the job environment, safe `env_file` loading (trust-anchor checks, line format) |
-| `output.py` | planned (output-capture issue): ring buffer, live-flush withholding, masking (the masking set and the `add` secret refusal), sanitizing, compression |
+| `env_file.py` | safe `env_file` loading (trust-anchor checks, `PR_SET_DUMPABLE`, line format), the hook-environment ignored names, state warnings |
+| `env_canonical.py` | the canonical environment (inherit, `JOBSCTL_*` removal, `env.set.PATH`, `path_prepend`, `PATH` cleaning) |
+| `env_job.py` | the job environment (the six steps, `missing_env`, reserved and invalid names) |
+| `env_mask.py` | the masking set (`mask_env`, every `env_file` value, `--pass-env` values; short-value warnings) and the one-pass replacement of its values, used for masking and the `add` secret refusal |
+| `output.py` | planned (output-capture issue): ring buffer, live-flush withholding, masking (with the masking set from `env_mask.py`), sanitizing, compression |
 | `hooks.py` | sync hook execution under the unreaped-leader rule (process groups, timeouts, selectors, output read in memory for `decision_id`, `hook_messages` and the `hook_ran` excerpt), payload building, leaving async events to `_deliver` (D39), stopping a running hook when a CLI command is interrupted (D48) |
 | `config.py` | Pydantic models for every config key (strict, unknown keys refused, durations as seconds, `~/` expanded), per-queue precedence (`Config.queue`), `unknown_queue_selector` detection |
 | `config_files.py` | default path (`XDG_CONFIG_HOME`), `config.d/*.yaml` drop-ins and merge (maps merge, hook lists append), YAML loading without anchors, aliases or duplicate keys, absolute `--config` hand-off; errors name keys, never `env.*` values |

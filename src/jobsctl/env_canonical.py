@@ -28,6 +28,9 @@ ALWAYS_INHERITED: Final = (
 )
 RESERVED_PREFIX: Final = "JOBSCTL_"
 _TEMP_ROOTS: Final = ("/tmp", "/run/user")
+# The PATH used when cleaning leaves no entry: an empty PATH makes POSIX shells search the
+# current directory. Its entries are cleaned too; if none survives, PATH is removed.
+_FALLBACK_PATH: Final = ("/usr/bin", "/bin")
 
 
 def matches(name: str, patterns: Iterable[str]) -> bool:
@@ -43,7 +46,8 @@ def matches(name: str, patterns: Iterable[str]) -> bool:
 
 @dataclass(frozen=True)
 class CanonicalEnv:
-    values: Mapping[str, str]
+    # Inherited values can be secrets (`mask_env` names): keep them out of the repr.
+    values: Mapping[str, str] = field(repr=False)
     warnings: tuple[EnvWarning, ...] = field(default=())
 
     @property
@@ -82,8 +86,9 @@ def _drop_reason(entry: str, roots: tuple[str, ...]) -> str | None:
     return None
 
 
-def clean_path(path: str) -> tuple[str, tuple[EnvWarning, ...]]:
-    """Drop empty, relative, non-existent and temporary entries of a `:`-separated PATH."""
+def clean_path(path: str) -> tuple[str | None, tuple[EnvWarning, ...]]:
+    """Drop empty, relative, non-existent and temporary entries of a `:`-separated PATH. If none
+    is left, the usable `_FALLBACK_PATH` entries; if none of those either, None (no PATH)."""
     roots = _temp_roots()
     kept: list[str] = []
     dropped: list[EnvWarning] = []
@@ -92,8 +97,11 @@ def clean_path(path: str) -> tuple[str, tuple[EnvWarning, ...]]:
         if reason is None:
             kept.append(entry)
         else:
-            dropped.append(EnvWarning("path_entry_dropped", reason=reason, entry=echo(entry, 256)))
-    return ":".join(kept), tuple(dropped)
+            shown = echo(entry, 256) if entry else None  # the schema's `path` is never empty
+            dropped.append(EnvWarning("path_entry_dropped", reason=reason, path=shown))
+    if not kept:
+        kept = [e for e in _FALLBACK_PATH if _drop_reason(e, roots) is None]
+    return (":".join(kept) if kept else None), tuple(dropped)
 
 
 def path_entry_usable(entry: str) -> bool:
@@ -101,10 +109,15 @@ def path_entry_usable(entry: str) -> bool:
     return _drop_reason(entry, _temp_roots()) is None
 
 
+def prepend_entries(prefix: Iterable[str]) -> list[str]:
+    """The `env.path_prepend` entries as PATH entries: one holding `:` is several."""
+    return [part for entry in prefix for part in entry.split(":")]
+
+
 def prepend_path(prefix: Iterable[str], path: str | None) -> str:
     """`prefix` entries in front of `path`; an entry already in `path` moves to the front, so the
     operation is idempotent (the canonical and job environments both apply it)."""
-    front = list(prefix)
+    front = prepend_entries(prefix)
     rest = [e for e in (path.split(":") if path else []) if e not in front]
     return ":".join(front + rest)
 
@@ -123,5 +136,9 @@ def build_canonical_env(config: Config, environ: Mapping[str, str]) -> Canonical
         values["PATH"] = prepend_path(config.env.path_prepend, values.get("PATH"))
     warnings: tuple[EnvWarning, ...] = ()
     if "PATH" in values:
-        values["PATH"], warnings = clean_path(values["PATH"])
+        cleaned, warnings = clean_path(values["PATH"])
+        if cleaned is None:
+            del values["PATH"]
+        else:
+            values["PATH"] = cleaned
     return CanonicalEnv(values, warnings)
