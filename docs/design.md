@@ -99,7 +99,8 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 | `config.py` | Pydantic models, drop-ins, precedence (files and flags only), absolute `--config` hand-off; errors name keys, never `env.*` values |
 | `ids.py`, `durations.py`, `timestamps.py` | planned (`TODO(#4)`): id generation (checked against `pruned_ids`) and prefix lookup; duration and timestamp grammars, moved out of `cli_values.py` |
 | `audit.py` | `audit.jsonl` and `log.jsonl` writers (`seq` allocation, D42), diagnostics files (D43) |
-| `procs.py` | process identity, boot id, liveness, subreaper, pidfds (including group signals where the kernel has them), dumpability, group probing (Linux and macOS) |
+| `proc_host.py`, `proc_identity.py`, `proc_signal.py`, `proc_group.py`, `proc_linux.py` (instead of one `procs.py`) | process identity, boot id, liveness, pidfd signals (including group signals where the kernel has them), group probing, dumpability, subreaper, held-leader reaping (Linux and macOS); `proc_host.py` is the platform seam (`LinuxHost` over an injectable `/proc` root, `DarwinHost` over a fakeable libproc) |
+| `gateway_proc.py` | the process half of the gateway: `kill`/`killpg`, pidfds with the `ctypes` fallback and its architecture allow list, `prctl`, `waitid`, libproc, `sysctl` |
 | `gateway.py` | every process spawn, signal, wait, file lock and clock access, so tests replace them with fakes |
 | `tui/` | `browse` (optional extra) |
 
