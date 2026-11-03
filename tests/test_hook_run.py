@@ -507,7 +507,7 @@ def test_an_interrupt_right_after_spawn_leaves_no_hook_process(
 def test_signals_sent_records_only_signals_actually_sent(
     tracker: HookTracker, state_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    for outcome in (Result.NOT_ALIVE, Result.DENIED, Result.ERROR):
+    for outcome in (Result.NOT_ALIVE, Result.DENIED):
         monkeypatch.setattr(hook_run, "signal_group", lambda *a, _o=outcome, **k: SignalOutcome(_o))
         res = run("sleep 60", state_dir, timeout=0.2, tuning=HookTuning(0.1, 0.3, 0.1, 0.05))
         assert res.signals_sent == () and res.unkillable
@@ -523,6 +523,41 @@ def test_an_unverifiable_identity_falls_back_to_killpg_on_our_unreaped_leader(
     res = run("sleep 60", state_dir, timeout=0.3, host=host)
     assert res.signals_sent == ("SIGTERM",) and not res.unkillable
     assert host.calls == [(tracker.last.popen.pid, signal.SIGTERM, True)]
+
+
+def test_an_error_outcome_falls_back_to_killpg_like_an_unverifiable_identity(
+    tracker: HookTracker, state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(hook_run, "signal_group", lambda *a, **k: SignalOutcome(Result.ERROR))
+    host = SpyHost(tracker)
+    res = run("sleep 60", state_dir, timeout=0.3, host=host)
+    assert res.signals_sent == ("SIGTERM",) and not res.unkillable
+    assert host.calls == [(tracker.last.popen.pid, signal.SIGTERM, True)]
+
+
+def test_an_interrupt_while_building_the_run_leaves_no_hook_process(
+    tracker: HookTracker, state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(hook_run, "_Run", boom)
+    with pytest.raises(KeyboardInterrupt):
+        run("sleep 60 & sleep 60", state_dir)
+    assert tracker.last.popen.returncode is not None  # killed and reaped by PID
+    pgid = tracker.last.pgid
+    end = time.monotonic() + 3
+    while time.monotonic() < end and any(
+        not m.zombie for m in LinuxHost().scan_group(pgid).members
+    ):
+        time.sleep(0.02)
+    assert [m for m in LinuxHost().scan_group(pgid).members if not m.zombie] == []
+
+
+def test_hostile_nested_stdout_still_yields_a_result(tracker: HookTracker, state_dir: Path) -> None:
+    cmd = "python3 -c \"print('{\\\"decision_id\\\": ' + '[' * 1400 + ']' * 1400 + '}')\""
+    res = run(cmd, state_dir, hook="post-fail")
+    assert res.outcome == "allow"
 
 
 def test_a_killpg_that_finds_no_group_is_not_recorded(

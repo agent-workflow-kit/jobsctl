@@ -78,15 +78,25 @@ def excerpt(capture: Capture, limit: int, mask: Mask) -> str:
     return _cut_bytes(sanitize(text, mask=mask), limit)
 
 
-def _masked(value: object, mask: Mask) -> object:
+_MAX_DEPTH = 32
+_NESTED = "<nested value>"
+
+
+def _masked(value: object, mask: Mask, depth: int = 0) -> object:
     """``value`` with every string, and every key, masked as decoded text (so a JSON escape
-    cannot hide a masked value)."""
+    cannot hide a masked value). Containers nested deeper than ``_MAX_DEPTH`` are replaced by a
+    fixed text, so hostile nesting can neither recurse without bound nor leak unmasked."""
     if isinstance(value, str):
         return mask(value[:CAPTURE_LIMIT])
+    if isinstance(value, (list, dict)) and depth >= _MAX_DEPTH:
+        return _NESTED
     if isinstance(value, list):
-        return [_masked(item, mask) for item in value]
+        return [_masked(item, mask, depth + 1) for item in value]
     if isinstance(value, dict):
-        return {mask(str(key)[:CAPTURE_LIMIT]): _masked(item, mask) for key, item in value.items()}
+        return {
+            mask(str(key)[:CAPTURE_LIMIT]): _masked(item, mask, depth + 1)
+            for key, item in value.items()
+        }
     return value
 
 
@@ -95,7 +105,10 @@ def _clean_for_warning(value: object, mask: Mask) -> str:
     if isinstance(value, str):
         text = mask(value[:CAPTURE_LIMIT])
     else:
-        text = json.dumps(_masked(value, mask), ensure_ascii=True)
+        try:
+            text = json.dumps(_masked(value, mask), ensure_ascii=True)
+        except RecursionError:
+            text = _NESTED
         text = mask(text[:CAPTURE_LIMIT])
     return _cut_bytes(sanitize(text, inline=True), 64)
 

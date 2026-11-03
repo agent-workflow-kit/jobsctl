@@ -166,3 +166,10 @@ def test_truncated_stdout_is_not_parsed() -> None:
 
 def test_surrounding_whitespace_is_fine() -> None:
     assert parse_decision_ids(cap(b'\n  {"decision_id": "a"}  \n'), mask) == (["a"], [])
+
+
+@pytest.mark.parametrize("depth", [1400, 3000])
+def test_deeply_nested_decision_id_is_a_bounded_warning_not_a_crash(depth: int) -> None:
+    raw = b'{"decision_id": ' + b"[" * depth + b"]" * depth + b"}"
+    found, invalid = parse_decision_ids(cap(raw), mask)
+    assert found == [] and all(len(d.encode()) <= 64 for d in invalid)

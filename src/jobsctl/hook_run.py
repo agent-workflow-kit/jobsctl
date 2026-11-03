@@ -257,8 +257,9 @@ class _Run:
         """``sig`` to the hook's process group, only while the leader (held unreaped) is ours.
 
         ``signals`` records only a signal that was sent. When the identity cannot be verified
-        (``UNKNOWN``) the leader is still our own unreaped child, so its PID reserves the group id
-        and ``killpg(pid)`` is safe, exactly as when no identity could be read at all.
+        (``UNKNOWN``) or the attempt failed (``ERROR``, nothing known to be signaled) the leader
+        is still our own unreaped child, so its PID reserves the group id and ``killpg(pid)`` is
+        safe, exactly as when no identity could be read at all.
         """
         if self.proc.returncode is not None:
             return  # reaped: the group id is no longer reserved, never signal
@@ -267,8 +268,8 @@ class _Run:
             if outcome.sent:
                 self.signals.append(signal.Signals(sig).name)
                 return
-            if outcome.result is not Result.UNKNOWN:
-                return  # not alive, denied or an error: nothing was signaled
+            if outcome.result not in (Result.UNKNOWN, Result.ERROR):
+                return  # not alive or denied: nothing was signaled
         try:
             self.host.killpg(self.pid, sig)
         except OSError:
@@ -328,6 +329,20 @@ def _stopped_before_start(hook: str, hook_id: str, reason: str) -> HookResult:
     )  # fmt: skip
 
 
+def _kill_unbuilt(host: Host, proc: Any, sel: selectors.BaseSelector) -> None:
+    """The run object could not be built: SIGKILL the group (the leader is our unreaped child, so
+    its PID reserves the group id) and reap by PID."""
+    try:
+        if proc.returncode is None:
+            try:
+                host.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()  # the group is gone or unreachable: at least the leader
+            proc.wait()
+    finally:
+        sel.close()
+
+
 def run_hook(
     *,
     hook: str,
@@ -369,7 +384,11 @@ def run_hook(
         )  # fmt: skip
     # From here on the leader exists: any exception, a KeyboardInterrupt included, must end in
     # ``emergency`` (SIGKILL to the group, reap by PID), even before the run is fully set up.
-    run = _Run(use_host, tune, proc, view, sel)
+    try:
+        run = _Run(use_host, tune, proc, view, sel)
+    except BaseException:
+        _kill_unbuilt(use_host, proc, sel)
+        raise
     try:
         run.setup()
         run.ident = _identity(use_host, run.pid)
