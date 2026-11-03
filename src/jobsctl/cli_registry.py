@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from jobsctl.actors import default_actor, require_human
+from jobsctl.config import Config
 
 Handler = Callable[["Context"], int]
 _HANDLERS: dict[str, Handler] = {}
@@ -55,11 +56,10 @@ class Context:
     json: bool
     verbose: bool
     quiet: bool
-    # TODO(#3): the loaded config goes here; `--config` is only made absolute for now.
-    config_path: Path | None
+    config_path: Path | None  # the absolute `--config`, for hand-off (`config_files.handoff_args`)
+    config: Config
     stdin_isatty: bool
-    # TODO(#3): `me.name` from config replaces the OS user name.
-    me_name: str
+    me_name: str  # `me.name` from config, else the OS user name
     explicit_actor: str | None
 
     @property
