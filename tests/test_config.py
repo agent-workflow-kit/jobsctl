@@ -11,7 +11,6 @@ import pytest
 import yaml
 from jsonschema import Draft202012Validator
 
-from jobsctl.cli_values import parse_duration
 from jobsctl.config import Config
 from jobsctl.config_files import (
     MAX_FILE_BYTES,
@@ -20,6 +19,7 @@ from jobsctl.config_files import (
     load_config,
     read_yaml_file,
 )
+from jobsctl.durations import parse_duration
 from jobsctl.errors import JobsctlError
 from tests.conftest import SCHEMAS, validate_against
 from tests.helpers import run_cli
@@ -1093,3 +1093,10 @@ def test_total_cap_boundary(tmp_path: Path) -> None:
     assert info.value.code == "config_invalid"
     assert str(tmp_path / "config.d" / "d.yaml") in info.value.message
     assert f"{MAX_TOTAL_BYTES} bytes" in info.value.message
+
+
+def test_config_uses_the_shared_duration_grammar() -> None:
+    from jobsctl import config, durations
+
+    assert config.parse_duration is durations.parse_duration
+    assert config.DurationError is durations.DurationError

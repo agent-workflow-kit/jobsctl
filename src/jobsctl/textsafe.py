@@ -56,6 +56,19 @@ def _escape_char(ch: str) -> str:
     return ch
 
 
+def strip_escapes(text: str) -> str:
+    """``text`` without terminal escape sequences (the first step of :func:`sanitize`)."""
+    return _ESCAPES.sub("", text)
+
+
+def is_invisible(ch: str) -> bool:
+    """Is ``ch`` a control, format, surrogate, separator or bidi character (escaped by
+    :func:`sanitize`)?"""
+    return (
+        unicodedata.category(ch) in ("Cc", "Cs", "Cf", "Zl", "Zp") or ord(ch) in _BIDI_AND_INVISIBLE
+    )
+
+
 def sanitize(text: str, *, inline: bool = False) -> str:
     """Strip terminal escape sequences and escape control, bidirectional, invisible format and
     line or paragraph separator characters as `\\uNNNN`.
@@ -76,3 +89,14 @@ def echo(value: str, limit: int = 80) -> str:
     """An input quoted back in a message: sanitized inline and cut to `limit` characters."""
     clean = sanitize(value, inline=True)
     return clean if len(clean) <= limit else clean[:limit] + "..."
+
+
+def echo_input(text: str, limit: int = 80) -> str:
+    """A user input echoed in a message: cut at the first `=` (shown as `=...`), then `echo`.
+
+    A mistyped `--env` flag can push `NAME=secret` into any argument, so what follows an `=` is
+    never echoed; only `unique_key` and label values legitimately contain `=`, and losing their
+    tail is harmless.
+    """
+    name, eq, _ = text.partition("=")
+    return echo(name, limit) + ("=..." if eq else "")

@@ -7,10 +7,15 @@ timeout), and ``journal_mode=WAL`` is set outside any transaction (Python 3.12's
 transaction mode ignores it inside one).
 
 CLI commands open with :attr:`OpenMode.CLI`, which creates the state directory and migrates an
-older schema. Internal processes open with :attr:`OpenMode.INTERNAL`: they never create or
-migrate, and exit with :class:`SchemaOlderError` before writing on an older schema. A newer
-schema is not an error at open (migrations are additive, so older code keeps working); long-lived
-processes call :meth:`Store.raise_if_newer` before each iteration to report ``version_skew``.
+older schema. :attr:`OpenMode.READ_ONLY` (``add --dry-run``) writes nothing at all: it creates,
+repairs, chmods and migrates nothing, opens the database with SQLite's ``mode=ro``, and refuses
+an older schema with :class:`SchemaOlderError`. A missing-tables database (0 bytes, user_version
+0) opens with ``schema_version == 0``. SQLite may still create the ``-shm`` file next to a
+database left in WAL mode; that is its own bookkeeping, not state. Internal processes open with
+:attr:`OpenMode.INTERNAL`: they never create or migrate, and exit with
+:class:`SchemaOlderError` before writing on an older schema. A newer schema is not an error at
+open (migrations are additive, so older code keeps working); long-lived processes
+call :meth:`Store.raise_if_newer` before each iteration to report ``version_skew``.
 
 No process logs inside a write transaction: register the log write with :meth:`Tx.after_commit`.
 A gap-free counter (``seq``) can be allocated inside the same transaction with
@@ -20,6 +25,7 @@ A gap-free counter (``seq``) can be allocated inside the same transaction with
 from __future__ import annotations
 
 import enum
+import os
 import re
 import sqlite3
 import time
@@ -46,6 +52,7 @@ _IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]*\Z")
 class OpenMode(enum.Enum):
     CLI = "cli"
     INTERNAL = "internal"
+    READ_ONLY = "read_only"
 
 
 class SchemaOlderError(JobsctlError):
@@ -84,7 +91,7 @@ class Tx:
         self._store = store
         self._writable = writable
         self._open = True
-        self._callbacks: list[Callable[[], None]] = []
+        self._callbacks: list[Callable[[], object]] = []
 
     @property
     def store(self) -> Store:
@@ -118,7 +125,7 @@ class Tx:
         except sqlite3.Error as exc:
             raise translate(exc, timeout=self._store.busy_timeout) from exc
 
-    def after_commit(self, callback: Callable[[], None]) -> None:
+    def after_commit(self, callback: Callable[[], object]) -> None:
         """Run ``callback`` after a successful COMMIT (never on rollback): the place to log."""
         if not self._writable:
             raise RuntimeError("only a write transaction has commit callbacks")
@@ -160,24 +167,44 @@ class Store:
         *,
         mode: OpenMode = OpenMode.CLI,
         busy_timeout: float = DEFAULT_BUSY_TIMEOUT,
-        migrations: tuple[tuple[str, ...], ...] = MIGRATIONS,
+        migrations: tuple[tuple[str, ...], ...] | None = None,
     ) -> Self:
         if sqlite3.sqlite_version_info < MIN_SQLITE:
             raise JobsctlError(
                 "internal",
                 f"SQLite {sqlite3.sqlite_version} is too old; jobsctl needs 3.35 or later",
             )
+        if migrations is None:
+            migrations = MIGRATIONS
         create = mode is OpenMode.CLI
-        paths = prepare_state_dir(state_dir or resolve_state_dir(), create=create)
-        prepare_db_file(paths.db, create=create)
+        readonly = mode is OpenMode.READ_ONLY
+        root = state_dir or resolve_state_dir()
+        paths = prepare_state_dir(root, create=create, readonly=readonly)
+        prepare_db_file(paths.db, create=create, readonly=readonly)
         try:
-            conn = sqlite3.connect(paths.db, timeout=busy_timeout, autocommit=True)
+            if readonly:
+                target = Path(os.path.abspath(paths.db)).as_uri() + "?mode=ro"
+                conn = sqlite3.connect(target, timeout=busy_timeout, autocommit=True, uri=True)
+            else:
+                conn = sqlite3.connect(paths.db, timeout=busy_timeout, autocommit=True)
         except sqlite3.Error as exc:
             raise translate(exc, timeout=busy_timeout) from exc
         conn.row_factory = sqlite3.Row
         try:
             version = _refuse_foreign(conn)  # before _configure, so a refused file is untouched
             known = len(migrations)
+            if readonly:
+                if 0 < version < known:
+                    raise SchemaOlderError(version, known)
+                conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout * 1000)}")
+                return cls(
+                    conn,
+                    paths,
+                    mode=mode,
+                    busy_timeout=busy_timeout,
+                    migrations=migrations,
+                    schema_version=version,
+                )
             if mode is OpenMode.INTERNAL and version < known:
                 raise SchemaOlderError(version, known)
             _configure(conn, busy_timeout)
@@ -217,6 +244,8 @@ class Store:
         reentrant. Long work (hooks, waiting, process spawns other than a job's own exec) never
         happens inside.
         """
+        if self.mode is OpenMode.READ_ONLY:
+            raise RuntimeError("the store is open read-only")
         if self.conn.in_transaction:
             raise RuntimeError("a transaction is already open on this connection")
         self._begin("BEGIN IMMEDIATE")

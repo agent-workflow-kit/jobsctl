@@ -81,7 +81,7 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 |---|---|
 | `cli.py` | entry point: parse, usage checks, config load, dispatch, exit codes |
 | `cli_surface.py` | the frozen argparse surface (commands, global flags) and the flag-combination usage checks |
-| `cli_values.py` | flag value grammars as `type=` callables: durations, timestamps, names, ids; `TODO(#4)`: the parsing functions move to the shared grammar modules (`durations.py`, `timestamps.py`, `ids.py`), leaving the `type=` adapters here |
+| `cli_values.py` | flag value `type=` adapters (argparse errors, so exit 2) over the grammar modules below |
 | `cli_registry.py` | the `@command` registry and the per-invocation `Context` |
 | `cli_output.py` | the error envelope and JSON line output (stdout with `--json`, stderr otherwise) |
 | `actors.py`, `checks.py`, `errors.py` | the actor grammar and the human-only gate; the usage, lookup, state, human check order; error codes, exit codes and the error envelope |
@@ -104,8 +104,10 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 | `hooks.py` | sync hook execution under the unreaped-leader rule (process groups, timeouts, selectors, output read in memory for `decision_id`, `hook_messages` and the `hook_ran` excerpt), payload building, leaving async events to `_deliver` (D39), stopping a running hook when a CLI command is interrupted (D48) |
 | `config.py` | Pydantic models for every config key (strict, unknown keys refused, durations as seconds, `~/` expanded), per-queue precedence (`Config.queue`), `unknown_queue_selector` detection |
 | `config_files.py` | default path (`XDG_CONFIG_HOME`), `config.d/*.yaml` drop-ins and merge (maps merge, hook lists append), YAML loading without anchors, aliases or duplicate keys, absolute `--config` hand-off; errors name keys, never `env.*` values |
-| `ids.py`, `durations.py`, `timestamps.py` | planned (`TODO(#4)`): id generation (checked against `pruned_ids`) and prefix lookup; duration and timestamp grammars, moved out of `cli_values.py` |
-| `audit.py` | `audit.jsonl` and `log.jsonl` writers (`seq` allocation, D42), diagnostics files (D43) |
+| `validate.py`, `ids.py`, `durations.py`, `timestamps.py` | pure grammars (queues, labels, unique keys, env names, decision ids), id generation and prefix resolution (the store supplies the `taken` and prefix-lookup callables; `taken` covers `pruned_ids`), duration and timestamp grammars; clocks and randomness are injected |
+| `log_records.py`, `log_files.py`, `log_writer.py`, `log_export.py` | the `audit.jsonl` and `log.jsonl` writers (D42): record shapes, cleaning (masking set, sanitizer) and serialization; safe open (0600, no symlink or FIFO), `flock` and the single append with torn-line repair; `seq` allocation under the lock and once-per-state warnings (state kept in `state.db` counters); the `export` reader |
+| `diag.py` | planned: diagnostics files (D43) |
+| `commands/add.py`, `job_view.py`, `positions.py`, `env_logging.py` | `add` (static checks and secret refusals, then one write transaction: unique-key hit, `strict_queues`, id, position, row, labels, `queues_seen`; logs from `Tx.after_commit`; `--dry-run` reads only), the Job object built from a row (`rank` and `blocked_by` computed; `TODO(#10)` moves them to `order.py`), new-job position keys (`TODO(#10)`), once-per-state `env_file` warnings |
 | `procs.py` | process identity, boot id, liveness, subreaper, pidfds (including group signals where the kernel has them), dumpability, group probing (Linux and macOS) |
 | `gateway.py` | every process spawn, signal, wait, file lock and clock access, so tests replace them with fakes |
 | `tui/` | `browse` (optional extra) |
@@ -122,7 +124,7 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 - `outputs`: `(job_id, n)`, `tail` (BLOB; zlib above 4 KiB), `compressed`, `bytes_seen`, `truncated`, `updated_at`. A separate table keeps `list` fast (spike B6).
 - `hook_outbox`: `event_id`, `job_id`, `seq`, `hook`, `payload` (JSON, including the labels at transition time), `async` (the hook entry is async, D39), `created_at`, `delivered_at` (for an async hook, when its hook process ended). Post hooks only; `pre-start` runs in the shim (D22).
 - `leases`: `name` (`runner`, `deliver`, `job:<id>`), `holder_identity`, `expires_at`.
-- `counters`: `name`, `value` (`pass_requested`, D28; one `seq` counter per log file, D42).
+- `counters`: `name`, `value` (`pass_requested`, D28; one `seq` counter per log file, D42; `warn:<digest>` fingerprints of the last state logged per once-per-state warning, `0` = cleared).
 - `queues_seen`: `name`, `first_seen`; a row is deleted at retention when its queue is not configured and has no jobs left.
 - `pruned_ids`: `id`, so ids are never reused after prune (one row per pruned id).
 
