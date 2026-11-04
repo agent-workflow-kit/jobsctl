@@ -31,7 +31,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 | `commands/` | 1–4 | one module per command group |
 | `runner.py` | 2 | the pass: lease, reconcile, claim loop with the `pass_requested` counter, shim spawn and identity record, delivery hand-off, retention, checkpoint; `run --loop` |
 | `shim.py` | 2–4 | start sequence, output pump, tail flush, final commit and result file, timeout, signal sequence |
-| `output.py` | 2 | ring buffer, masking (window rules), sanitizing, compression |
+| `output_capture.py`, `output_tail.py`, `output_store.py`, `textsafe.py` | 2 | ring buffer; tail rendering (window rules, masking, sanitizing, live flush); compression and the `outputs` table; the shared sanitizer |
 | `kill.py` | 3 | `_kill` for force-cancel after a shim loss |
 | `reconcile.py` | 3 | reconcile rules and findings |
 | `hooks.py`, `deliver.py` | 4 | hook processes (WNOWAIT reservation, timeout, interrupted CLI commands), selectors, outbox delivery, `_deliver` and its async hooks |

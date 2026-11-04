@@ -4,6 +4,7 @@ withholding (interface.md, Output capture and Masking and sanitizing; spikes B5 
 from __future__ import annotations
 
 import random
+import time
 
 import pytest
 
@@ -305,3 +306,195 @@ def test_newline_free_stream_every_window_start() -> None:
     for start in range(len(data) + 1):
         out = render(data[start:], m, dropped=start > 0, tail_bytes=10_000)
         assert not leaked(out), (start, out)
+
+
+# --- review round 1 -----------------------------------------------------------------------
+
+AWS = "AKIAIOSFODNN7EXAMPLE"
+LEAD = "filler line one\nfiller line two\n"
+TRAIL = "\nmore filler text goes here\nand here\n"
+
+
+@pytest.mark.parametrize("stray", ["\x1b", "\x1b[", "\u009b", "\x1b[1;", "\x1b[;"])
+def test_stray_escape_before_a_secret_does_not_eat_its_first_character(stray: str) -> None:
+    m = mset(AWS)
+    for raw in (f"{stray}{AWS}\n", f"{LEAD}{stray}{AWS}{TRAIL}"):
+        out = render(raw, m)
+        assert "KIAIOSF" not in out and "AKIA" not in out and "***" in out, out
+    out = live(f"{LEAD}{stray}{AWS}{TRAIL}", m)
+    assert "KIAIOSF" not in out and "AKIA" not in out
+    assert out.startswith(LEAD)
+
+
+def test_stray_escape_repro_from_review() -> None:
+    assert render(b"\x1bAKIAIOSFODNN7EXAMPLE\n", mset(AWS)) == "***\n"
+
+
+def test_a_secret_containing_escape_like_bytes_is_masked() -> None:
+    m = mset("pa\x1b[31mssword123", "pw\x07\x9cvalue12345")
+    for raw in ("x pa\x1b[31mssword123 y\n", "x pw\x07\x9cvalue12345 y\n"):
+        assert render(raw, m) == "x *** y\n"
+        assert live(LEAD + raw + TRAIL, m).startswith(LEAD + "x *** y\n")
+
+
+def test_a_secret_split_by_an_escape_is_still_masked_after_stripping() -> None:
+    assert render("a SECRET-\x1b[1mTOKEN-9 b\n", mset(SECRET)) == "a *** b\n"
+
+
+def test_overlapping_secrets_leave_no_part_in_a_tail() -> None:
+    m = mset("abcdefgh", "fghijklm")
+    assert render("x abcdefghijklm y\n", m) == "x *** y\n"
+
+
+def test_dropped_multi_line_secret_cut_at_the_window_start() -> None:
+    m = mset("pk_live_51\nxyz789")
+    assert render("e_51\nxyz789 end\n", m, dropped=True) == ""
+    assert render("e_51\nxyz789 end\nnext\n", m, dropped=True) == "next\n"
+    m3 = mset("aaaaaaaa\nbbbb\ncccc")
+    assert render("aaa\nbbbb\ncccc end\nnext\n", m3, dropped=True) == "next\n"
+    assert render("bbb\ncccc end\nnext\nlast\n", m3, dropped=True) == "last\n"
+
+
+def test_dropped_multi_line_window_with_too_few_newlines_shows_no_value_rest() -> None:
+    m = mset("pk_live_51\nxyz789")
+    assert render("e_51\nxyz789 end", m, dropped=True) == ""
+
+
+def test_dropped_newline_discard_moves_past_a_complete_multi_line_value() -> None:
+    m = mset("pk_live_51\nxyz789")
+    out = render("ab\nzz pk_live_51\nxyz789 end\nnext\n", m, dropped=True)
+    assert "xyz789" not in out and "pk_live" not in out
+
+
+def test_dropped_partial_first_line_with_an_unterminated_osc_does_not_hide_the_tail() -> None:
+    assert render(b"ab\x1b]0;t\nSHOWN\nmore\n", dropped=True) == "SHOWN\nmore\n"
+
+
+def test_live_withholds_before_an_incomplete_escape_or_character() -> None:
+    m = mset("QQQ\nQQQQQQQQQ")
+    assert "Q" not in live(b"QQQ\nQQQQQQQQ\x1b[3", m)
+    assert live(b"QQQ\nQQQQQQQQ\xe2\x82", m) == ""
+    m2 = mset("short\nlonglonglonglong")
+    out = live(b"short\nlonglonglong\x1b[" + b"0" * 5000, m2)
+    assert "short" not in out and "long" not in out
+    # once the value is complete, nothing of it shows
+    assert "short" not in live(b"short\nlonglonglonglong\x1b[0m\n", m2)
+
+
+def test_live_boundary_is_exactly_longest_minus_one() -> None:
+    m = mset("short\nlong-second-line")  # 22 characters
+    assert live("short\nlong-second-lin", m) == ""
+    assert "s" not in live("short\nlong-second-line\n", m)
+    assert live("ok\n" + "x" * 30, m) == "ok\n"
+
+
+def test_live_incomplete_utf8_is_not_shown_as_backslash_x() -> None:
+    assert live(b"one\ncaf\xc3") == "one\n"
+    assert render(b"one\ncaf\xc3") == "one\ncaf\\xc3"
+
+
+def test_masking_hostile_near_miss_input_stays_fast() -> None:
+    m = mset(*("a" * k + "b" for k in range(8, 199)))
+    raw = "a" * 20_000
+    start = time.process_time()
+    assert render(raw, m, tail_bytes=262144) == raw
+    assert time.process_time() - start < 20
+
+
+def test_truncated_covers_the_size_cut() -> None:
+    cut = render_tail(
+        b"aaaa\nbbbb\n",
+        dropped=False,
+        masking=NONE,
+        tail_bytes=5,
+        tail_lines=200,
+        final=True,
+    )
+    assert cut.truncated is True
+
+
+def test_trailing_carriage_return_leaves_an_empty_last_segment() -> None:
+    assert render("one\ntwo\r") == "one\n"
+
+
+# --- properties with escapes, carriage returns, multibyte and overlapping secrets ---------
+
+# No digits (an escaped ESC is `\\u001b`) and no P, X, ^, _ or ] (after a stray ESC they would start
+# a string sequence that swallows text up to the next terminator, wherever that is).
+ALPHABET2 = "QWZMNKé中"
+ESCAPES2 = ["\x1b", "\x1b[", "\u009b", "\x1b[31m", "\x1b]0;t\x07", "\x1b[0;"]
+WHOLE_ESCAPES = ["\x1b[0m", "\x1b]0;t\x07", "\x1b[31m"]
+FILLER2 = "abcdefgh ijklmnop\n\n\t\r"
+
+
+def make_secrets2(rng: random.Random) -> list[str]:
+    out: list[str] = []
+    for _ in range(rng.randint(1, 3)):
+        v = "".join(rng.choice(ALPHABET2) for _ in range(rng.randint(8, 20)))
+        kind = rng.random()
+        if kind < 0.25:  # short first line
+            v = "".join(rng.choice(ALPHABET2) for _ in range(rng.randint(1, 3))) + "\n" + v
+        elif kind < 0.4:  # three lines
+            v = v[:5] + "\n" + v[5:12] + "\n" + v[12:] + "QWZMQWZM"
+        out.append(v)
+    if rng.random() < 0.5:  # a value that overlaps the previous one
+        base = out[0].replace("\n", "Q")
+        out.append(base[len(base) // 2 :] + "".join(rng.choice(ALPHABET2) for _ in range(9)))
+    return out
+
+
+def stream2(rng: random.Random, secrets: list[str], pieces: int) -> bytes:
+    # A carriage return right after a multi-line value rewrites the whole logical line,
+    # including text a live flush legitimately showed before the value was complete.
+    filler_chars = FILLER2 if not any("\n" in s for s in secrets) else FILLER2.replace("\r", "")
+    out: list[str] = []
+    for _ in range(pieces):
+        if rng.random() < 0.35:
+            s = rng.choice(secrets)
+            if rng.random() < 0.5:  # a stray introducer before the secret
+                out.append(rng.choice(ESCAPES2))
+            elif rng.random() < 0.4:  # a whole escape sequence inside it
+                i = rng.randint(0, len(s))
+                s = s[:i] + rng.choice(WHOLE_ESCAPES) + s[i:]
+            out.append(s)
+        out.append("".join(rng.choice(filler_chars) for _ in range(rng.randint(0, 40))))
+    return "".join(out).encode()
+
+
+def leaked2(text: str) -> bool:
+    return any(ch in ALPHABET2 for ch in text)
+
+
+BIG = 1_000_000
+
+
+@pytest.mark.parametrize("seed", range(30))
+def test_live_flush_property_with_escapes_returns_and_overlaps(seed: int) -> None:
+    rng = random.Random(5000 + seed)
+    secrets = make_secrets2(rng)
+    m = mset(*secrets)
+    data = stream2(rng, secrets, 10)
+    whole = render(data, m, tail_bytes=BIG, tail_lines=BIG)
+    for cut in range(len(data) + 1):
+        out = live(data[:cut], m, tail_bytes=BIG, tail_lines=BIG)
+        assert not leaked2(out), (seed, cut, out)
+        assert whole.startswith(out), (seed, cut, out)
+
+
+@pytest.mark.parametrize("seed", range(30))
+def test_final_tail_property_with_escapes_returns_and_overlaps(seed: int) -> None:
+    rng = random.Random(6000 + seed)
+    secrets = make_secrets2(rng)
+    m = mset(*secrets)
+    data = stream2(rng, secrets, 10)
+    assert not leaked2(render(data, m, tail_bytes=BIG, tail_lines=BIG)), seed
+    for start in range(len(data) + 1):
+        out = render(data[start:], m, dropped=start > 0, tail_bytes=BIG, tail_lines=BIG)
+        assert not leaked2(out), (seed, start, out)
+
+
+def test_property_generators_do_produce_the_hard_cases() -> None:
+    secrets = [s for seed in range(30) for s in make_secrets2(random.Random(5000 + seed))]
+    assert any(s.count("\n") == 2 for s in secrets)  # three lines
+    assert any(not s.isascii() for s in secrets)  # multibyte
+    assert any(s.index("\n") < 4 for s in secrets if "\n" in s)  # short first line

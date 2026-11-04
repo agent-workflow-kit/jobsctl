@@ -12,6 +12,8 @@ from jobsctl.errors import JobsctlError
 from jobsctl.output_capture import TailSnapshot
 from jobsctl.output_store import (
     COMPRESS_ABOVE,
+    MAX_TAIL_BYTES,
+    StoredTail,
     decode_tail,
     encode_tail,
     load_tail,
@@ -74,8 +76,28 @@ def test_oversized_plain_blob_is_refused() -> None:
         decode_tail(b"a" * 262145, False)
 
 
-def test_invalid_utf8_in_a_stored_row_is_escaped_not_raised() -> None:
-    assert decode_tail(b"a\xffb", False) == "a\\xffb"
+def test_invalid_utf8_in_a_stored_row_is_refused() -> None:
+    with pytest.raises(JobsctlError) as err:
+        decode_tail(b"a\xffb", False)
+    assert err.value.code == "internal"
+
+
+def test_invalid_utf8_at_the_maximum_size_is_refused_not_expanded() -> None:
+    for compressed, blob in [
+        (False, b"\xff" * MAX_TAIL_BYTES),
+        (True, zlib.compress(b"\xff" * MAX_TAIL_BYTES)),
+    ]:
+        with pytest.raises(JobsctlError) as err:
+            decode_tail(blob, compressed)
+        assert err.value.code == "internal"
+
+
+@pytest.mark.parametrize("value", ["text", None, 5])
+def test_a_stored_tail_that_is_not_a_blob_is_refused(value: object) -> None:
+    for compressed in (False, True):
+        with pytest.raises(JobsctlError) as err:
+            decode_tail(value, compressed)  # type: ignore[arg-type]
+        assert err.value.code == "internal"
 
 
 def test_save_and_load(store: Store) -> None:
@@ -91,7 +113,15 @@ def test_save_and_load(store: Store) -> None:
             1,
             NOW,
         )
-        assert load_tail(tx, "jb-aaaaaaaa", 1) == snap
+        assert load_tail(tx, "jb-aaaaaaaa", 1) == StoredTail(snap, NOW)
+
+
+def test_load_returns_updated_at_for_the_output_schema(store: Store) -> None:
+    with store.write() as tx:
+        save_tail(tx, "jb-aaaaaaaa", 1, TailSnapshot("a\n", 2, False), NOW)
+    with store.read() as tx:
+        stored = load_tail(tx, "jb-aaaaaaaa", 1)
+    assert stored is not None and stored.updated_at == NOW
 
 
 def test_save_replaces_the_row(store: Store) -> None:
@@ -100,7 +130,7 @@ def test_save_replaces_the_row(store: Store) -> None:
         save_tail(tx, "jb-aaaaaaaa", 1, TailSnapshot("a\nb\n", 4, True), LATER)
     with store.read() as tx:
         assert tx.one("SELECT count(*) AS c FROM outputs")["c"] == 1  # type: ignore[index]
-        assert load_tail(tx, "jb-aaaaaaaa", 1) == TailSnapshot("a\nb\n", 4, True)
+        assert load_tail(tx, "jb-aaaaaaaa", 1) == StoredTail(TailSnapshot("a\nb\n", 4, True), LATER)
 
 
 def test_load_missing_is_none(store: Store) -> None:

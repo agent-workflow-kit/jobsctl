@@ -25,6 +25,7 @@ from jobsctl.env_file import EnvFile, EnvWarning
 
 MIN_MASKED_LENGTH: Final = 8
 REPLACEMENT: Final = "***"
+_OVERLAP_REACH: Final = 256  # see MaskingSet.spans
 _MAX_NESTING: Final = 48  # well inside the regex compiler's recursion limit
 
 
@@ -35,6 +36,7 @@ class MaskingSet:
     values: tuple[str, ...] = field(repr=False)
     warnings: tuple[EnvWarning, ...] = ()
     _pattern: re.Pattern[str] | None = field(default=None, repr=False, compare=False)
+    _overlap: re.Pattern[str] | None = field(default=None, repr=False, compare=False)
 
     @property
     def longest_bytes(self) -> int:
@@ -46,17 +48,50 @@ class MaskingSet:
         return self._pattern is not None and self._pattern.search(text) is not None
 
     def spans(self, text: str) -> list[tuple[int, int]]:
-        """The `(start, end)` of every occurrence `mask` would replace, in order."""
-        if self._pattern is None:
+        """The `(start, end)` intervals `mask` replaces, in order and disjoint.
+
+        Leftmost-longest matches are found first (one linear pass). A value that starts inside
+        a match and ends after it (`abcdefgh` and `fghijklm` in `abcdefghijklm`) extends the
+        match, so no part of any occurrence is left unmasked. Only values starting within the
+        last `_OVERLAP_REACH` characters of a match are looked for: trying every position of a
+        long match costs the square of its length."""
+        if self._pattern is None or self._overlap is None:
             return []
-        return [m.span() for m in self._pattern.finditer(text)]
+        merged: list[tuple[int, int]] = []
+        for m in self._pattern.finditer(text):
+            start, end = m.span()
+            pos = max(start + 1, end - _OVERLAP_REACH)
+            while pos < end:
+                at = self._overlap.match(text, pos)
+                if at is not None and at.end(1) > end:
+                    end = at.end(1)
+                    pos = max(pos + 1, end - _OVERLAP_REACH)
+                else:
+                    pos += 1
+            if merged and start < merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        return merged
 
     def mask(self, text: str) -> str:
-        """Replace every occurrence of a masked value with `***` in one left-to-right pass: at a
-        position the longest value wins, and replaced text is never scanned again."""
-        if self._pattern is None:
-            return text
-        return self._pattern.sub(REPLACEMENT, text)
+        """Replace every occurrence of a masked value with `***` (see `spans`); replaced text is
+        never scanned again."""
+        return replace_spans(text, self.spans(text))
+
+
+def replace_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    """`text` with each of the sorted, disjoint `spans` replaced by `***`."""
+    if not spans:
+        return text
+    parts: list[str] = []
+    pos = 0
+    for start, stop in spans:
+        parts.append(text[pos:start])
+        parts.append(REPLACEMENT)
+        pos = stop
+    parts.append(text[pos:])
+    return "".join(parts)
 
 
 def _candidates(value: str) -> list[str]:
@@ -98,8 +133,13 @@ def masking_values(
         chosen.update(c for c in _candidates(value) if len(c) >= MIN_MASKED_LENGTH)
 
     ordered = tuple(sorted(chosen, key=lambda v: (-len(v), v)))
-    pattern = re.compile(_trie_pattern(sorted(chosen), 0)) if ordered else None
-    return MaskingSet(ordered, tuple(warnings), pattern)
+    trie = _trie_pattern(sorted(chosen), 0)
+    # TODO(#8): the walk costs a few microseconds per position when many values share a long
+    # prefix with the text (190 values "a"*k+"b" on 20000 "a" take about 1 s): an Aho-Corasick
+    # automaton would be linear.
+    pattern = re.compile(trie) if ordered else None
+    overlap = re.compile("(?=(" + trie + "))") if ordered else None
+    return MaskingSet(ordered, tuple(warnings), pattern, overlap)
 
 
 def _trie_pattern(strings: list[str], depth: int) -> str:

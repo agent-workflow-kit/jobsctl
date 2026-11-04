@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import zlib
+from dataclasses import dataclass
 from typing import Final
 
 from jobsctl.errors import JobsctlError
@@ -11,6 +12,14 @@ from jobsctl.store_db import Tx
 
 COMPRESS_ABOVE: Final = 4096
 MAX_TAIL_BYTES: Final = 262144  # the largest tail `tail_bytes` allows
+
+
+@dataclass(frozen=True)
+class StoredTail:
+    """An `outputs` row: the snapshot and when it was written (`output.updated_at`)."""
+
+    snapshot: TailSnapshot
+    updated_at: str
 
 
 def encode_tail(text: str) -> tuple[bytes, bool]:
@@ -23,13 +32,20 @@ def encode_tail(text: str) -> tuple[bytes, bool]:
 
 def decode_tail(blob: bytes, compressed: bool) -> str:
     """The stored text. A row is untrusted input (anything with write access to `state.db` can
-    store anything): output beyond the largest tail, a damaged or partial zlib frame and data
-    after the frame are refused, and invalid UTF-8 is shown as `\\xNN`."""
+    store anything): a value that is not a blob, output beyond the largest tail, a damaged or
+    partial zlib frame, data after the frame and invalid UTF-8 (stored tails always are valid)
+    are refused."""
+    if not isinstance(blob, bytes | memoryview):
+        raise _corrupt("a stored tail is not a blob")
+    blob = bytes(blob)
     if compressed:
-        blob = _inflate(bytes(blob))
+        blob = _inflate(blob)
     elif len(blob) > MAX_TAIL_BYTES:
         raise _corrupt("a stored tail is larger than the maximum")
-    return blob.decode("utf-8", "backslashreplace")
+    try:
+        return blob.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _corrupt("a stored tail is not valid UTF-8") from exc
 
 
 def _inflate(blob: bytes) -> bytes:
@@ -65,15 +81,17 @@ def save_tail(tx: Tx, job_id: str, n: int, snapshot: TailSnapshot, now: str) -> 
     )
 
 
-def load_tail(tx: Tx, job_id: str, n: int) -> TailSnapshot | None:
+def load_tail(tx: Tx, job_id: str, n: int) -> StoredTail | None:
     row = tx.one(
-        "SELECT tail, compressed, bytes_seen, truncated FROM outputs WHERE job_id = ? AND n = ?",
+        "SELECT tail, compressed, bytes_seen, truncated, updated_at FROM outputs"
+        " WHERE job_id = ? AND n = ?",
         (job_id, n),
     )
     if row is None:
         return None
-    return TailSnapshot(
+    snapshot = TailSnapshot(
         decode_tail(row["tail"], bool(row["compressed"])),
         row["bytes_seen"],
         bool(row["truncated"]),
     )
+    return StoredTail(snapshot, row["updated_at"])

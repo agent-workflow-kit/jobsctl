@@ -96,11 +96,25 @@ def test_warning_carries_name_never_value(tmp_path: Path) -> None:
 
 def test_longest_first_and_overlapping_values() -> None:
     result = mset(cfg(), {}, NOFILE, {"A": "abcdefgh", "B": "abcdefghijkl", "C": "efghijklmnop"})
-    # leftmost match wins; at one position the longest does
+    # at one position the longest wins; overlapping occurrences are one masked interval
     assert result.mask("abcdefghijkl") == "***"
     assert result.mask("xx abcdefgh yy") == "xx *** yy"
-    assert result.mask("abcdefghijklmnop") == "***mnop"
+    assert result.mask("abcdefghijklmnop") == "***"
     assert result.values[0] == "abcdefghijkl"
+
+
+def test_overlapping_occurrences_leave_no_unmasked_part() -> None:
+    two = mset(cfg(), {}, NOFILE, {"A": "abcdefgh", "B": "fghijklm"})
+    assert two.mask("abcdefghijklm") == "***"
+    assert two.spans("xx abcdefghijklm yy") == [(3, 16)]
+    # a longer second value: nothing of it may stay
+    longer = mset(cfg(), {}, NOFILE, {"A": "abcdefgh", "B": "fgh" + "ijklmnop" * 4})
+    assert longer.mask("abcdefgh" + "ijklmnop" * 4) == "***"
+    # a chain of three overlaps, and adjacent (not overlapping) occurrences stay separate
+    chain = mset(cfg(), {}, NOFILE, {"A": "abcdefgh", "B": "fghijklm", "C": "klmnopqr"})
+    assert chain.mask("..abcdefghijklmnopqr..") == "..***.."
+    assert chain.spans("abcdefghklmnopqr") == [(0, 8), (8, 16)]
+    assert chain.mask("abcdefghklmnopqr") == "******"
 
 
 def test_regex_special_values_are_literal() -> None:
@@ -154,18 +168,23 @@ def test_contains_masked_value_for_add_refusal() -> None:
 
 
 def reference_mask(secrets: list[str], text: str) -> str:
-    """Leftmost match, longest at a position, no re-scan: the rule `mask` implements."""
-    ordered = sorted(set(secrets), key=len, reverse=True)
-    out: list[str] = []
-    i = 0
-    while i < len(text):
-        hit = next((s for s in ordered if text.startswith(s, i)), None)
-        if hit is None:
-            out.append(text[i])
-            i += 1
+    """Every occurrence of every value is masked: occurrences that overlap form one interval,
+    replaced by one `***` (adjacent occurrences stay separate)."""
+    found = sorted(
+        (i, i + len(s)) for s in set(secrets) for i in range(len(text)) if text.startswith(s, i)
+    )
+    merged: list[list[int]] = []
+    for start, end in found:
+        if merged and start < merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
         else:
-            out.append(em.REPLACEMENT)
-            i += len(hit)
+            merged.append([start, end])
+    out: list[str] = []
+    pos = 0
+    for start, end in merged:
+        out.append(text[pos:start] + em.REPLACEMENT)
+        pos = end
+    out.append(text[pos:])
     return "".join(out)
 
 
@@ -188,7 +207,7 @@ def test_secrets_that_prefix_each_other_deeply() -> None:
     chain = {f"C{n}": "x" * n for n in range(8, 1600)}
     result = mset(cfg(), {}, NOFILE, chain)
     assert result.mask("x" * 1599) == "***"
-    assert result.mask("y" + "x" * 1600 + "y") == "y***xy"
+    assert result.mask("y" + "x" * 1600 + "y") == "y***y"
     branches = {f"B{i}": "a" * i + "b" + "c" * 8 for i in range(800)}
     result = mset(cfg(), {}, NOFILE, branches)
     assert result.mask("aaa" + "a" * 500 + "bcccccccc!") == "***!"
@@ -211,6 +230,16 @@ def test_masking_is_fast_on_hostile_inputs() -> None:
     text = "a" * 2_000_000
     assert result.mask(text) == text
     assert time.monotonic() - start < 10
+
+
+def test_near_miss_prefixes_are_fast() -> None:
+    # 190 values that share a long prefix with the text and never complete
+    secrets = {f"S{k}": "a" * k + "b" for k in range(8, 199)}
+    result = mset(cfg(), {}, NOFILE, secrets)
+    text = "a" * 20_000
+    start = time.process_time()
+    assert result.mask(text) == text
+    assert time.process_time() - start < 5
 
 
 def test_random_embeddings_always_masked() -> None:

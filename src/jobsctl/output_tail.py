@@ -4,23 +4,42 @@ Masking and sanitizing, steps 1 to 6; spikes B5 and B7).
 `render_tail` is pure: it takes the raw bytes the capture keeps and returns text that is safe to
 store and show. The same function serves a live flush (`final=False`, which withholds the end of
 the window) and the final tail after the drain (`final=True`).
+
+Safety invariants, in pipeline order:
+
+- A masked value is looked for in the decoded text before escape removal and in the stripped
+  text after it, and what either finds is masked. A stray escape introducer directly before a
+  secret would otherwise swallow the secret's first character in step 3, and a secret that
+  contains escape-like bytes is only whole before it; a secret split by an escape sequence is
+  only whole after. Each text is scanned once, and its spans serve the discard, the live end
+  and the replacement.
+- A cut (the discard of a dropped start, the end of a live flush) never falls inside a complete
+  masked value: the discard moves forward past it, the live end back to its start.
+- A live flush only shows text that later output cannot change: it excludes a trailing
+  incomplete UTF-8 sequence and escape sequence, everything after the last newline and at least
+  the longest masked value minus one character at the end.
 """
 
 from __future__ import annotations
 
+import codecs
+from bisect import bisect_left
 from dataclasses import dataclass
 from typing import Final
 
-from jobsctl.env_mask import MaskingSet
-from jobsctl.textsafe import escape_unsafe, strip_escapes
+from jobsctl.env_mask import MaskingSet, replace_spans
+from jobsctl.textsafe import escape_unsafe, incomplete_escape_start, strip_escapes_mapped
 
-DROP_MARGIN: Final = 256  # step 1: bytes discarded beyond the longest masked value
+DROP_MARGIN: Final = 256  # step 1: characters discarded beyond the longest masked value
+
+Spans = list[tuple[int, int]]
 
 
 @dataclass(frozen=True)
 class RenderedTail:
     text: str
-    # True when the text lacks earlier output: the capture dropped it, or the tail size cut it.
+    # True when the text lacks earlier output: it was dropped from the ring buffer, or cut to
+    # the tail size (step 6).
     truncated: bool
 
 
@@ -36,29 +55,88 @@ def render_tail(
     """Apply steps 1 to 6 to `window`, the kept raw output.
 
     `dropped` says that output before the window was dropped. A live flush (`final=False`)
-    withholds everything after the last newline and, at the end, at least the longest masked
-    value minus one byte, so the start of a secret still being written is never shown.
+    withholds what later output could still change (see the module docstring), so the start of
+    a secret still being written is never shown.
     """
-    text = strip_escapes(window.decode("utf-8", "backslashreplace"))  # steps 2 and 3
-    if dropped:  # step 1, on the decoded text so no masked value is cut by the discard
-        text = text[_drop_end(text, masking) :]
+    text = _decode(window, final)  # step 2
     if not final:
-        text = text[: _live_end(text, masking)]
-        masked = masking.mask(text)
-    else:
-        masked = masking.mask(text)  # step 4
+        text = text[: incomplete_escape_start(text)]
+    found = masking.spans(text)  # in the decoded text: what step 3 could still break
+    head = 0
+    if dropped and "\n" in text:  # step 1 with a newline: its end, before escapes can hide it
+        head = _newline_drop_end(text, masking, found)
+    # The discarded head is stripped on its own, so an unterminated sequence in a partial first
+    # line cannot hide the rest; the kept text is not cut yet, so a value split by an escape
+    # sequence across the discard is still found whole.
+    cleaned, origin = strip_escapes_mapped(text[:head])
+    rest, rest_origin = strip_escapes_mapped(text[head:])
+    text = cleaned + rest
+    origin += [i + head for i in rest_origin]
+    spans = _merge(masking.spans(text) + _locate(found, origin))  # step 3 done
+    start = 0
+    if dropped:  # step 1
+        start = len(cleaned) if head else _fallback_end(text, masking)
+        start = _past_span(start, spans)
+    end = len(text) if final else _live_end(text, masking, spans)
+    masked = replace_spans(text[start:end], _clip(spans, start, end))  # step 4
     text, cut = _cut(escape_unsafe(masked), tail_bytes, tail_lines)  # steps 5 and 6
     return RenderedTail(text, dropped or cut)
 
 
-def _drop_end(text: str, masking: MaskingSet) -> int:
-    """Step 1: the end of the discarded start: through the first newline, or the first
-    (longest masked value + 256) characters when there is none (a character is at least a
-    byte of a value, so this covers at least the bytes the spec counts). The discard moves
-    forward past a complete masked value it would cut, whose rest would otherwise show."""
-    newline = text.find("\n")
-    end = newline + 1 if newline >= 0 else min(masking.longest_bytes + DROP_MARGIN, len(text))
-    for start, stop in masking.spans(text):
+def _locate(found: Spans, origin: list[int]) -> Spans:
+    """`found` (spans of the text before step 3) in the stripped text: each span becomes the
+    run of stripped characters that came from it (empty runs are left out)."""
+    located = ((bisect_left(origin, a), bisect_left(origin, b)) for a, b in found)
+    return [(a, b) for a, b in located if a < b]
+
+
+def _merge(spans: Spans) -> Spans:
+    """Sorted, with overlapping spans joined (adjacent ones stay apart)."""
+    merged: Spans = []
+    for start, stop in sorted(spans):
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], stop))
+        else:
+            merged.append((start, stop))
+    return merged
+
+
+def _decode(window: bytes, final: bool) -> str:
+    """Step 2. A live flush leaves out a trailing incomplete UTF-8 sequence: its bytes may
+    become one character, so showing them as `\\xNN` would change what was shown."""
+    decoder = codecs.getincrementaldecoder("utf-8")("backslashreplace")
+    return decoder.decode(window, final)
+
+
+def _clip(spans: Spans, start: int, end: int) -> Spans:
+    """The spans inside `text[start:end]`, shifted to it. Neither cut falls inside a span."""
+    return [(a - start, b - start) for a, b in spans if a >= start and b <= end]
+
+
+def _newline_drop_end(text: str, masking: MaskingSet, spans: Spans) -> int:
+    """Step 1 when the window has a newline: the end of the discarded start, through the
+    (n+1)-th newline, n being the most newlines in one masked value (so n = 0 is the first
+    newline): a value cut at the window's start has at most n newlines left to show. With fewer
+    newlines, through the last one, or the fallback's characters if that is later."""
+    lines = max((v.count("\n") for v in masking.values), default=0)
+    end = -1
+    for _ in range(lines + 1):
+        end = text.find("\n", end + 1)
+        if end < 0:
+            return _past_span(max(text.rfind("\n") + 1, _fallback_end(text, masking)), spans)
+    return _past_span(end + 1, spans)
+
+
+def _fallback_end(text: str, masking: MaskingSet) -> int:
+    """The first (longest masked value + 256) characters (a character is at least a byte of a
+    value, so this covers at least the bytes the spec counts)."""
+    return min(masking.longest_bytes + DROP_MARGIN, len(text))
+
+
+def _past_span(end: int, spans: Spans) -> int:
+    """`end`, moved forward past a complete masked value it would cut, whose rest would
+    otherwise show."""
+    for start, stop in spans:
         if start < end < stop:
             return stop
         if start >= end:
@@ -66,9 +144,9 @@ def _drop_end(text: str, masking: MaskingSet) -> int:
     return end
 
 
-def _live_end(text: str, masking: MaskingSet) -> int:
-    """Where a live flush ends in `text` (after steps 2 and 3): at the last newline, and at least
-    the longest masked value minus one byte earlier, never inside a complete masked value.
+def _live_end(text: str, masking: MaskingSet, spans: Spans) -> int:
+    """Where a live flush ends in the stripped `text`: at the last newline, and at least the
+    longest masked value minus one character earlier, never inside a complete masked value.
 
     One character of `text` is at least one byte of a masked value's characters, so
     `longest_bytes - 1` characters cover every incomplete value at the end. A later byte can only
@@ -77,7 +155,7 @@ def _live_end(text: str, masking: MaskingSet) -> int:
     """
     end = text.rfind("\n") + 1
     end = min(end, max(len(text) - max(masking.longest_bytes - 1, 0), 0))
-    for start, stop in masking.spans(text):
+    for start, stop in spans:
         if start < end < stop:
             return start
         if start >= end:
