@@ -201,6 +201,27 @@ def test_matches_reference_on_random_overlapping_secrets() -> None:
         assert result.contains_secret(text) == any(s in text for s in secrets)
 
 
+def test_matches_reference_with_long_overlaps() -> None:
+    rng = random.Random(2024)
+    for _ in range(300):
+        secrets = [
+            "".join(rng.choice("ab") for _ in range(rng.randint(8, 40)))
+            for _ in range(rng.randint(1, 8))
+        ]
+        result = mset(cfg(), {}, NOFILE, {f"S{i}": s for i, s in enumerate(secrets)})
+        text = "".join(rng.choice("aab*") for _ in range(rng.randint(0, 300)))
+        assert result.mask(text) == reference_mask(secrets, text), (secrets, text)
+
+
+def test_overlaps_longer_than_any_fixed_reach_are_masked_whole() -> None:
+    rng = random.Random(77)
+    for n in (255, 256, 257, 300, 1000):
+        c1, c2, c3 = ("".join(rng.choices(string.ascii_letters, k=n)) for _ in range(3))
+        result = mset(cfg(), {}, NOFILE, {"A": c1 + c2, "B": c2 + c3})
+        assert result.mask("x" + c1 + c2 + c3 + "y") == "x***y", n
+        assert result.mask(c1 + c2 + c3) == "***", n
+
+
 def test_secrets_that_prefix_each_other_deeply() -> None:
     # every value is a prefix of the next, and a deep branching chain: the matcher must not
     # depend on nesting the secrets in one deep expression

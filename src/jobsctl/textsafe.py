@@ -6,6 +6,7 @@ pipeline that masks between `strip_escapes` and `escape_unsafe`.
 
 from __future__ import annotations
 
+import functools
 import re
 import unicodedata
 
@@ -16,6 +17,17 @@ _ESCAPES = re.compile(
       (?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]
     | (?:\x1b[\]PX^_]|[\x9d\x90\x98\x9e\x9f])(?:.*?)(?:\x07|\x1b\\|\x9c|\Z)
     | \x1b[@-Z\\-_]
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+# What a reader that skips only complete sequences and the bare introducer sees: CSI and string
+# sequences are removed, but an ESC (or a 2-character `ESC X`) is dropped without its next
+# character. Used to find masked values a stray introducer would otherwise hide.
+_LOOSE_ESCAPES = re.compile(
+    r"""
+      (?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]
+    | (?:\x1b[\]PX^_]|[\x9d\x90\x98\x9e\x9f])(?:.*?)(?:\x07|\x1b\\|\x9c|\Z)
+    | \x1b
     """,
     re.VERBOSE | re.DOTALL,
 )
@@ -120,9 +132,40 @@ def incomplete_escape_start(text: str) -> int:
 def strip_escapes_mapped(text: str) -> tuple[str, list[int]]:
     """`strip_escapes(text)` and, for each character of the result, its index in `text` (the
     indexes increase), so what was found in `text` can be located in the stripped text."""
+    return _strip_mapped(text, _ESCAPES)
+
+
+def strip_introducers_mapped(text: str, spare: str | None = None) -> tuple[str, list[int]]:
+    """Like `strip_escapes_mapped`, but a lone ESC or 2-character `ESC X` loses only the ESC,
+    not the character after it (CSI and string sequences are removed as usual). A masked value a
+    stray ESC would cut the first character from is whole in this text.
+
+    With `spare`, only an ESC directly before one of those characters is treated so; any other
+    `ESC X` is removed whole, as `strip_escapes_mapped` does. This finds a value that has both a
+    stray ESC before it and escape sequences inside it."""
+    return _strip_mapped(text, _LOOSE_ESCAPES if spare is None else _spare_escapes(spare))
+
+
+@functools.lru_cache(maxsize=16)
+def _spare_escapes(spare: str) -> re.Pattern[str]:
+    chars = "".join(re.escape(c) for c in spare)
+    return re.compile(
+        r"""
+          (?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]
+        | (?:\x1b[\]PX^_]|[\x9d\x90\x98\x9e\x9f])(?:.*?)(?:\x07|\x1b\\|\x9c|\Z)
+        | \x1b(?=["""
+        + (chars or "(?!)")
+        + r"""])
+        | \x1b[@-Z\\-_]
+        """,
+        re.VERBOSE | re.DOTALL,
+    )
+
+
+def _strip_mapped(text: str, escapes: re.Pattern[str]) -> tuple[str, list[int]]:
     kept: list[tuple[int, int]] = []
     pos = 0
-    for m in _ESCAPES.finditer(text):
+    for m in escapes.finditer(text):
         if m.start() > pos:
             kept.append((pos, m.start()))
         pos = m.end()

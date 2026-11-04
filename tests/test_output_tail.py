@@ -498,3 +498,54 @@ def test_property_generators_do_produce_the_hard_cases() -> None:
     assert any(s.count("\n") == 2 for s in secrets)  # three lines
     assert any(not s.isascii() for s in secrets)  # multibyte
     assert any(s.index("\n") < 4 for s in secrets if "\n" in s)  # short first line
+
+
+# --- review round 2 -----------------------------------------------------------------------
+
+V1_SECRET = "SECRETVALUE12345"
+V1_RAW = (
+    "\x1bS" + V1_SECRET[1:6] + "\x1b[0m" + V1_SECRET[6:] + "\n",
+    "\x1b" + V1_SECRET[:5] + "\x1b[0m" + V1_SECRET[5:] + "\n",
+)
+
+
+@pytest.mark.parametrize("raw", V1_RAW)
+def test_stray_escape_before_a_secret_with_an_inner_escape_is_masked(raw: str) -> None:
+    m = mset(V1_SECRET)
+    out = render(raw, m)
+    assert "ECRET" not in out and "VALUE" not in out and "12345" not in out, out
+    out = live(LEAD + raw + TRAIL, m)
+    assert "ECRET" not in out and "VALUE" not in out and "12345" not in out, out
+    assert out.startswith(LEAD)
+
+
+def mangle(rng: random.Random, secret: str) -> str:
+    """The secret with an optional stray ESC before it and an optional escape inside it."""
+    if rng.random() < 0.7:
+        i = rng.randrange(1, len(secret))
+        inner = rng.choice(["\x1b[0m", "\x1b]0;t\x07", "\x1bM"])
+        secret = secret[:i] + inner + secret[i:]
+    # An ESC before X (SOS) would start a string sequence, which swallows the text up to a
+    # terminator in the secret: that splits the secret by another byte, see interface.md.
+    return rng.choice(["", "" if secret[0] in "XP" else "\x1b"]) + secret
+
+
+def leaked_secret(text: str) -> bool:
+    """`leaked`, ignoring the digits of the `\\u001b` that shows a stray ESC."""
+    return leaked(text.replace("\\u001b", ""))
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_mangled_secrets_are_never_shown_live_or_final(seed: int) -> None:
+    rng = random.Random(5000 + seed)
+    secrets = make_secrets(rng)
+    m = mset(*secrets)
+    pieces = []
+    for _ in range(10):
+        pieces.append("".join(rng.choice(FILLER) for _ in range(rng.randint(0, 20))))
+        pieces.append(mangle(rng, rng.choice(secrets)))
+    data = "".join(pieces).encode()
+    for cut in range(len(data) + 1):
+        assert not leaked_secret(live(data[:cut], m, tail_bytes=10_000)), (seed, cut)
+        out = render(data[cut:], m, dropped=cut > 0, tail_bytes=10_000)
+        assert not leaked_secret(out), (seed, cut, out)

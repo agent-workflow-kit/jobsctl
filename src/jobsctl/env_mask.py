@@ -25,7 +25,6 @@ from jobsctl.env_file import EnvFile, EnvWarning
 
 MIN_MASKED_LENGTH: Final = 8
 REPLACEMENT: Final = "***"
-_OVERLAP_REACH: Final = 256  # see MaskingSet.spans
 _MAX_NESTING: Final = 48  # well inside the regex compiler's recursion limit
 
 
@@ -52,27 +51,57 @@ class MaskingSet:
 
         Leftmost-longest matches are found first (one linear pass). A value that starts inside
         a match and ends after it (`abcdefgh` and `fghijklm` in `abcdefghijklm`) extends the
-        match, so no part of any occurrence is left unmasked. Only values starting within the
-        last `_OVERLAP_REACH` characters of a match are looked for: trying every position of a
-        long match costs the square of its length."""
+        match, so no part of any occurrence is left unmasked, however long the overlap (this
+        repeats until no value extends the match)."""
         if self._pattern is None or self._overlap is None:
             return []
         merged: list[tuple[int, int]] = []
         for m in self._pattern.finditer(text):
             start, end = m.span()
-            pos = max(start + 1, end - _OVERLAP_REACH)
-            while pos < end:
-                at = self._overlap.match(text, pos)
-                if at is not None and at.end(1) > end:
-                    end = at.end(1)
-                    pos = max(pos + 1, end - _OVERLAP_REACH)
-                else:
-                    pos += 1
+            end = self._extend(text, start, end)
             if merged and start < merged[-1][1]:
                 merged[-1] = (merged[-1][0], max(merged[-1][1], end))
             else:
                 merged.append((start, end))
         return merged
+
+    def _extend(self, text: str, start: int, end: int) -> int:
+        """The end of the match `text[start:end]` once every value that starts inside it and
+        ends after it is included (and so on for the values starting in the added part).
+
+        Two exact strategies, picked by which is cheaper for this match. Few values: for each
+        value, the furthest occurrence that starts before `end` and reaches past it (`rfind`
+        over the only starts that can: the `len(v) - 1` before `end`). Many values: try each
+        start position within the longest value's reach with the prefix-tree regex."""
+        longest = len(self.values[0])
+        positions = min(end - start - 1, longest - 1)
+        if positions <= 0:
+            return end
+        if len(self.values) <= positions:
+            while True:
+                furthest = end
+                for value in self.values:
+                    size = len(value)
+                    lo = max(start, end - size + 1)
+                    hi = min(len(text), end + size - 1)
+                    if hi - lo < size:
+                        continue
+                    at = text.rfind(value, lo, hi)
+                    if at >= 0 and at + size > furthest:
+                        furthest = at + size
+                if furthest == end:
+                    return end
+                end = furthest
+        assert self._overlap is not None
+        pos = max(start + 1, end - longest + 1)
+        while pos < end:
+            at = self._overlap.match(text, pos)
+            if at is not None and at.end(1) > end:
+                end = at.end(1)
+                pos = max(pos + 1, end - longest + 1)
+            else:
+                pos += 1
+        return end
 
     def mask(self, text: str) -> str:
         """Replace every occurrence of a masked value with `***` (see `spans`); replaced text is

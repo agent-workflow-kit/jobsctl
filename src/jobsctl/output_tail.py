@@ -24,15 +24,22 @@ from __future__ import annotations
 
 import codecs
 from bisect import bisect_left
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
 
 from jobsctl.env_mask import MaskingSet, replace_spans
-from jobsctl.textsafe import escape_unsafe, incomplete_escape_start, strip_escapes_mapped
+from jobsctl.textsafe import (
+    escape_unsafe,
+    incomplete_escape_start,
+    strip_escapes_mapped,
+    strip_introducers_mapped,
+)
 
 DROP_MARGIN: Final = 256  # step 1: characters discarded beyond the longest masked value
 
 Spans = list[tuple[int, int]]
+Strip = Callable[[str], tuple[str, list[int]]]
 
 
 @dataclass(frozen=True)
@@ -61,26 +68,56 @@ def render_tail(
     text = _decode(window, final)  # step 2
     if not final:
         text = text[: incomplete_escape_start(text)]
-    found = masking.spans(text)  # in the decoded text: what step 3 could still break
+    strips = _loose_strips(masking)
+    found = _merge(masking.spans(text) + _decoded_spans(text, strips, masking))
     head = 0
     if dropped and "\n" in text:  # step 1 with a newline: its end, before escapes can hide it
         head = _newline_drop_end(text, masking, found)
     # The discarded head is stripped on its own, so an unterminated sequence in a partial first
     # line cannot hide the rest; the kept text is not cut yet, so a value split by an escape
     # sequence across the discard is still found whole.
-    cleaned, origin = strip_escapes_mapped(text[:head])
-    rest, rest_origin = strip_escapes_mapped(text[head:])
-    text = cleaned + rest
-    origin += [i + head for i in rest_origin]
-    spans = _merge(masking.spans(text) + _locate(found, origin))  # step 3 done
+    stripped, origin, kept_from = _strip_split(text, head, strip_escapes_mapped)
+    loose = _decoded_spans(text, strips, masking, head)
+    text = stripped
+    spans = _merge(masking.spans(text) + _locate(found + loose, origin))  # step 3 done
     start = 0
     if dropped:  # step 1
-        start = len(cleaned) if head else _fallback_end(text, masking)
+        start = kept_from if head else _fallback_end(text, masking)
         start = _past_span(start, spans)
     end = len(text) if final else _live_end(text, masking, spans)
     masked = replace_spans(text[start:end], _clip(spans, start, end))  # step 4
     text, cut = _cut(escape_unsafe(masked), tail_bytes, tail_lines)  # steps 5 and 6
     return RenderedTail(text, dropped or cut)
+
+
+def _strip_split(text: str, head: int, strip: Strip) -> tuple[str, list[int], int]:
+    """`strip` applied to `text[:head]` and `text[head:]` separately: the joined result, each of
+    its characters' index in `text`, and where the second part starts in the result."""
+    cleaned, origin = strip(text[:head])
+    rest, rest_origin = strip(text[head:])
+    return cleaned + rest, origin + [i + head for i in rest_origin], len(cleaned)
+
+
+def _loose_strips(masking: MaskingSet) -> list[Strip]:
+    """The other ways of removing escapes that a masked value can be whole in (see
+    `_decoded_spans`): a stray ESC loses only itself, everywhere, or only before a character a
+    masked value starts with (so escapes inside the value are still removed whole)."""
+    firsts = "".join(sorted({v[0] for v in masking.values}))
+    return [
+        strip_introducers_mapped,
+        lambda text: strip_introducers_mapped(text, firsts),
+    ]
+
+
+def _decoded_spans(text: str, strips: list[Strip], masking: MaskingSet, head: int = 0) -> Spans:
+    """The masked values found in `text` after each of `strips` (ways of removing escapes other
+    than the one step 3 uses), as spans of `text`. A value a stray introducer breaks in step 3
+    is whole in one of them."""
+    found: Spans = []
+    for strip in strips:
+        stripped, origin, _ = _strip_split(text, head, strip)
+        found += [(origin[a], origin[b - 1] + 1) for a, b in masking.spans(stripped)]
+    return found
 
 
 def _locate(found: Spans, origin: list[int]) -> Spans:
