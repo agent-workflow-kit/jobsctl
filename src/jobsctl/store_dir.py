@@ -88,8 +88,10 @@ def _makedirs(path: Path) -> None:
         _mkdir(directory, private=False)
 
 
-def _secure_dir(path: Path, *, create: bool) -> None:
-    """Make ``path`` an owned, 0700-or-tighter real directory, creating it when ``create``."""
+def _secure_dir(path: Path, *, create: bool, repair: bool = True) -> None:
+    """Make ``path`` an owned, 0700-or-tighter real directory, creating it when ``create``.
+
+    Without ``repair`` the same checks run but a loose mode is left as it is."""
     if create:
         _mkdir(path, private=True)
     try:
@@ -101,7 +103,7 @@ def _secure_dir(path: Path, *, create: bool) -> None:
         if st.st_uid != os.geteuid():
             raise _unsafe(path, "owned by another user")
         extra = stat.S_IMODE(st.st_mode) & 0o077
-        if extra:
+        if extra and repair:
             os.fchmod(fd, stat.S_IMODE(st.st_mode) & ~0o077)
     except OSError as exc:
         raise _unsafe(path, exc.strerror or "cannot check it") from exc
@@ -109,20 +111,27 @@ def _secure_dir(path: Path, *, create: bool) -> None:
         os.close(fd)
 
 
-def prepare_state_dir(root: Path, *, create: bool) -> StatePaths:
-    """Validate (and with ``create``, create) the state directory and its subdirectories."""
+def prepare_state_dir(root: Path, *, create: bool, readonly: bool = False) -> StatePaths:
+    """Validate (and with ``create``, create) the state directory and its subdirectories.
+
+    ``readonly`` (never with ``create``) only checks the state directory itself: it changes no
+    mode and does not require ``shims/`` or ``diag/`` to exist."""
     paths = StatePaths(root)
     if create:
         _makedirs(root.parent)
-    _secure_dir(root, create=create)
+    _secure_dir(root, create=create, repair=not readonly)
+    if readonly:
+        return paths
     for sub in (paths.shims, paths.diag):
         _secure_dir(sub, create=create)
     return paths
 
 
-def prepare_db_file(db: Path, *, create: bool) -> None:
-    """Make sure ``db`` is a private regular file we own; create it empty (0600) when ``create``."""
-    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+def prepare_db_file(db: Path, *, create: bool, readonly: bool = False) -> None:
+    """Make sure ``db`` is a private regular file we own; create it empty (0600) when ``create``.
+
+    ``readonly`` opens it read-only for the checks and never changes its mode."""
+    flags = (os.O_RDONLY if readonly else os.O_RDWR) | os.O_NOFOLLOW | os.O_CLOEXEC
     created = False
     try:
         if create:
@@ -143,7 +152,7 @@ def prepare_db_file(db: Path, *, create: bool) -> None:
             raise _unsafe(db, "not a regular file")
         if st.st_uid != os.geteuid():
             raise _unsafe(db, "owned by another user")
-        if stat.S_IMODE(st.st_mode) & 0o077:
+        if stat.S_IMODE(st.st_mode) & 0o077 and not readonly:
             os.fchmod(fd, stat.S_IMODE(st.st_mode) & ~0o077)
     except OSError as exc:
         raise _unsafe(db, exc.strerror or "cannot check it") from exc

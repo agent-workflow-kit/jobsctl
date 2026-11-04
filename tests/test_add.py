@@ -34,6 +34,12 @@ def trusted_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def clean_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A PATH with nothing to drop, so no `path_entry_dropped` record depends on the machine."""
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+
 def write_config(tmp_path: Path, **keys: Any) -> str:
     path = tmp_path / "config.yaml"
     path.write_text(json.dumps(keys), encoding="utf-8")  # JSON is YAML
@@ -100,7 +106,7 @@ def test_add_stores_a_job_and_prints_the_job_object(capsys: pytest.CaptureFixtur
 
 def test_human_output_is_only_the_job_id(capsys: pytest.CaptureFixture[str]) -> None:
     res = run_cli(capsys, "add", "--cwd", "/work", "--", "true")
-    assert res.code == 0 and res.err.startswith("jobsctl: warning: the queue was created")
+    assert res.code == 0 and res.err.startswith("jobsctl: warning: the queue default was created")
     assert res.out.startswith("jb-") and res.out.count("\n") == 1 and len(res.out.strip()) == 11
 
 
@@ -164,6 +170,18 @@ def test_a_relative_cwd_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> 
 def test_cwd_that_is_not_utf8_is_refused(capsys: pytest.CaptureFixture[str]) -> None:
     res = run_cli(capsys, "--json", "add", "--cwd", "/bad\udcff", "--", "true")
     assert res.code == 2 and res.envelope()["error"]["code"] == "usage"
+    assert "--cwd is not valid UTF-8" in res.envelope()["error"]["message"]
+    assert not (resolve_state_dir() / "state.db").exists()
+
+
+def test_a_default_cwd_that_is_not_utf8_does_not_blame_a_flag(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(add_module, "caller_cwd", lambda: "/bad\udcff")
+    res = run_cli(capsys, "--json", "add", "--", "true")
+    message = res.envelope()["error"]["message"]
+    assert res.code == 2 and "the current directory is not valid UTF-8" in message
+    assert "pass --cwd" in message and not message.startswith("--cwd")
     assert not (resolve_state_dir() / "state.db").exists()
 
 
@@ -172,13 +190,28 @@ def test_hostile_argv_round_trips(capsys: pytest.CaptureFixture[str]) -> None:
     doc = ok(add(capsys, argv=argv))
     assert doc["job"]["argv"][:2] == ["run", "'; DROP TABLE jobs;--"]
     assert doc["job"]["argv"][4:] == ["日本語", "x" * 5000, ""]
+    # TODO(#11): a lone surrogate prints as the literal text `\\xff`, the same as real
+    # `\\xff` text. This pins the current form so a change to it is noticed.
+    assert doc["job"]["argv"][3] == "\\xff"
     with db() as conn:
         assert conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+        stored = json.loads(conn.execute("SELECT argv FROM jobs").fetchone()[0])
+    assert stored == list(argv)  # stored losslessly, the lone surrogate included
 
 
 def test_wait_is_refused_until_wait_exists(capsys: pytest.CaptureFixture[str]) -> None:
     res = add(capsys, "--wait")
     assert res.code == 1 and not (resolve_state_dir() / "state.db").exists()
+
+
+def test_wait_is_refused_after_the_usage_and_secret_checks(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    cfg = secret_cfg(tmp_path)
+    res = add(capsys, "--wait", "--config", cfg, "--env", f"MODE={SECRET}")
+    assert res.code == 2 and res.envelope()["error"]["details"]["code"] == "secret_in_env"
+    assert add(capsys, "--wait", "--config", cfg, "--env", "A=1", "--env", "A=2").code == 2
+    assert not (resolve_state_dir() / "state.db").exists()
 
 
 def test_add_writes_no_audit_record_and_no_transition(capsys: pytest.CaptureFixture[str]) -> None:
@@ -225,6 +258,11 @@ def test_queue_creation_is_reported_once_and_logged_once(
     assert len(created) == 1
     assert created[0]["queue"] == "typo-q" and created[0]["level"] == "warn"
     assert created[0]["job_id"] == first["job"]["id"]
+
+
+def test_the_human_queue_warning_names_the_queue(capsys: pytest.CaptureFixture[str]) -> None:
+    res = run_cli(capsys, "add", "--queue", "typo-q", "--cwd", "/work", "--", "true")
+    assert res.code == 0 and "the queue typo-q was created on first use" in res.err
 
 
 def test_a_configured_queue_is_not_a_creation(
@@ -281,6 +319,32 @@ def test_pass_env_with_an_unavailable_env_file_is_blocked(
 
 
 # -- unique keys -----------------------------------------------------------------------------
+
+
+def test_a_unique_key_hit_is_decided_before_strict_queues(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    cfg = write_config(tmp_path, strict_queues=True, queues={"work": {}})
+    first = ok(add(capsys, "--config", cfg, "--queue", "work", "--unique-key", "K1"))
+    again = ok(add(capsys, "--config", cfg, "--queue", "unconfigured", "--unique-key", "K1"))
+    assert again["created"] is False and again["job"]["id"] == first["job"]["id"]
+    assert add(capsys, "--config", cfg, "--queue", "unconfigured").code == 10
+
+
+def test_no_start_is_accepted_and_changes_nothing_else(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    plain = ok(add(capsys, "--label", "a=1"))
+    started = ok(add(capsys, "--no-start", "--label", "a=1"))
+    assert started["warnings"] == plain["warnings"] and started["created"] is True
+    assert started["queue_created"] is False and started["dry_run"] is False
+    volatile = {"id", "created_at", "enqueued_at", "status_changed_at", "rank"}
+    assert {k: v for k, v in started["job"].items() if k not in volatile} == {
+        k: v for k, v in plain["job"].items() if k not in volatile
+    }
+    assert started["job"]["rank"] == plain["job"]["rank"] + 1
+    with db() as conn:
+        assert conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == 2
 
 
 def test_a_unique_key_hit_creates_nothing_and_ignores_new_settings(
@@ -504,6 +568,48 @@ def test_pass_env_undefined_warns_in_output_and_log(
     assert SECRET not in json.dumps(doc) + json.dumps(record)
 
 
+def test_pass_env_message_states_the_actual_condition(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    path = Path(write_env_file(tmp_path))
+    path.chmod(0o644)  # unavailable
+    cfg = write_config(tmp_path, env_file=str(path))
+    unavailable = ok(add(capsys, "--config", cfg, "--pass-env", "API_TOKEN"))["warnings"][0]
+    assert "env_file is unavailable" in unavailable["message"]
+    assert "not defined" not in unavailable["message"] and "fails" not in unavailable["message"]
+    assert unavailable["code"] == "pass_env_undefined" and unavailable["variable"] == "API_TOKEN"
+    absent = ok(add(capsys, "--pass-env", "ANY"))["warnings"][0]
+    assert "no env_file is configured" in absent["message"]
+    path.chmod(0o600)
+    defined = ok(add(capsys, "--config", cfg, "--pass-env", "NOPE"))["warnings"][0]
+    assert "not defined in env_file" in defined["message"]
+    assert "fails" not in defined["message"]
+
+
+def test_path_entry_dropped_is_logged_once_per_change_of_state(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "/usr/bin:relative/bin:/bin")
+    ok(add(capsys))
+    ok(add(capsys))
+    (record,) = log_records("path_entry_dropped")
+    assert record["level"] == "warn"
+    assert record["details"] == {"entries": [{"reason": "relative", "path": "relative/bin"}]}
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    ok(add(capsys))  # the condition cleared: nothing new, and it re-arms
+    monkeypatch.setenv("PATH", "/usr/bin:relative/bin:/bin")
+    ok(add(capsys))
+    assert len(log_records("path_entry_dropped")) == 2
+
+
+def test_dry_run_does_not_log_path_entry_dropped(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "/usr/bin:relative/bin")
+    ok(add(capsys, "--dry-run"))
+    assert not resolve_state_dir().exists()
+
+
 def test_pass_env_without_an_env_file_warns(capsys: pytest.CaptureFixture[str]) -> None:
     doc = ok(add(capsys, "--pass-env", "ANY"))
     assert doc["warnings"][0]["variable"] == "ANY"
@@ -530,6 +636,28 @@ def test_env_file_state_warnings_are_logged_once_per_change(
     ok(add(capsys, "--config", cfg))
     assert len(log_records("env_file_unsafe")) == 1
     assert "value-one" not in (resolve_state_dir() / "log.jsonl").read_text()
+
+
+# -- log failures after the commit -----------------------------------------------------------
+
+
+def test_a_log_failure_after_the_commit_does_not_fail_the_add(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ok(add(capsys, "--unique-key", "seed"))
+    log = resolve_state_dir() / "log.jsonl"
+    log.unlink()
+    log.mkdir()  # appends to log.jsonl now fail
+    res = add(capsys, "--queue", "fresh-q", "--unique-key", "K2")
+    doc = ok(res)
+    assert doc["created"] is True
+    with db() as conn:
+        stored = [r[0] for r in conn.execute("SELECT id FROM jobs WHERE unique_key = 'K2'")]
+        assert conn.execute("SELECT 1 FROM queues_seen WHERE name = 'fresh-q'").fetchone()
+    assert stored == [doc["job"]["id"]]
+    assert "log.jsonl" in res.err and "the job was added" in res.err
+    human = run_cli(capsys, "add", "--queue", "fresh-q2", "--cwd", "/work", "--", "true")
+    assert human.code == 0 and human.out.startswith("jb-") and "log.jsonl" in human.err
 
 
 # -- secrets ---------------------------------------------------------------------------------
@@ -609,6 +737,7 @@ def test_duplicate_and_overlapping_env_names_are_refused(
 ) -> None:
     assert add(capsys, "--env", "A=1", "--env", "A=2").code == 2
     assert add(capsys, "--env", "A=1", "--pass-env", "A").code == 2
+    assert not (resolve_state_dir() / "state.db").exists()
 
 
 def test_an_env_error_never_echoes_the_value(capsys: pytest.CaptureFixture[str]) -> None:
@@ -679,6 +808,67 @@ def test_dry_run_without_a_state_directory_creates_nothing(
     assert doc["queue_created"] is False
     assert [w["code"] for w in doc["warnings"]] == ["pass_env_undefined"]
     assert not resolve_state_dir().exists()
+
+
+def test_dry_run_leaves_a_zero_byte_database_alone(capsys: pytest.CaptureFixture[str]) -> None:
+    state = resolve_state_dir()
+    state.mkdir(parents=True, mode=0o700)
+    (state / "state.db").touch(mode=0o600)
+    doc = ok(add(capsys, "--dry-run"))
+    assert doc["job"] is None and doc["created"] is False
+    assert (state / "state.db").stat().st_size == 0
+    assert sorted(p.name for p in state.iterdir()) == ["state.db"]  # no shims, diag, wal
+
+
+def test_dry_run_does_not_recreate_shims_or_diag(capsys: pytest.CaptureFixture[str]) -> None:
+    ok(add(capsys, "--unique-key", "K1"))
+    state = resolve_state_dir()
+    (state / "shims").rmdir()
+    (state / "diag").rmdir()
+    doc = ok(add(capsys, "--dry-run", "--unique-key", "K1"))
+    assert doc["job"] is not None
+    assert not (state / "shims").exists() and not (state / "diag").exists()
+
+
+def test_dry_run_works_on_a_read_only_database(capsys: pytest.CaptureFixture[str]) -> None:
+    first = ok(add(capsys, "--unique-key", "K1"))["job"]
+    db_path = resolve_state_dir() / "state.db"
+    db_path.chmod(0o400)
+    mode_before = db_path.stat().st_mode
+    doc = ok(add(capsys, "--dry-run", "--unique-key", "K1"))
+    assert doc["job"]["id"] == first["id"]
+    assert db_path.stat().st_mode == mode_before
+
+
+def test_dry_run_does_not_tighten_the_state_directory(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ok(add(capsys))
+    state = resolve_state_dir()
+    state.chmod(0o750)
+    ok(add(capsys, "--dry-run"))
+    assert state.stat().st_mode & 0o777 == 0o750
+
+
+def test_dry_run_refuses_an_older_schema_and_never_migrates(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl import store_db
+
+    ok(add(capsys))
+    path = resolve_state_dir() / "state.db"
+    before = path.read_bytes()
+    newer = (*store_db.MIGRATIONS, ("CREATE TABLE migrated_marker (x)",))
+    monkeypatch.setattr(store_db, "MIGRATIONS", newer)
+    res = add(capsys, "--dry-run")
+    assert res.code == 1 and res.envelope()["error"]["code"] == "internal"
+    assert "older" in res.envelope()["error"]["message"]
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == len(store_db.MIGRATIONS) - 1
+        assert not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'migrated_marker'"
+        ).fetchone()
+    assert path.read_bytes() == before
 
 
 def test_dry_run_leaves_the_database_and_files_unchanged(

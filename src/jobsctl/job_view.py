@@ -109,6 +109,9 @@ def job_object(
         "status": row["status"],
         "reason": row["reason"],
         "hold_reason": row["hold_reason"],
+        # TODO(#11): argv and env values are stored losslessly (a non-UTF-8 byte is a lone
+        # surrogate) but print_json shows one as the literal text `\xNN`, which cannot be told
+        # from real `\xNN` text. Decide a distinguishable JSON form shared by list and show.
         "argv": json.loads(row["argv"]),
         "cwd": row["cwd"],
         "env": json.loads(row["env"]),

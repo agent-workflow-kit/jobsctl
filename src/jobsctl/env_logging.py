@@ -7,6 +7,7 @@ Each record names the file's configured path (never a value) and, for lines, the
 
 from __future__ import annotations
 
+from jobsctl.env_canonical import CanonicalEnv
 from jobsctl.env_file import EnvFile
 from jobsctl.log_writer import RecordWriter
 
@@ -41,3 +42,22 @@ def log_env_file_state(writer: RecordWriter, path: str | None, env_file: EnvFile
             event,
             fields={"message": message, "details": {"lines": lines}},
         )
+
+
+def log_path_state(writer: RecordWriter, canonical: CanonicalEnv) -> None:
+    """Log `path_entry_dropped` for the cleaned `PATH` once per change of state (the dropped
+    entries are the state; none re-arms it). Call outside any transaction."""
+    dropped = [w for w in canonical.warnings if w.code == "path_entry_dropped"]
+    writer.warn_once(
+        "path_entry_dropped",
+        repr(canonical.state_key) if dropped else None,
+        "path_entry_dropped",
+        fields={
+            "message": "PATH entries were dropped when cleaning the environment",
+            "details": {
+                "entries": [
+                    {"reason": w.reason, **({"path": w.path} if w.path else {})} for w in dropped
+                ]
+            },
+        },
+    )

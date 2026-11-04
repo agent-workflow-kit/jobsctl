@@ -51,7 +51,6 @@ FORBIDDEN_DETAIL_KEYS: Final = frozenset(
     }
 )  # fmt: skip
 
-MIN_MASKED_LENGTH: Final = 8  # shorter values are not masked (interface.md, Masking)
 MASK: Final = "***"
 MAX_RECORD_BYTES: Final = 256 * 1024
 _SEQ_TS_OVERHEAD: Final = 96  # `"seq":<20 digits>,"ts":"...",` and the newline, rounded up
@@ -119,15 +118,9 @@ def clean_text(text: str, masked: Sequence[str] = ()) -> str:
     """Mask, make control and escape characters visible, then mask again.
 
     Masking runs on both sides of the sanitizer so a value is caught as given and as
-    sanitized. ``masked`` is longest first (see :func:`masking_set`).
+    sanitized. ``masked`` is longest first (``MaskingSet.values`` of :mod:`jobsctl.env_mask`).
     """
     return _mask_text(sanitize(_mask_text(text, masked), inline=True), masked)
-
-
-def masking_set(values: Iterable[str]) -> tuple[str, ...]:
-    """The values to mask: at least 8 characters, longest first, without duplicates."""
-    unique = {v for v in values if len(v) >= MIN_MASKED_LENGTH}
-    return tuple(sorted(unique, key=lambda v: (-len(v), v)))
 
 
 def _unused_key(key: str, taken: Mapping[str, Any]) -> str:

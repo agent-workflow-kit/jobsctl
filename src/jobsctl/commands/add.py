@@ -20,9 +20,9 @@ from typing import Any
 from jobsctl import gateway
 from jobsctl.cli_output import print_json
 from jobsctl.cli_registry import Context, command
-from jobsctl.env_canonical import build_canonical_env
+from jobsctl.env_canonical import CanonicalEnv, build_canonical_env
 from jobsctl.env_file import EnvFile, load_env_file
-from jobsctl.env_logging import log_env_file_state
+from jobsctl.env_logging import log_env_file_state, log_path_state
 from jobsctl.env_mask import MaskingSet, masking_values
 from jobsctl.errors import JobsctlError, usage_error
 from jobsctl.ids import generate_job_id
@@ -36,8 +36,6 @@ from jobsctl.store_ops import insert_job
 from jobsctl.store_schema import NON_TERMINAL_STATUSES
 from jobsctl.textsafe import sanitize
 from jobsctl.timestamps import format_timestamp
-
-MIN_SECRET_LENGTH = 8  # the masking set holds only values this long (env_mask)
 
 
 @dataclass(frozen=True)
@@ -86,8 +84,10 @@ def caller_cwd() -> str:
         raise usage_error("the current directory is not available; pass --cwd") from None
 
 
-def normalize_cwd(text: str) -> str:
-    """Absolute and lexically normalized (`.` and `..` resolved, symlinks kept); else exit 2."""
+def normalize_cwd(text: str, *, default: bool = False) -> str:
+    """Absolute and lexically normalized (`.` and `..` resolved, symlinks kept); else exit 2.
+
+    `default`: the text is the caller's directory, not a `--cwd` value (it shapes the message)."""
     if "\x00" in text or "\n" in text:
         raise usage_error("--cwd contains a NUL byte or a newline")
     if not text.startswith("/"):
@@ -96,6 +96,8 @@ def normalize_cwd(text: str) -> str:
     try:
         path.encode("utf-8")
     except UnicodeEncodeError:
+        if default:
+            raise usage_error("the current directory is not valid UTF-8; pass --cwd") from None
         raise usage_error("--cwd is not valid UTF-8") from None
     return path
 
@@ -122,7 +124,11 @@ def build_request(ctx: Context) -> Request:
     for name in pass_env:
         if name in env:
             raise usage_error(f"{name} is given with both --env and --pass-env")
-    cwd = normalize_cwd(args.cwd if args.cwd is not None else caller_cwd())
+    cwd = (
+        normalize_cwd(args.cwd)
+        if args.cwd is not None
+        else normalize_cwd(caller_cwd(), default=True)
+    )
     return Request(
         argv=list(args.argv),
         queue=args.queue if args.queue is not None else "default",
@@ -226,11 +232,17 @@ def _taken(tx: Tx, job_id: str) -> bool:
     )
 
 
-def _pass_env_warnings(req: Request, env_file: EnvFile) -> list[dict[str, Any]]:
+def _pass_env_warnings(req: Request, ctx: Context, env_file: EnvFile) -> list[dict[str, Any]]:
+    if env_file.status == "unavailable":
+        why = "env_file is unavailable"
+    elif ctx.config.env_file is None:
+        why = "no env_file is configured"
+    else:
+        why = "it is not defined in env_file"
     return [
         {
             "code": "pass_env_undefined",
-            "message": f"{name} is not defined in env_file; the job fails missing_env at start",
+            "message": f"--pass-env {name}: {why}",
             "variable": name,
         }
         for name in req.pass_env
@@ -286,7 +298,7 @@ def decide(
             "unknown_queue",
             f"queue {req.queue} is not configured and has no jobs (strict_queues is on)",
         )
-    out = Outcome(job=None, warnings=_pass_env_warnings(req, env_file))
+    out = Outcome(job=None, warnings=_pass_env_warnings(req, ctx, env_file))
     if not write:
         return out
     assert tx is not None
@@ -334,7 +346,7 @@ def decide(
                 {
                     "job_id": job_id,
                     "queue": req.queue,
-                    "message": "a --pass-env variable is not defined in env_file",
+                    "message": warning["message"],
                     "details": {"variable": warning["variable"]},
                 },
                 "warn",
@@ -347,31 +359,58 @@ def decide(
 
 
 def _dry_run(ctx: Context, req: Request, env_file: EnvFile, now: str) -> Outcome:
-    """The same decisions with nothing written: no state directory or database is created."""
+    """The same decisions with nothing written: the database is opened read-only, and nothing is
+    created, repaired or migrated. A missing or uninitialized database means no job exists."""
     db = resolve_state_dir() / "state.db"
     if not os.path.lexists(db):
         return decide(None, ctx, req, env_file, now, write=False)
-    with Store.open(busy_timeout=ctx.config.busy_timeout) as store, store.read() as tx:
-        return decide(tx, ctx, req, env_file, now, write=False)
+    with Store.open(busy_timeout=ctx.config.busy_timeout, mode=OpenMode.READ_ONLY) as store:
+        if store.schema_version == 0:
+            return decide(None, ctx, req, env_file, now, write=False)
+        with store.read() as tx:
+            return decide(tx, ctx, req, env_file, now, write=False)
 
 
-def _write(ctx: Context, req: Request, env_file: EnvFile, masking: MaskingSet, now: str) -> Outcome:
+def _write(
+    ctx: Context,
+    req: Request,
+    env_file: EnvFile,
+    canonical: CanonicalEnv,
+    masking: MaskingSet,
+    now: str,
+) -> Outcome:
     with Store.open(busy_timeout=ctx.config.busy_timeout, mode=OpenMode.CLI) as store:
         writer = RecordWriter(store, masking=masking)
         log_env_file_state(writer, ctx.config.env_file, env_file)
+        log_path_state(writer, canonical)
         with store.write() as tx:
             out = decide(tx, ctx, req, env_file, now, write=True)
             records = list(out.log)
 
             def log_all() -> None:
+                # The job is committed by now: a failed log append must not fail the command
+                # (a retry would add the job again). Failures before or during the commit
+                # still propagate. The warning names no value: only the exception's type.
+                failed = 0
+                last = ""
                 for event, fields, level in records:
-                    writer.log(event, level=level, fields={**fields, "actor": req.actor})
+                    try:
+                        writer.log(event, level=level, fields={**fields, "actor": req.actor})
+                    except Exception as exc:
+                        failed += 1
+                        last = type(exc).__name__
+                if failed:
+                    sys.stderr.write(
+                        f"jobsctl: warning: the job was added but appending to log.jsonl "
+                        f"failed ({last}); {failed} log record(s) were not written\n"
+                    )
+                    sys.stderr.flush()
 
             tx.after_commit(log_all)
         return out
 
 
-def _report(ctx: Context, out: Outcome, *, dry_run: bool) -> None:
+def _report(ctx: Context, req: Request, out: Outcome, *, dry_run: bool) -> None:
     if ctx.json:
         print_json(
             {
@@ -386,7 +425,7 @@ def _report(ctx: Context, out: Outcome, *, dry_run: bool) -> None:
         return
     if not ctx.quiet:
         if out.queue_created:
-            sys.stderr.write("jobsctl: warning: the queue was created on first use\n")
+            sys.stderr.write(f"jobsctl: warning: the queue {req.queue} was created on first use\n")
         for warning in out.warnings:
             sys.stderr.write(f"jobsctl: warning: {sanitize(warning['message'], inline=True)}\n")
         sys.stderr.flush()
@@ -398,20 +437,20 @@ def _report(ctx: Context, out: Outcome, *, dry_run: bool) -> None:
 @command("add")
 def add(ctx: Context) -> int:
     args = ctx.args
-    if args.wait:
-        # TODO(#17): `--wait` behaves as `wait` on the added job; refused until `wait` exists.
-        raise JobsctlError("internal", "add --wait is not available yet")
     req = build_request(ctx)
     env_file = load_env_file(ctx.config.env_file)
     canonical = build_canonical_env(ctx.config, dict(os.environ))
     masking = masking_values(ctx.config, canonical, env_file)
     check_secrets(req, masking, ctx.config.mask_env, env_file)
-    # TODO(#34): the pre-add hook runs here (1.x); TODO(#25): pre-start hooks run in the shim.
+    if args.wait:
+        # TODO(#17): `--wait` behaves as `wait` on the added job; refused until `wait` exists.
+        raise JobsctlError("internal", "add --wait is not available yet")
+    # TODO(#34): the pre-add hook runs here (1.x). Pre-start hooks run in the shim, not here.
     now = format_timestamp(gateway.utc_now())
     if args.dry_run:
         out = _dry_run(ctx, req, env_file, now)
     else:
-        out = _write(ctx, req, env_file, masking, now)
+        out = _write(ctx, req, env_file, canonical, masking, now)
         # TODO(#14): request a pass unless --no-start (auto_run) once the runner exists.
-    _report(ctx, out, dry_run=args.dry_run)
+    _report(ctx, req, out, dry_run=args.dry_run)
     return 0
