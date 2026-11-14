@@ -43,9 +43,10 @@
             "code": {
               "enum": [
                 "secret_in_argv",
-                "secret_in_env"
+                "secret_in_env",
+                "secret_in_label"
               ],
-              "description": "usage from add: secret_in_argv (with index) or secret_in_env (with variable)."
+              "description": "usage from add: secret_in_argv (with index) or secret_in_env (with variable); from label add and label remove: secret_in_label (with label for a value hit, without it for a key hit)."
             },
             "index": {
               "type": "integer",
@@ -55,6 +56,10 @@
             "variable": {
               "$ref": "../defs.json#/$defs/env_name",
               "description": "secret_in_env: the --env name; never its value."
+            },
+            "label": {
+              "type": "string",
+              "description": "secret_in_label: the label key whose value holds a secret; omitted when the key itself does, since naming it would echo the secret."
             }
           },
           "additionalProperties": {},

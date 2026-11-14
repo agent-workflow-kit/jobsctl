@@ -147,7 +147,7 @@ A job whose shim died while the job process lives stays `running` with `shim_los
 | `status` | string | [status](#statuses) |
 | `reason` | string or null | [end reason](#end-reasons); `null` unless terminal |
 | `hold_reason` | string or null | [hold reason](#hold-reasons); `null` unless `held` |
-| `argv` | array of strings | the job's argv |
+| `argv` | array of strings | the job's argv. A byte that is not valid UTF-8 (stored losslessly) prints as the four characters `\xNN`, the same as real `\xNN` text: the two cannot be told apart, because argv never carries untrusted text (a submitter that must tell them apart passes the data in a file). `env` values print the same way |
 | `cwd` | string | absolute working directory |
 | `env` | object | the `--env` entries (non-secret; at most 256) |
 | `pass_env` | array of strings | the `--pass-env` names |
@@ -497,13 +497,13 @@ Output: `schemas/cli/add.json`, `{"created": <bool>, "queue_created": <bool>, "d
 
 `jobsctl list [--queue Q] [--status S]... [--label k=v]... [--unique-key K] [--all] [--limit N]`
 
-Lists jobs: by queue (sorted by name), then queued jobs by `rank`, then `starting`, `running` and `held` jobs by `enqueued_at` then id, then terminal jobs by `ended_at` (newest first) then id. Repeated `--status` values combine with OR. Without `--all` or `--status`, terminal jobs that ended more than 24 hours ago are omitted (a view filter: tracking which failed jobs were seen is the caller's concern, e.g. with a label). `--limit` has no default. Jobs in `list` have no `output` or `attempts`. Output: `schemas/cli/list.json`, `{"jobs": [<job>...], "truncated": <bool>}` (`truncated`: `--limit` cut the list).
+Lists jobs: by queue (sorted by name; byte order), then queued jobs by `rank`, then `starting`, `running` and `held` jobs by `enqueued_at` then id, then terminal jobs by `ended_at` (newest first) then id. Repeated `--status` values combine with OR. Without `--all` or `--status`, terminal jobs that ended more than 24 hours ago are omitted (a view filter: tracking which failed jobs were seen is the caller's concern, e.g. with a label). The cutoff is the exact instant 24 hours before the command's clock read: a job that ended exactly 24 hours ago is listed, one millisecond earlier is not. Any `--status` lifts the filter, as `--all` does; the other filters (`--queue`, `--label`, `--unique-key`) do not. `--limit` has no default. Jobs in `list` have no `output` or `attempts`. Output: `schemas/cli/list.json`, `{"jobs": [<job>...], "truncated": <bool>}` (`truncated`: `--limit` cut the list).
 
 ### `show`
 
 `jobsctl show (<id> | --unique-key K) [--attempt N] [--no-output]`
 
-Shows one job with its `attempts` (oldest first; empty before the first claim) and the `output` tail of the current attempt (or of `--attempt N`; an attempt that does not exist exits 10). `--unique-key K` selects the non-terminal job holding K, else the most recently created job with K; none: exit 10. Output: `schemas/cli/show.json`.
+Shows one job with its `attempts` (oldest first; empty before the first claim) and the `output` tail of the current attempt (or of `--attempt N`; an attempt that does not exist exits 10). `--unique-key K` selects the non-terminal job holding K, else the most recently created job with K (ties on `created_at` go to the job added to the database last); none: exit 10. `--attempt N` is checked against the job's attempts even with `--no-output`; `output` is `null` when there is no current attempt and no `--attempt`, when the attempt has no stored tail, and with `--no-output`. The tail is sanitized again in both human and `--json` output. Output: `schemas/cli/show.json`.
 
 ### `wait`
 
@@ -569,7 +569,7 @@ A terminal job, or a job held for `exit_13`, returns to `queued` in one transact
 
 ### `label add` / `label remove`
 
-`jobsctl label add <id> k=v...`, `jobsctl label remove <id> k=v...`. Any status. Each change is logged as a `label` event. Output: `schemas/cli/change.json`.
+`jobsctl label add <id> k=v...`, `jobsctl label remove <id> k=v...`. Any status. A command that changes at least one label is logged as one `label` event (`details`: `op` `add` or `remove`, and `labels`, the pairs actually added or removed); one that changes nothing logs nothing. A label that would be the job's 33rd exits 2 (`usage`, `details.limit`) after the id is resolved, and applies to `--dry-run` too. A key or value that contains a masked value ([Masking and sanitizing](#masking-and-sanitizing)) is refused before the database is opened, like `add`'s labels: exit 2 (`usage`, `details.code` `secret_in_label`, `details.label` the key for a value hit and omitted for a key hit, since naming the key would echo the secret). `--dry-run` opens the database read-only and prints the projected job; with no state directory yet the id is not found (exit 10). Output: `schemas/cli/change.json`.
 
 ### `capacity`
 
@@ -653,7 +653,7 @@ With `--json`, every non-zero exit prints `{"error": {...}}` on stdout (`schemas
 | `message` | always |
 | `reason` | with `refused` |
 | `candidates` | with `ambiguous`: the matching job ids |
-| `details` | optional, code-specific (e.g. `job_id` for `duplicate_key` and `cancel_pending`, `status` for `not_held` from `resolve`, `limit` for the label limit, `code` with `index` or `variable` for a secret refused by `add`) |
+| `details` | optional, code-specific (e.g. `job_id` for `duplicate_key` and `cancel_pending`, `status` for `not_held` from `resolve`, `limit` for the label limit, `code` with `index`, `variable` or `label` for a secret refused by `add` or `label add`/`label remove`) |
 
 | Code | Exit | Commands |
 |---|---|---|
