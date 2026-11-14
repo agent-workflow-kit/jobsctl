@@ -30,6 +30,7 @@ from jobsctl.order import (
     apply_placement,
     plan_move_edge,
     plan_move_relative,
+    projected_rank,
 )
 from jobsctl.store_db import OpenMode, Store, Tx
 from jobsctl.store_dir import resolve_state_dir
@@ -95,13 +96,15 @@ def _decide_move(
         before = args.before is not None
         return (
             job_id,
-            lambda: plan_move_relative(tx, job_id, other_id, before=before),
+            lambda: plan_move_relative(
+                tx, job_id, other_id, before=before, overlay=None if write else {}
+            ),
             {"op": "move", "to": "before" if before else "after", "other": other_id},
         )
     top = bool(args.top)
     return (
         job_id,
-        lambda: plan_move_edge(tx, job_id, top=top),
+        lambda: plan_move_edge(tx, job_id, top=top, overlay=None if write else {}),
         {"op": "move", "to": "top" if top else "bottom"},
     )
 
@@ -154,6 +157,8 @@ def _run(ctx: Context, tx: Tx, write: bool) -> Outcome:
     if row["pass_env"] != "[]":
         unavailable = load_env_file(ctx.config.env_file).status == "unavailable"
     job = job_object(tx, row, ctx.config, env_file_unavailable=unavailable, now=now)
+    if placement is not None and placement.renumbered and job["rank"] is not None:
+        job["rank"] = projected_rank(tx, row, placement.renumbered)  # dry run, queue renumbered
     return Outcome(changed, job, str(row["queue"]), job_id, details)
 
 

@@ -387,6 +387,76 @@ def test_dry_run_without_a_state_directory_is_not_found(
     assert not (resolve_state_dir()).exists()
 
 
+def seed(positions_by_id: dict[str, str]) -> None:
+    for job_id, position in positions_by_id.items():
+        sql("UPDATE jobs SET position = ? WHERE id = ?", position, job_id)
+
+
+def dry_then_real(capsys: pytest.CaptureFixture[str], *argv: str) -> None:
+    """The dry run exits 0, writes nothing and projects what the real command then yields."""
+    before = snapshot_state()
+    dry = change(run(capsys, *argv, "--dry-run"))
+    assert snapshot_state() == before
+    real = change(run(capsys, *argv))
+    assert dry["dry_run"] is True and real["dry_run"] is False
+    assert dry["changed"] == real["changed"]
+    assert dry["job"]["rank"] == real["job"]["rank"]
+
+
+def test_dry_run_move_with_a_key_over_the_length_limit(capsys: pytest.CaptureFixture[str]) -> None:
+    a, b, c = jobs(capsys, 3)
+    base = "00000000001000000000000000"
+    seed({a: base, b: base + "." + "0" * 60 + "1", c: "00000000001000000000000005"})
+    dry_then_real(capsys, "move", c, "--after", a)
+    assert queued_order() == [a, c, b]
+
+
+def test_dry_run_move_with_equal_keys(capsys: pytest.CaptureFixture[str]) -> None:
+    a, b, c = jobs(capsys, 3)
+    same = "00000000001000000000000000"
+    seed({a: same, b: same, c: "00000000001000000000000005"})
+    dry_then_real(capsys, "move", c, "--before", a)
+    order = queued_order()
+    assert order.index(c) + 1 == order.index(a)
+
+
+def test_dry_run_top_at_integer_part_zero(capsys: pytest.CaptureFixture[str]) -> None:
+    a, b, c = jobs(capsys, 3)
+    seed({a: "0" * 20, b: "0" * 19 + "1", c: "0" * 19 + "2"})
+    dry_then_real(capsys, "move", c, "--top")
+    assert queued_order() == [c, a, b]
+
+
+def test_dry_run_bottom_at_the_last_integer_part(capsys: pytest.CaptureFixture[str]) -> None:
+    a, b = jobs(capsys, 2)
+    seed({a: "9" * 20, b: "9" * 19 + "8"})
+    dry_then_real(capsys, "move", b, "--bottom")
+    assert queued_order() == [a, b]
+
+
+def test_noop_move_does_not_renumber(capsys: pytest.CaptureFixture[str]) -> None:
+    a, b, c = jobs(capsys, 3)
+    same = "00000000001000000000000000"
+    seed({a: same, b: same, c: "00000000001000000000000005"})
+    first, second = sorted([a, b])
+    before = snapshot_state()
+    doc = change(run(capsys, "move", second, "--after", first))
+    assert doc["changed"] is False
+    assert snapshot_state() == before
+
+
+def test_cross_band_collision_at_zero_renumbers_instead_of_overflowing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    a, z, x = jobs(capsys, 3)
+    change(run(capsys, "priority", z, "5"))
+    seed({a: "0" * 19 + "1", z: "0" * 20, x: "0" * 19 + "5"})
+    change(run(capsys, "move", x, "--before", a))
+    band = [j for j in queued_order() if j != z]
+    assert band == [x, a]
+    assert len(set(positions())) == 3
+
+
 # -- many moves ------------------------------------------------------------------------------
 
 
@@ -654,3 +724,36 @@ def test_queues_empty(capsys: pytest.CaptureFixture[str]) -> None:
     res = run(capsys, "queues")
     assert res.code == 0
     assert res.envelope() == {"queues": [], "unmatched_selectors": []}
+
+
+# -- snapshot --------------------------------------------------------------------------------
+
+
+def test_load_snapshot_feeds_selection(capsys: pytest.CaptureFixture[str]) -> None:
+    from jobsctl.config import Config
+    from jobsctl.order import load_snapshot, select_next
+    from jobsctl.store_db import OpenMode, Store
+
+    plain = add(capsys)
+    prio = add(capsys, "--priority", "5")
+    pinned = add(capsys)
+    change(run(capsys, "pin", pinned))
+    env = add(capsys, "--pass-env", "TOK", queue="e")
+    sql("UPDATE jobs SET status = 'running' WHERE id = ?", plain)
+    other = add(capsys)
+    with Store.open(busy_timeout=1000, mode=OpenMode.CLI) as store, store.read() as tx:
+        snap = load_snapshot(tx, Config(default_cap=None))
+    by_name = {q.name: q for q in snap.queues}
+    assert by_name["q"].running == 1
+    assert [c.id for c in by_name["q"].queued] == [pinned, prio, other]
+    assert [c.needs_env_file for c in by_name["e"].queued] == [True]
+    assert by_name["e"].queued[0].id == env
+    now = "2999-01-01T00:00:00.000Z"
+    sel = select_next(snap, now=now, env_file_unavailable=True)
+    assert sel is not None and (sel.queue, sel.job_id) == ("q", pinned)
+    sql("UPDATE jobs SET status = 'held' WHERE queue = 'q'")
+    with Store.open(busy_timeout=1000, mode=OpenMode.CLI) as store, store.read() as tx:
+        snap = load_snapshot(tx, Config(default_cap=None))
+    assert select_next(snap, now=now, env_file_unavailable=True) is None
+    sel = select_next(snap, now=now, env_file_unavailable=False)
+    assert sel is not None and (sel.queue, sel.job_id) == ("e", env)

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 from jobsctl.config import Config
@@ -85,42 +85,60 @@ def key_between(lo: str | None, hi: str | None) -> str:
 
 _LIVE_SQL = "status IN ('queued', 'held')"
 
+# Planners take `overlay`: `None` renumbers in the database (the real path); a dict leaves the
+# database alone (`--dry-run`, a read-only connection) and collects the new keys there, so the
+# projection of a move that needs a renumber is computed without writing.
+Overlay = dict[str, str] | None
 
-def _live_positions(tx: Tx, queue: str, exclude: str | None) -> list[str]:
+
+def _live_rows(tx: Tx, queue: str, overlay: Overlay) -> list[dict[str, object]]:
+    """The queued and held jobs of `queue` as plain dicts (id, position, pinned, priority),
+    with the overlay's keys applied."""
     rows = tx.all(
-        f"SELECT position FROM jobs WHERE queue = ? AND {_LIVE_SQL} AND id IS NOT ?",
-        [queue, exclude],
+        f"SELECT id, position, pinned, priority FROM jobs WHERE queue = ? AND {_LIVE_SQL}", [queue]
     )
-    return [str(r["position"]) for r in rows]
+    found = [dict(r) for r in rows]
+    if overlay:
+        for r in found:
+            r["position"] = overlay.get(str(r["id"]), r["position"])
+    return found
 
 
-def renumber(tx: Tx, queue: str) -> None:
+def _live_positions(tx: Tx, queue: str, exclude: str | None, overlay: Overlay = None) -> list[str]:
+    return [str(r["position"]) for r in _live_rows(tx, queue, overlay) if r["id"] != exclude]
+
+
+def renumber(tx: Tx, queue: str, overlay: Overlay = None) -> None:
     """Give the queued and held jobs of `queue` fresh, evenly spaced integer keys in their
-    current (position, id) order. Relative order never changes."""
-    rows = tx.all(
-        f"SELECT id FROM jobs WHERE queue = ? AND {_LIVE_SQL} ORDER BY position, id", [queue]
-    )
+    current (position, id) order. Relative order never changes. With an `overlay` the new keys
+    go there and nothing is written."""
+    rows = sorted(_live_rows(tx, queue, overlay), key=_sort_key)
     for index, row in enumerate(rows):
-        tx.execute(
-            "UPDATE jobs SET position = ? WHERE id = ?",
-            [integer_key(MIDPOINT + index * RENUMBER_STEP), row["id"]],
-        )
+        key = integer_key(MIDPOINT + index * RENUMBER_STEP)
+        if overlay is None:
+            tx.execute("UPDATE jobs SET position = ? WHERE id = ?", [key, row["id"]])
+        else:
+            overlay[str(row["id"])] = key
 
 
-def tail_position(tx: Tx, queue: str, *, exclude: str | None = None) -> str:
+def tail_position(
+    tx: Tx, queue: str, *, exclude: str | None = None, overlay: Overlay = None
+) -> str:
     """A key after every queued or held job of `queue` (but `exclude`)."""
-    return _edge(tx, queue, exclude, tail=True)
+    return _edge(tx, queue, exclude, tail=True, overlay=overlay)
 
 
-def head_position(tx: Tx, queue: str, *, exclude: str | None = None) -> str:
+def head_position(
+    tx: Tx, queue: str, *, exclude: str | None = None, overlay: Overlay = None
+) -> str:
     """A key before every queued or held job of `queue` (but `exclude`): before every band, so
     it is also the top of any band."""
-    return _edge(tx, queue, exclude, tail=False)
+    return _edge(tx, queue, exclude, tail=False, overlay=overlay)
 
 
-def _edge(tx: Tx, queue: str, exclude: str | None, *, tail: bool) -> str:
+def _edge(tx: Tx, queue: str, exclude: str | None, *, tail: bool, overlay: Overlay) -> str:
     for attempt in range(2):
-        found = _live_positions(tx, queue, exclude)
+        found = _live_positions(tx, queue, exclude, overlay)
         try:
             if not found:
                 return integer_key(MIDPOINT)
@@ -130,49 +148,28 @@ def _edge(tx: Tx, queue: str, exclude: str | None, *, tail: bool) -> str:
         except OverflowError:
             if attempt:
                 raise JobsctlError("internal", "position keys are exhausted") from None
-            renumber(tx, queue)
+            renumber(tx, queue, overlay)
     raise AssertionError("unreachable")
 
 
 @dataclass(frozen=True)
 class Placement:
-    """Where a job goes: its new key and the band (pinned, priority) it lands in."""
+    """Where a job goes: its new key and the band (pinned, priority) it lands in.
+    `renumbered` holds the keys a dry run would have given the queue first (empty otherwise)."""
 
     position: str
     pinned: bool
     priority: int
+    renumbered: Mapping[str, str] = field(default_factory=dict)
 
 
 def _sort_key(row: Mapping[str, object] | sqlite3.Row) -> tuple[str, str]:
     return (str(row["position"]), str(row["id"]))
 
 
-def _band_neighbour(
-    tx: Tx, anchor: sqlite3.Row, job_id: str, *, before: bool
-) -> sqlite3.Row | None:
-    """The job directly before (or after) `anchor` among the queued and held jobs of its band,
-    not counting `job_id`."""
-    cmp, order = ("<", "DESC") if before else (">", "ASC")
-    return tx.one(
-        f"SELECT id, position FROM jobs WHERE queue = ? AND {_LIVE_SQL} AND pinned = ? "
-        f"AND priority = ? AND id != ? AND (position {cmp} ? OR (position = ? AND id {cmp} ?)) "
-        f"ORDER BY position {order}, id {order} LIMIT 1",
-        [
-            anchor["queue"],
-            anchor["pinned"],
-            anchor["priority"],
-            job_id,
-            anchor["position"],
-            anchor["position"],
-            anchor["id"],
-        ],
-    )
-
-
-def _fresh(tx: Tx, key: str, queue: str, exclude: str, lo: str | None) -> str:
+def _fresh(used: set[str], key: str, lo: str | None) -> str:
     """`key`, or the nearest key below it (above `lo`) that no other live job of the queue
     uses, so positions stay unique across bands."""
-    used = set(_live_positions(tx, queue, exclude))
     while key in used:
         key = key_between(lo, key)
     return key
@@ -185,20 +182,29 @@ def _row(tx: Tx, job_id: str) -> sqlite3.Row:
     return row
 
 
-def plan_move_relative(tx: Tx, job_id: str, other_id: str, *, before: bool) -> Placement | None:
+def plan_move_relative(
+    tx: Tx, job_id: str, other_id: str, *, before: bool, overlay: Overlay = None
+) -> Placement | None:
     """Placement that puts `job_id` directly before (or after) `other_id`, adopting its band.
-    `None` when the job already sits there. Both are queued or held jobs of one queue."""
+    `None` when the job already sits there (nothing is renumbered then). Both are queued or
+    held jobs of one queue."""
     for attempt in range(2):
-        job, other = _row(tx, job_id), _row(tx, other_id)
-        near = _band_neighbour(tx, other, job_id, before=before)
+        queue = str(_row(tx, job_id)["queue"])
+        live = _live_rows(tx, queue, overlay)
+        job = next(r for r in live if r["id"] == job_id)
+        other = next(r for r in live if r["id"] == other_id)
+        anchor = _sort_key(other)
+        band = [
+            r
+            for r in live
+            if (r["pinned"], r["priority"]) == (other["pinned"], other["priority"])
+            and r["id"] != job_id
+        ]
+        if before:
+            near = max((r for r in band if _sort_key(r) < anchor), key=_sort_key, default=None)
+        else:
+            near = min((r for r in band if _sort_key(r) > anchor), key=_sort_key, default=None)
         lo_row, hi_row = (near, other) if before else (other, near)
-        lo = None if lo_row is None else str(lo_row["position"])
-        hi = None if hi_row is None else str(hi_row["position"])
-        if lo is not None and hi is not None and lo >= hi:
-            if attempt:
-                raise JobsctlError("internal", "position keys could not be separated")
-            renumber(tx, str(job["queue"]))  # equal keys: give every job its own
-            continue
         in_band = (job["pinned"], job["priority"]) == (other["pinned"], other["priority"])
         here = _sort_key(job)
         if (
@@ -207,39 +213,48 @@ def plan_move_relative(tx: Tx, job_id: str, other_id: str, *, before: bool) -> P
             and (hi_row is None or here < _sort_key(hi_row))
         ):
             return None
+        lo = None if lo_row is None else str(lo_row["position"])
+        hi = None if hi_row is None else str(hi_row["position"])
+        if lo is not None and hi is not None and lo >= hi:
+            if attempt:
+                raise JobsctlError("internal", "position keys could not be separated")
+            renumber(tx, queue, overlay)  # equal keys: give every job its own
+            continue
+        used = {str(r["position"]) for r in live if r["id"] != job_id}
         try:
-            key = key_between(lo, hi)
+            key = _fresh(used, key_between(lo, hi), lo)
         except OverflowError:
             if attempt:
                 raise JobsctlError("internal", "position keys are exhausted") from None
-            renumber(tx, str(job["queue"]))
+            renumber(tx, queue, overlay)
             continue
         if len(key) > MAX_KEY_LENGTH and not attempt:
-            renumber(tx, str(job["queue"]))
+            renumber(tx, queue, overlay)
             continue
-        key = _fresh(tx, key, str(job["queue"]), job_id, lo)
-        return Placement(key, bool(other["pinned"]), int(other["priority"]))
+        renumbered = dict(overlay) if overlay else {}
+        return Placement(key, bool(other["pinned"]), int(str(other["priority"])), renumbered)
     raise AssertionError("unreachable")
 
 
-def plan_move_edge(tx: Tx, job_id: str, *, top: bool) -> Placement | None:
+def plan_move_edge(tx: Tx, job_id: str, *, top: bool, overlay: Overlay = None) -> Placement | None:
     """Placement at the top or bottom of the job's own band; `None` when it is already there."""
     job = _row(tx, job_id)
-    band = tx.all(
-        f"SELECT id, position FROM jobs WHERE queue = ? AND {_LIVE_SQL} AND pinned = ? "
-        "AND priority = ? AND id != ?",
-        [job["queue"], job["pinned"], job["priority"], job_id],
-    )
+    queue = str(job["queue"])
+    band = [
+        r
+        for r in _live_rows(tx, queue, overlay)
+        if (r["pinned"], r["priority"]) == (job["pinned"], job["priority"]) and r["id"] != job_id
+    ]
     here = _sort_key(job)
     if all((here < _sort_key(r)) if top else (here > _sort_key(r)) for r in band):
         return None
-    queue = str(job["queue"])
     key = (
-        head_position(tx, queue, exclude=job_id)
+        head_position(tx, queue, exclude=job_id, overlay=overlay)
         if top
-        else tail_position(tx, queue, exclude=job_id)
+        else tail_position(tx, queue, exclude=job_id, overlay=overlay)
     )
-    return Placement(key, bool(job["pinned"]), int(job["priority"]))
+    renumbered = dict(overlay) if overlay else {}
+    return Placement(key, bool(job["pinned"]), int(job["priority"]), renumbered)
 
 
 def apply_placement(tx: Tx, job_id: str, placement: Placement) -> None:
@@ -275,6 +290,27 @@ def rank(tx: Tx, row: sqlite3.Row | Mapping[str, object]) -> int:
     )
     assert found is not None
     return int(found["n"]) + 1
+
+
+def projected_rank(
+    tx: Tx, row: sqlite3.Row | Mapping[str, object], renumbered: Mapping[str, str]
+) -> int:
+    """`rank` of `row` as if the queue had the keys in `renumbered` (a dry run's pending
+    renumber); `row` already carries its own projected key."""
+    others = tx.all(
+        "SELECT id, position, pinned, priority FROM jobs WHERE queue = ? AND status = 'queued' "
+        "AND id != ?",
+        [row["queue"], row["id"]],
+    )
+
+    def order(r: sqlite3.Row | Mapping[str, object]) -> tuple[int, int, str, str]:
+        return (-int(str(r["pinned"])), -int(str(r["priority"])), str(r["position"]), str(r["id"]))
+
+    mine = order(row)
+    return 1 + sum(
+        order({**dict(r), "position": renumbered.get(str(r["id"]), r["position"])}) < mine
+        for r in others
+    )
 
 
 def blocked_by(
