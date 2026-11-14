@@ -147,27 +147,130 @@ def test_the_masking_length_threshold_is_eight_characters(
     assert ok(run_add(capsys, cfg_for(tmp_path, seven), flags))["created"] is True
 
 
+@pytest.mark.parametrize("field", FIELDS)
 def test_a_secret_name_is_refused_before_the_unique_key_hit_and_pass_env_warning(
-    capsys: pytest.CaptureFixture[str], tmp_path: Path
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, field: str
 ) -> None:
     cfg = cfg_for(tmp_path)
     assert run_add(capsys, cfg, ["--unique-key", "k1"]).code == 0
     before = state_text()
-    res = run_add(capsys, cfg, ["--unique-key", "k1", "--pass-env", TOKEN])
+    flags, code = name_flags(TOKEN)[field]
+    res = run_add(capsys, cfg, ["--unique-key", "k1", *flags])
     assert res.code == 2  # not the unique-key hit, not the pass_env_undefined warning
+    assert res.envelope()["error"]["details"] == {"code": code}
     assert state_text() == before
     assert log_records("unique_key_reused") == []
     assert_clean(res, TOKEN)
 
 
+@pytest.mark.parametrize("field", FIELDS)
+def test_a_secret_name_is_refused_before_strict_queues(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, field: str
+) -> None:
+    cfg = write_config(
+        tmp_path, strict_queues=True, env_file=write_env_file(tmp_path, f"API_TOKEN={TOKEN}\n")
+    )
+    flags, code = name_flags(TOKEN)[field]
+    res = run_add(capsys, cfg, ["--queue", "nowhere", *flags])
+    assert res.code == 2
+    assert res.envelope()["error"]["details"] == {"code": code}  # not unknown_queue
+    assert_clean(res, TOKEN)
+
+
+@pytest.mark.parametrize("field", FIELDS)
 def test_a_mask_env_value_is_refused_in_a_name(
-    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
 ) -> None:
     monkeypatch.setenv("MASKED_VAR", TOKEN)
     cfg = write_config(tmp_path, mask_env=["MASKED_VAR"], env={"inherit": ["MASKED_VAR"]})
-    res = run_add(capsys, cfg, ["--decision-id", TOKEN])
-    assert res.envelope()["error"]["details"] == {"code": "secret_in_decision_id"}
+    flags, code = name_flags(TOKEN)[field]
+    res = run_add(capsys, cfg, flags)
+    assert res.envelope()["error"]["details"] == {"code": code}
     assert_clean(res, TOKEN)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("json_mode", [False, True])
+@pytest.mark.parametrize(
+    ("flags", "code"),
+    [
+        (["--env", f"{TOKEN}=1", "--env", f"{TOKEN}=2"], "secret_in_env_name"),
+        (["--env", f"{TOKEN}=1", "--pass-env", TOKEN], "secret_in_env_name"),
+    ],
+)
+def test_duplicate_name_errors_never_echo_a_secret_name(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    flags: list[str],
+    code: str,
+    dry_run: bool,
+    json_mode: bool,
+) -> None:
+    cfg = cfg_for(tmp_path)
+    extra = ["--dry-run"] if dry_run else []
+    argv = ["add", "--config", cfg, *flags, *extra, "--cwd", "/work", "--", "true"]
+    res = run_cli(capsys, *(["--json"] if json_mode else []), *argv)
+    assert res.code == 2
+    if json_mode:
+        assert res.envelope()["error"]["details"] == {"code": code}
+    assert_clean(res, TOKEN)
+
+
+@pytest.mark.parametrize(
+    ("flags", "message"),
+    [
+        (["--env", "A=1", "--env", "A=2"], "--env A is given more than once"),
+        (["--env", "A=1", "--pass-env", "A"], "A is given with both --env and --pass-env"),
+    ],
+)
+def test_non_secret_duplicate_names_keep_their_usage_errors(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, flags: list[str], message: str
+) -> None:
+    res = run_cli(
+        capsys, "add", "--config", cfg_for(tmp_path), *flags, "--cwd", "/work", "--", "true"
+    )
+    assert res.code == 2
+    assert message in res.err
+
+
+def default_actor_cfg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, user: str, value: str
+) -> str:
+    monkeypatch.setattr("jobsctl.cli._stdin_isatty", lambda: True)
+    monkeypatch.setattr("jobsctl.cli.os_user_name", lambda: user)
+    return cfg_for(tmp_path, value)
+
+
+def test_a_secret_as_the_default_actor_user_name_is_refused(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = default_actor_cfg(tmp_path, monkeypatch, TOKEN, TOKEN)
+    res = run_add(capsys, cfg, [])
+    assert res.code == 2
+    assert res.envelope()["error"]["details"] == {"code": "secret_in_actor"}
+    assert_clean(res, TOKEN)
+
+
+def test_a_raw_user_name_that_sanitizing_would_rewrite_is_still_refused(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw = "abcd.efgh!ijk"  # sanitized to abcd.efgh_ijk, which is not the masked value
+    cfg = default_actor_cfg(tmp_path, monkeypatch, raw, raw)
+    res = run_add(capsys, cfg, [])
+    assert res.code == 2
+    assert res.envelope()["error"]["details"] == {"code": "secret_in_actor"}
+    assert_clean(res, raw)
+
+
+def test_an_explicit_actor_is_not_refused_for_the_raw_user_name(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw = "abcd.efgh!ijk"
+    cfg = default_actor_cfg(tmp_path, monkeypatch, raw, raw)
+    assert ok(run_add(capsys, cfg, ["--actor", "human:ann"]))["created"] is True
 
 
 def test_a_refused_add_changes_nothing_and_non_secret_names_are_unaffected(
@@ -181,7 +284,9 @@ def test_a_refused_add_changes_nothing_and_non_secret_names_are_unaffected(
             ["--actor", "human:ann", "--decision-id", "d-1", "--env", "A=1", "--pass-env", "B"],
         )
     )
-    assert doc["job"]["env"] == {"A": "1"} if "env" in doc["job"] else True
+    assert doc["job"]["env"] == {"A": "1"}
+    assert doc["job"]["pass_env"] == ["B"]
+    assert doc["job"]["actor"] == "human:ann"
     before = state_text()
     for field in FIELDS:
         flags, _ = name_flags(TOKEN)[field]
