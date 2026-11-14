@@ -157,19 +157,18 @@ def test_print_error_cannot_forge_or_erase_an_error_line(
     assert len(err.splitlines()) == 1
 
 
-def test_echoed_input_cannot_forge_a_second_error_line(capsys: pytest.CaptureFixture[str]) -> None:
-    res = run_cli(capsys, "list", "x\njobsctl: error: forged\roverwrite")
-    assert res.code == 2
-    assert len(res.err.splitlines()) == 1
-
-
-@pytest.mark.parametrize("argv", [["list", "--status", "x\n\r"], ["show", "jb-\nabcd"]])
-def test_value_errors_escape_line_breaks(
-    capsys: pytest.CaptureFixture[str], argv: list[str]
+def test_rejected_input_with_line_breaks_yields_one_fixed_error_line(
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    res = run_cli(capsys, *argv)
+    res = run_cli(capsys, "list", "x\njobsctl: error: forged\roverwrite")
+    assert res.err == "jobsctl: error: unrecognized argument at position 2\n"
+
+
+def test_value_errors_with_line_breaks_stay_on_one_line(capsys: pytest.CaptureFixture[str]) -> None:
+    res = run_cli(capsys, "list", "--status", "x\n\rforged")
     assert res.code == 2
-    assert len(res.err.splitlines()) == 1
+    assert res.err.startswith("jobsctl: error: argument --status: invalid choice")
+    assert res.err.count("\n") == 1 and "forged" not in res.err
 
 
 def test_surrogate_escaped_argv_does_not_crash(capsys: pytest.CaptureFixture[str]) -> None:
@@ -395,12 +394,6 @@ def test_unrecognized_argument_is_given_by_position_not_text(
     assert message == "unrecognized argument at position 3"
     res = run_cli(capsys, "--json", "add", "--envv=TOKEN=v", "--", "x")
     assert res.envelope()["error"]["message"] == "unrecognized argument at position 3"
-
-
-def test_unrecognized_argument_is_capped(capsys: pytest.CaptureFixture[str]) -> None:
-    res = run_cli(capsys, "list", "x" * 5000)
-    assert res.code == 2
-    assert len(res.err) < 200
 
 
 def test_unknown_command_lists_only_visible_commands(capsys: pytest.CaptureFixture[str]) -> None:

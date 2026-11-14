@@ -28,8 +28,23 @@ _INVALID_CHOICE = re.compile(
 # argparse messages that quote the input; each becomes "argument <name>: <text>".
 _ECHOING = (
     (re.compile(r"argument (\S+): ignored explicit argument .*", re.DOTALL), "takes no value"),
-    (re.compile(r"argument (\S+): invalid \w+ value: .*", re.DOTALL), "invalid value"),
+    (re.compile(r"argument (\S+): invalid .+ value: .*", re.DOTALL), "invalid value"),
 )
+# Marks an error raised by one of our own `type=` callables (see Parser._get_value): their text
+# states a rule and never quotes input. argv cannot contain NUL, so input cannot forge it.
+_OWN = "\x00"
+_OWN_ERROR = re.compile(r"argument (\S+): \x00(.*)", re.DOTALL)
+# The only argparse wording passed through unchanged: it names declared arguments, never input.
+_SAFE = tuple(
+    re.compile(pattern, re.DOTALL)
+    for pattern in (
+        r"the following arguments are required: [\w<>|.,= -]+",
+        r"one of the arguments [\w<>|.,= -]+ is required",
+        r"argument \S+: expected (one argument|at least one argument|\d+ arguments)",
+        r"argument \S+: not allowed with argument \S+",
+    )
+)
+GENERIC_MESSAGE = "invalid command line"
 
 
 class Parser(argparse.ArgumentParser):
@@ -49,21 +64,25 @@ class Parser(argparse.ArgumentParser):
         tokens = list(sys.argv[1:] if args is None else args)
         parsed, extras = self.parse_known_args(tokens, namespace)
         if extras:
-            self.error(self._unrecognized(extras[0], tokens))
+            raise usage_error(self._unrecognized(extras[0], tokens))  # ours: never filtered
         return parsed
 
     def _unrecognized(self, token: str, tokens: list[str]) -> str:
         name = token.partition("=")[0]
         if name in _declared_options(self):
             return "unrecognized argument: " + name
-        return f"unrecognized argument at position {tokens.index(token) + 1}"
+        # The same text can sit at several positions: name them all rather than guess one.
+        found = [str(i) for i, t in enumerate(tokens, 1) if t == token]
+        where = ", ".join(found[:-1]) + " or " + found[-1] if len(found) > 1 else found[0]
+        return f"unrecognized argument at position {where}"
 
     def error(self, message: str) -> Any:
         raise usage_error(self._message(message))
 
     def _message(self, message: str) -> str:
-        if message.startswith("ambiguous option: "):  # abbreviations are off; never quote anyway
-            return "ambiguous option"
+        own = _OWN_ERROR.fullmatch(message)
+        if own is not None:
+            return f"argument {own.group(1)}: {own.group(2)}"
         match = _INVALID_CHOICE.match(message)
         if match is not None:
             argument, _, choices = match.groups()
@@ -74,9 +93,19 @@ class Parser(argparse.ArgumentParser):
             found = pattern.match(message)
             if found is not None:
                 return f"argument {found.group(1)}: {text}"
-        if "invalid choice" in message:  # a format this code does not know: say nothing of it
-            return "invalid choice"
-        return message
+        if any(safe.fullmatch(message) for safe in _SAFE):
+            return message
+        return GENERIC_MESSAGE  # wording this code does not know may quote input: say nothing
+
+    def _get_value(self, action: argparse.Action, arg_string: str) -> Any:
+        try:
+            return super()._get_value(action, arg_string)
+        except argparse.ArgumentError as exc:
+            # argparse raises this from inside the `except ArgumentTypeError` block, so the
+            # context is our callable's error; mark it as ours, with its text intact.
+            if isinstance(exc.__context__, argparse.ArgumentTypeError):
+                raise argparse.ArgumentError(action, _OWN + str(exc.__context__)) from None
+            raise
 
     def _visible(self) -> list[str]:
         for action in self._actions:

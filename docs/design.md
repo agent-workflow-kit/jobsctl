@@ -85,7 +85,7 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 | `cli_registry.py` | the `@command` registry and the per-invocation `Context` |
 | `cli_output.py` | the error envelope and JSON line output (stdout with `--json`, stderr otherwise) |
 | `actors.py`, `checks.py`, `errors.py` | the actor grammar and the human-only gate; the usage, lookup, state, human check order; error codes, exit codes and the error envelope |
-| `textsafe.py` | the sanitizer for human output and echoed input |
+| `textsafe.py` | the sanitizer for human output (parse-time errors never echo input) |
 | `commands/` | one module per command group (`add`, `query` (list/show/wait/capacity/queues), `order` (move/pin/priority), `holds` (hold/release/resolve), `cancel`, `retry`, `labels`, `maintenance` (run/reconcile/prune/export), `cron`) |
 | `runner.py` | the pass: runner lease, identity checks, the `pass_requested` claim loop, selection, shim spawning and recording the shim's identity, reaping its own children, hand-off to `_deliver`, batched retention, checkpoint |
 | `shim.py` | `_shim`: schema check, identity confirmation (CAS on `claim_id`, polling while the pass has not recorded it), job lease wait, delivery of earlier events, start sequence (job re-reads and hook polling for cancel, atomic spawn), force-request check at every tail flush, output pump, timeout, signal sequence, result file, final transition |
