@@ -21,6 +21,7 @@ import sqlite3
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from jobsctl import gateway
@@ -30,8 +31,9 @@ from jobsctl.env_file import EnvFile
 from jobsctl.errors import JobsctlError, refused
 from jobsctl.hook_events import write_post_event
 from jobsctl.job_view import job_object, job_row
+from jobsctl.log_files import check_appendable
 from jobsctl.log_records import argv_sha256
-from jobsctl.log_writer import RecordWriter
+from jobsctl.log_writer import AUDIT_FILE, RecordWriter
 from jobsctl.store_db import OpenMode, Store, Tx
 from jobsctl.store_dir import resolve_state_dir
 from jobsctl.store_ops import transition_job, update_attempt_by_claim
@@ -43,7 +45,8 @@ TERMINAL = ("done", "failed", "canceled")
 @dataclass
 class Op:
     """One command invocation: the transaction (`None`: a dry run found no database), the clock
-    reading, who acts, and the records to append after the commit."""
+    reading (taken once the lock is held), who acts, and the records to append after the commit.
+    `audit_path` is the audit file, checked before an audited change is made."""
 
     tx: Tx | None
     config: Config
@@ -54,6 +57,7 @@ class Op:
     load_env: Callable[[], EnvFile]
     logs: list[tuple[str, dict[str, Any], str]] = field(default_factory=list)
     audits: list[dict[str, Any]] = field(default_factory=list)
+    audit_path: Path | None = None
     _env_unavailable: bool | None = None
 
     def env_unavailable(self) -> bool:
@@ -111,17 +115,19 @@ def run_manual[T](ctx: Context, body: Callable[[Op], T], *, load_env: Callable[[
     """Run `body` in one write transaction, or with `--dry-run` in a read transaction on a
     read-only connection that creates, repairs and migrates nothing (a missing or uninitialized
     database means no job exists)."""
-    now = format_timestamp(gateway.utc_now())
 
-    def make(tx: Tx | None, write: bool) -> Op:
+    def make(tx: Tx | None, write: bool, audit_path: Path | None = None) -> Op:
+        # the clock is read inside the transaction, after any lock wait, so a time taken here is
+        # never earlier than another command's time that committed first
         return Op(
             tx=tx,
             config=ctx.config,
             actor=ctx.actor,
             decision_ids=list(ctx.args.decision_id),
-            now=now,
+            now=format_timestamp(gateway.utc_now()),
             write=write,
             load_env=load_env,
+            audit_path=audit_path,
         )
 
     if ctx.args.dry_run:
@@ -135,7 +141,7 @@ def run_manual[T](ctx: Context, body: Callable[[Op], T], *, load_env: Callable[[
     with Store.open(busy_timeout=ctx.config.busy_timeout, mode=OpenMode.CLI) as store:
         writer = RecordWriter(store)
         with store.write() as tx:
-            op = make(tx, True)
+            op = make(tx, True, store.paths.root / AUDIT_FILE)
             result = body(op)
             tx.after_commit(lambda: _emit(writer, op))
         return result
@@ -172,6 +178,10 @@ def _transition(
     audit action recorded for it."""
     tx = op.tx
     assert tx is not None
+    if op.write and audit is not None:
+        # fail before changing anything when the record could not be appended after the commit
+        assert op.audit_path is not None
+        check_appendable(op.audit_path)
     updates = {"status_changed_at": op.now, **updates}
     attempt = _attempt_row(tx, row) if attempt_updates is not None else None
     if attempt_updates is not None and attempt is None:
@@ -308,7 +318,8 @@ def release(
 
 def cancel_held_or_queued_or_starting(op: Op, row: sqlite3.Row) -> Applied:
     """`queued`, `held` and `starting` become `canceled` (`canceled`) at once. A `held` job
-    with an attempt (`escalated`, `exit_13`) and a `starting` job end that attempt too."""
+    with an attempt (`escalated`, `exit_13`), a `starting` job and a `queued` job whose current
+    attempt is still `held` end that attempt too."""
     status = row["status"]
     assert status in ("queued", "held", "starting")
     updates: dict[str, Any] = {
@@ -328,6 +339,12 @@ def cancel_held_or_queued_or_starting(op: Op, row: sqlite3.Row) -> Applied:
         }
     elif status == "held" and row["hold_reason"] != "manual":
         attempt_updates = {"status": "canceled", "reason": "canceled", "hold_reason": None}
+    elif status == "queued" and op.tx is not None:
+        # released with --override-escalation (or retried after exit 13): the attempt still reads
+        # `held`; it ends with the job
+        attempt = _attempt_row(op.tx, row)
+        if attempt is not None and attempt["status"] == "held":
+            attempt_updates = {"status": "canceled", "reason": "canceled", "hold_reason": None}
     return _transition(
         op,
         row,

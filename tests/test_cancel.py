@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from jobsctl.store_dir import resolve_state_dir
 from tests.conftest import validate_against
 from tests.helpers import Result, run_cli
 from tests.manual_helpers import (
@@ -351,3 +352,79 @@ def test_injection_shaped_selector_values_match_nothing(
         assert cancel(capsys, *flags, "--all").code == 2  # refused by the value grammars
     assert done(cancel(capsys, "--label", "a=2", "--all"))["jobs"] == []
     assert row(job_id)["status"] == "queued"
+
+
+def test_cancel_of_a_queued_job_with_a_held_attempt_ends_that_attempt(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    job_id = add_job(capsys)
+    make_held(job_id, "escalated", ("gate",))
+    sql("UPDATE jobs SET status = 'queued', hold_reason = NULL WHERE id = ?", job_id)
+    before = table_dump()
+    projected = one(cancel(capsys, job_id, "--dry-run"))["jobs"][0]
+    assert table_dump() == before
+    doc = one(cancel(capsys, job_id))
+    job = doc["jobs"][0]
+    assert job["status"] == "canceled" and job["hold_reason"] is None
+    attempt = attempt_row(job_id)
+    assert attempt["status"] == "canceled" and attempt["reason"] == "canceled"
+    assert attempt["hold_reason"] is None
+    assert attempt["ended_at"] == "2026-01-01T00:00:02.000Z"
+    clock = {"ended_at", "status_changed_at"}
+    assert {k: v for k, v in projected.items() if k not in clock} == {
+        k: v for k, v in job.items() if k not in clock
+    }
+
+
+@pytest.mark.parametrize("kind", ["directory", "dev_null_symlink"])
+def test_unusable_audit_file_fails_a_held_cancel_before_it_commits(
+    capsys: pytest.CaptureFixture[str], kind: str
+) -> None:
+    job_id = add_job(capsys)
+    queued = add_job(capsys)
+    make_held(job_id, "manual")
+    audit = resolve_state_dir() / "audit.jsonl"
+    if kind == "directory":
+        audit.mkdir()
+    else:
+        audit.symlink_to("/dev/null")
+    res = cancel(capsys, job_id, *HUMAN)
+    assert res.code != 0
+    assert row(job_id)["status"] == "held" and log_records("transition") == []
+    assert outbox() == []
+    # a cancel that is not audited does not need the audit file
+    assert one(cancel(capsys, queued))["jobs"][0]["status"] == "canceled"
+    # --all rolls back the whole command
+    again = add_job(capsys)
+    res = cancel(capsys, "--queue", "default", "--all", *HUMAN)
+    assert res.code != 0
+    assert row(job_id)["status"] == "held" and row(again)["status"] == "queued"
+
+
+def test_the_clock_is_read_after_the_write_lock_is_held(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    from jobsctl import gateway
+    from jobsctl.store_db import Store
+
+    job_id = add_job(capsys)
+    events: list[str] = []
+    real_write = Store.write
+    real_now = gateway.utc_now
+
+    @contextmanager
+    def spy_write(self: Store) -> Any:
+        with real_write(self) as tx:
+            events.append("locked")
+            yield tx
+
+    def spy_now() -> Any:
+        events.append("now")
+        return real_now()
+
+    monkeypatch.setattr(Store, "write", spy_write)
+    monkeypatch.setattr(gateway, "utc_now", spy_now)
+    one(cancel(capsys, job_id))
+    assert events[:2] == ["locked", "now"]

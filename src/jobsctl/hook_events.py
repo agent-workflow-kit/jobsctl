@@ -2,12 +2,12 @@
 
 A transition and its post hook event are committed in one transaction. This module builds the
 payload (`schemas/hooks/payload.json`) and inserts the event; running the hook is delivery
-(TODO(#24)). One event is written per transition and hook name, when at least one configured
-entry of that hook selects the job (`queues`, `exclude_queues`, `labels`, evaluated at transition
-time against the job as it is after the transition). The `output_tail` is always `null` here:
-whether a hook opts into the tail (`include_output`) is decided per entry at delivery, which
-reads the stored tail then (TODO(#24)). The event is `async` when every selecting entry is.
-"""
+(TODO(#24)). Up to two events are written per transition and hook name: one when at least
+one synchronous entry of that hook selects the job (`async` 0) and one when at least one `async`
+entry does (`async` 1); each has its own event id (`queues`, `exclude_queues`, `labels`,
+evaluated at transition time against the job as it is after the transition). The `output_tail`
+is always `null` here: whether a hook opts into the tail (`include_output`) is decided per entry
+at delivery, which reads the stored tail then (TODO(#24))."""
 
 from __future__ import annotations
 
@@ -90,37 +90,41 @@ def write_post_event(
     attempt: sqlite3.Row | None,
     now: str,
 ) -> bool:
-    """Insert the outbox event of `hook` for a transition that just happened (`job` is the job
-    object after it, `attempt` the attempt row after it, when the transition involved one).
-    Returns whether an event was written."""
+    """Insert the outbox events of `hook` for a transition that just happened (`job` is the job
+    object after it, `attempt` the attempt row after it, when the transition involved one): one
+    for the selecting synchronous entries, then one for the selecting `async` entries. Returns
+    whether an event was written."""
     entries = selecting_entries(config, hook, job["queue"], job["labels"])
-    if not entries:
-        return False
-    number = counter_incr(tx, EVENT_COUNTER)
-    event_id = f"{job['id']}:{hook}:{number}"
-    payload = {
-        "tool": "jobsctl",
-        "hook": hook,
-        "event_id": event_id,
-        "object_type": "job",
-        "object_id": job["id"],
-        "repo": None,
-        "labels": job["labels"],
-        "previous_status": previous_status,
-        "job": hook_job(job),
-        "attempt": None if attempt is None else attempt_object(attempt),
-        "output_available": _output_available(tx, attempt),
-        "output_tail": None,
-    }
-    outbox_insert(
-        tx,
-        job["id"],
-        OutboxEvent(
-            event_id=event_id,
-            hook=hook,
-            payload=payload,
-            created_at=now,
-            is_async=all(getattr(entry, "async_", False) for entry in entries),
-        ),
-    )
-    return True
+    written = False
+    for is_async in (False, True):
+        if not any(bool(getattr(entry, "async_", False)) == is_async for entry in entries):
+            continue
+        number = counter_incr(tx, EVENT_COUNTER)
+        event_id = f"{job['id']}:{hook}:{number}"
+        payload = {
+            "tool": "jobsctl",
+            "hook": hook,
+            "event_id": event_id,
+            "object_type": "job",
+            "object_id": job["id"],
+            "repo": None,
+            "labels": job["labels"],
+            "previous_status": previous_status,
+            "job": hook_job(job),
+            "attempt": None if attempt is None else attempt_object(attempt),
+            "output_available": _output_available(tx, attempt),
+            "output_tail": None,
+        }
+        outbox_insert(
+            tx,
+            job["id"],
+            OutboxEvent(
+                event_id=event_id,
+                hook=hook,
+                payload=payload,
+                created_at=now,
+                is_async=is_async,
+            ),
+        )
+        written = True
+    return written

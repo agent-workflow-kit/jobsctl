@@ -171,7 +171,10 @@ def test_gate_passes_on_a_tty(
 
 @pytest.fixture
 def real_browse_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
-    """A command module another issue could add under `commands/`, registering `browse`."""
+    """A command module another issue could add under `commands/`, registering `browse`.
+
+    A real `browse` handler (a later issue) is set aside while the fake registers and put back
+    afterwards, so the test holds whether or not the real command exists."""
     package_dir = tmp_path / "fakecmds"
     package_dir.mkdir()
     (package_dir / "fake_browse.py").write_text(
@@ -179,9 +182,12 @@ def real_browse_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
         "@command('browse')\ndef browse(ctx):\n    return 7\n"
     )
     real_table = cli_registry._HANDLERS
+    saved = real_table.pop("browse", None)
     monkeypatch.setattr(commands, "__path__", [*commands.__path__, str(package_dir)])
     yield "fake_browse"
     real_table.pop("browse", None)
+    if saved is not None:
+        real_table["browse"] = saved
     sys.modules.pop("jobsctl.commands.fake_browse", None)
 
 

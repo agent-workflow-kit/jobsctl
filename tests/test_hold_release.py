@@ -190,6 +190,30 @@ def test_async_hooks_mark_the_event_async(
     assert outbox()[0]["async"] == 1
 
 
+def test_a_mixed_sync_and_async_list_writes_one_event_per_kind(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    cfg = config_file(
+        tmp_path,
+        hooks={
+            "post-held": [
+                {"name": "a", "cmd": "true", "async": True},
+                {"name": "b", "cmd": "true"},
+                {"name": "c", "cmd": "true", "async": True, "queues": ["other"]},
+            ]
+        },
+    )
+    job_id = add_job(capsys, config=cfg)
+    assert run_cli(capsys, "--config", cfg, "--json", "hold", job_id).code == 0
+    sync_event, async_event = outbox()
+    assert (sync_event["async"], async_event["async"]) == (0, 1)
+    assert sync_event["event_id"] != async_event["event_id"]
+    assert sync_event["event_id"].startswith(f"{job_id}:post-held:")
+    for event in (sync_event, async_event):
+        assert event["payload"]["event_id"] == event["event_id"]
+        validate_against("hooks/post-held.json", event["payload"])
+
+
 # -- release ---------------------------------------------------------------------------------
 
 
@@ -366,3 +390,14 @@ def test_release_keeps_the_event_log_valid_json_lines(capsys: pytest.CaptureFixt
     release_cli(capsys, job_id)
     for line in (resolve_state_dir() / "log.jsonl").read_text().splitlines():
         json.loads(line)
+
+
+def test_unusable_audit_file_fails_an_override_release_before_it_commits(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    job_id = add_job(capsys)
+    make_held(job_id, "escalated", ("gate",))
+    (resolve_state_dir() / "audit.jsonl").mkdir()
+    res = release_cli(capsys, job_id, "--override-escalation", *HUMAN)
+    assert res.code != 0
+    assert row(job_id)["status"] == "held" and log_records("transition") == []

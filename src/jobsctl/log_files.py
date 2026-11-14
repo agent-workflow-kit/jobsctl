@@ -54,6 +54,12 @@ def open_append(path: Path) -> int:
     return fd
 
 
+def check_appendable(path: Path) -> None:
+    """Raise the `internal` error an append to ``path`` would raise for an unsafe file, without
+    writing (the file is created empty when it is missing, as an append would)."""
+    os.close(open_append(path))
+
+
 def _same_file(fd: int, path: Path) -> bool:
     """Is ``path`` still the file ``fd`` refers to (it may have been rotated away)?"""
     try:
