@@ -81,11 +81,21 @@ class Holder:
         return format_timestamp(limit) > _last_renewal(self.expires_at)
 
 
+def _since(since_ms: object, fallback: str) -> str:
+    if since_ms is None:
+        return fallback
+    return format_timestamp(dt.datetime.fromtimestamp(int(str(since_ms)) / 1000, dt.UTC))
+
+
 def _last_renewal(expires_at: str) -> str:
     return format_timestamp(parse_timestamp(expires_at) - dt.timedelta(seconds=LEASE_TTL_SECONDS))
 
 
-LEASE_COLUMNS = "SELECT holder_identity, expires_at, since FROM leases WHERE name = ?"
+LEASE_COLUMNS = (
+    "SELECT holder_identity, expires_at, "
+    "(SELECT value FROM counters WHERE name = 'lease_since:' || leases.name) AS since_ms "
+    "FROM leases WHERE name = ?"
+)
 
 
 def live_holder(store: Store, name: str, host: Host, now: dt.datetime) -> Holder | None:
@@ -97,7 +107,7 @@ def live_holder(store: Store, name: str, host: Host, now: dt.datetime) -> Holder
 def holder_of(row: sqlite3.Row | None, host: Host, now: dt.datetime) -> Holder | None:
     if row is None:
         return None
-    ident_text, expires_at, since = row["holder_identity"], row["expires_at"], row["since"]
+    ident_text, expires_at, since_ms = row["holder_identity"], row["expires_at"], row["since_ms"]
     alive = liveness_probe(host)(str(ident_text))
     if alive is False:
         return None
@@ -107,6 +117,6 @@ def holder_of(row: sqlite3.Row | None, host: Host, now: dt.datetime) -> Holder |
     return Holder(
         str(ident_text),
         None if ident is None else ident.pid,
-        str(since or expires_at),
+        _since(since_ms, str(expires_at)),
         str(expires_at),
     )

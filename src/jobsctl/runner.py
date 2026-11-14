@@ -137,6 +137,7 @@ class Runner:
         self._env_file: EnvFile | None = None
         self._last_renew = 0.0
         self._seen: int | None = None
+        self.probe: Callable[[str], None] | None = None  # tests: called at the start of each step
 
     # -- the pass ------------------------------------------------------------------------------
 
@@ -191,23 +192,24 @@ class Runner:
         return result
 
     def _locked_pass(self, result: PassResult, max_starts: int | None) -> bool:
-        self._step()
+        self._step("reconcile")
         self.reap(result)
         self.reconcile(self, result)
         total = 0
         while True:
-            self._step()
+            self._step("claim")
             seen, claims = self._claim(result, None if max_starts is None else max_starts - total)
             self._seen = seen
             total += len(claims)
             for claim in claims:
-                self._step()
+                self._step("spawn")
                 self._spawn_shim(claim, result)
-            self._step()
+            self._step("delivery")
             self._guarded("delivery", result, self._request_delivery)
-            self._step()
+            self._step("retention")
             self._guarded("retention", result, self._retention)
             self._checkpoint()
+            self._step("release")
             if self._release_if_unchanged(seen):
                 break
         if result.started or result.reconciled or result.changed:
@@ -226,9 +228,11 @@ class Runner:
 
     # -- steps ---------------------------------------------------------------------------------
 
-    def _step(self) -> None:
-        """Renew the lease (every step; at most every 15 s of work between renewals matters, but
-        a renewal is one cheap compare-and-set)."""
+    def _step(self, name: str) -> None:
+        """Start a step: call the test probe, then renew the lease if a third of the renewal
+        interval has passed (one cheap compare-and-set)."""
+        if self.probe is not None:
+            self.probe(name)
         if gateway.monotonic() - self._last_renew < RENEW_SECONDS / 3:
             return
         now = self.clock()

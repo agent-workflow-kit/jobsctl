@@ -1,0 +1,547 @@
+"""The pass, in process (interface.md, Pass). Shims are fake executables from ``runner_helpers``;
+the process-level behavior with several real processes is in ``test_runner_processes.py``."""
+
+from __future__ import annotations
+
+import datetime as dt
+import os
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from jobsctl import gateway
+from jobsctl.config import Config
+from jobsctl.errors import JobsctlError
+from jobsctl.leases import expiry, own_identity
+from jobsctl.proc_host import default_host
+from jobsctl.retention import PruneResult
+from jobsctl.runner import LeaseLost, Runner
+from jobsctl.store_db import Store
+from jobsctl.store_ops import counter_get, counter_incr, lease_since, take_lease
+from jobsctl.timestamps import format_timestamp
+from jobsctl.triggers import PASS_REQUESTED, request_pass
+from tests.conftest import validate_against, validate_record_file
+from tests.runner_helpers import (
+    ShimKit,
+    add_queued,
+    attempts_of,
+    job_ids,
+    job_row,
+    make_runner,
+)
+from tests.store_helpers import insert_row
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> Iterator[Store]:
+    with Store.open(tmp_path / "state") as s:
+        yield s
+
+
+class FakeProc:
+    def __init__(self, pid: int = 4_000_000) -> None:
+        self.pid = pid
+
+    def poll(self) -> int:
+        return 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+    def kill(self) -> None:
+        return None
+
+
+@pytest.fixture
+def spawned(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Replace the process spawn: record argv, env and cwd, start nothing."""
+    calls: list[dict[str, Any]] = []
+
+    def fake(argv: list[str], *, env: dict[str, str], cwd: str) -> FakeProc:
+        calls.append({"argv": argv, "env": env, "cwd": cwd})
+        return FakeProc()
+
+    monkeypatch.setattr(gateway, "spawn_detached", fake)
+    return calls
+
+
+def cfg(**keys: Any) -> Config:
+    return Config.model_validate(keys)
+
+
+def lease_row(store: Store) -> Any:
+    return store.query_one("SELECT * FROM leases WHERE name = 'runner'")
+
+
+def log_events(store: Store) -> list[dict[str, Any]]:
+    path = store.paths.root / "log.jsonl"
+    return validate_record_file(path, "log.json") if path.exists() else []
+
+
+# -- a pass that claims and spawns ---------------------------------------------------------------
+
+
+def test_a_pass_claims_spawns_a_detached_shim_and_records_its_identity(
+    store: Store,
+    kit: ShimKit,
+    runners: list[Runner],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("JOBSCTL_SECRET", "hunter2")
+    monkeypatch.setenv("TOKEN_FROM_ENV_FILE", "not-inherited")
+    (job_id,) = job_ids(1)
+    add_queued(store, job_id)
+    runner = make_runner(runners, store, kit=kit)
+    leaked = str(tmp_path / "leak-me")
+    fd = os.open(leaked, os.O_CREAT | os.O_WRONLY, 0o600)
+    os.set_inheritable(fd, True)
+    try:
+        result = runner.run_pass()
+    finally:
+        os.close(fd)
+    assert result.started == [job_id] and not result.already_running
+    validate_against("cli/run.json", result.as_json())
+    (attempt,) = attempts_of(store, job_id)
+    record = kit.record(job_id)
+    assert attempt["shim_identity"].endswith(
+        f":{record['pid']}:{attempt['shim_identity'].split(':')[-1]}"
+    )
+    assert attempt["shim_identity"].split(":")[-2] == str(record["pid"])
+    assert attempt["claimed_by"] == own_identity(default_host())
+    assert attempt["claim_id"] == record["argv"][-1] and record["argv"][-2] == job_id
+    assert record["argv"][:4] == ["-I", "-m", "jobsctl", "_shim"]
+    assert record["sid"] == record["pid"] != os.getsid(0)  # its own session
+    assert record["cwd"] == str(store.paths.root)
+    assert record["fds"]["0"] == record["fds"]["1"] == record["fds"]["2"] == "/dev/null"
+    assert leaked not in record["fds"].values()  # a descriptor the parent left inheritable
+    others = {k: v for k, v in record["fds"].items() if int(k) > 2}
+    assert all(v.startswith(("/proc/", "/sys/")) for v in others.values()), others
+    assert not any(k.startswith("JOBSCTL_") for k in record["env"])
+    assert "hunter2" not in str(record["env"])
+    assert lease_row(store) is None  # released
+    events = [e["event"] for e in log_events(store)]
+    assert events == ["transition", "shim_spawned", "pass"]
+
+
+def test_the_spawn_argument_vector_and_config_hand_off(
+    store: Store, spawned: list[dict[str, Any]], runners: list[Runner], tmp_path: Path
+) -> None:
+    (job_id,) = job_ids(1)
+    add_queued(store, job_id)
+    conf = tmp_path / "c.yaml"
+    runner = make_runner(runners, store, config_path=conf, python="/opt/py")
+    monkey_identity(runner)
+    runner.run_pass()
+    (call,) = spawned
+    claim_id = attempts_of(store, job_id)[0]["claim_id"]
+    assert call["argv"] == [
+        "/opt/py",
+        "-I",
+        "-m",
+        "jobsctl",
+        "--config",
+        str(conf),
+        "_shim",
+        job_id,
+        claim_id,
+    ]
+    assert call["cwd"] == str(store.paths.root)
+    assert not any(k.startswith("JOBSCTL_") for k in call["env"])
+
+
+def monkey_identity(runner: Runner) -> None:
+    """The fake spawn has no process behind it: identify this process instead."""
+    import jobsctl.runner as module
+
+    module.identity_text = lambda host, pid: own_identity(host)  # type: ignore[assignment]
+
+
+@pytest.fixture(autouse=True)
+def restore_identity() -> Iterator[None]:
+    import jobsctl.runner as module
+
+    original = module.identity_text
+    yield
+    module.identity_text = original
+
+
+def test_max_starts_counts_claims_across_the_repeated_claim_loop(
+    store: Store, kit: ShimKit, runners: list[Runner]
+) -> None:
+    ids = job_ids(5)
+    for i, job_id in enumerate(ids):
+        add_queued(store, job_id, position=f"{i + 1:020d}")
+    runner = make_runner(runners, store, cfg(default_cap=None), kit=kit)
+    extra = []
+
+    def probe(step: str) -> None:
+        if step == "retention" and not extra:
+            extra.append(1)
+            with Store.open(store.paths.root) as other:
+                request_pass(other, cfg(), None)  # a trigger mid-pass: the claim loop repeats
+
+    runner.probe = probe
+    result = runner.run_pass(max_starts=2)
+    assert result.started == ids[:2]
+    assert {job_row(store, j)["status"] for j in ids[2:]} == {"queued"}
+
+
+def test_a_request_during_the_pass_repeats_the_claim_loop_and_spawns_no_pass(
+    store: Store, kit: ShimKit, runners: list[Runner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second = job_ids(2)
+    add_queued(store, first, queue="a")
+    runner = make_runner(runners, store, cfg(default_cap=None), kit=kit)
+    seen: list[str] = []
+
+    def probe(step: str) -> None:
+        seen.append(step)
+        if step == "release" and len([s for s in seen if s == "release"]) == 1:
+            with Store.open(store.paths.root) as other:
+                add_queued(other, second, queue="b")
+                called: list[object] = []
+                with monkeypatch.context() as patch:
+                    patch.setattr(gateway, "spawn_detached", lambda *a, **k: called.append(1))
+                    request_pass(other, cfg(), None)  # the holder (this process) is alive
+                assert called == []  # a live holder: no pass is spawned, the request is kept
+
+    runner.probe = probe
+    result = runner.run_pass()
+    assert result.started == [first, second]
+    assert seen.count("claim") == 2 and seen.count("release") == 2
+    assert lease_row(store) is None
+    assert counter_get_(store, PASS_REQUESTED) == 1
+
+
+def counter_get_(store: Store, name: str) -> int:
+    with store.write() as tx:
+        return counter_get(tx, name)
+
+
+# -- the lease -----------------------------------------------------------------------------------
+
+
+def test_a_live_holder_means_already_running_with_its_pid_and_start(
+    store: Store, runners: list[Runner], sleeper: str
+) -> None:
+    now = dt.datetime.now(dt.UTC)
+    assert take_lease(
+        store, "runner", sleeper, now=format_timestamp(now), expires_at=expiry(now),
+        is_alive=lambda _h: True,
+    )  # fmt: skip
+    since = lease_since(store, "runner")
+    assert since == format_timestamp(now)
+    runner = make_runner(runners, store)
+    result = runner.run_pass()
+    assert result.already_running and result.started == [] and result.reconciled == []
+    document = result.as_json()
+    assert document["holder"] == {"pid": int(sleeper.split(":")[1]), "since": since}
+    validate_against("cli/run.json", document)
+    assert lease_row(store) is not None  # not ours: untouched
+
+
+def test_a_dead_holder_is_replaced(store: Store, runners: list[Runner]) -> None:
+    now = dt.datetime.now(dt.UTC)
+    with store.write() as tx:
+        tx.execute(
+            "INSERT INTO leases (name, holder_identity, expires_at) VALUES ('runner', ?, ?)",
+            ["other-boot:42:7", expiry(now)],
+        )
+    result = make_runner(runners, store).run_pass()
+    assert not result.already_running and lease_row(store) is None
+
+
+@pytest.mark.parametrize(("offset", "taken"), [(120, False), (-120, True)])
+def test_an_inconclusive_holder_counts_until_the_lease_expires(
+    store: Store, runners: list[Runner], offset: int, taken: bool
+) -> None:
+    now = dt.datetime.now(dt.UTC)
+    when = format_timestamp(now + dt.timedelta(seconds=offset))
+    with store.write() as tx:
+        tx.execute(
+            "INSERT INTO leases (name, holder_identity, expires_at) VALUES ('runner', 'opaque', ?)",
+            [when],
+        )
+    result = make_runner(runners, store).run_pass()
+    assert result.already_running is (not taken)
+    if not taken:  # a holder that is not one of ours has no pid to report
+        assert result.holder is not None and result.holder.pid is None
+        assert result.as_json()["holder"] is None
+
+
+def test_a_live_holder_that_stopped_renewing_is_logged_stuck_once(
+    store: Store, runners: list[Runner], sleeper: str
+) -> None:
+    long_ago = format_timestamp(dt.datetime.now(dt.UTC) - dt.timedelta(minutes=30))
+    with store.write() as tx:
+        tx.execute(
+            "INSERT INTO leases (name, holder_identity, expires_at) VALUES ('runner', ?, ?)",
+            [sleeper, long_ago],
+        )
+    for _ in range(2):
+        assert make_runner(runners, store).run_pass().already_running
+    stuck = [e for e in log_events(store) if e["event"] == "runner_stuck"]
+    assert len(stuck) == 1 and stuck[0]["level"] == "warn"
+
+
+def test_a_pass_that_lost_its_lease_stops_and_leaves_the_new_holder(
+    store: Store, kit: ShimKit, runners: list[Runner]
+) -> None:
+    (job_id,) = job_ids(1)
+    add_queued(store, job_id)
+    runner = make_runner(runners, store, kit=kit)
+
+    def probe(step: str) -> None:
+        if step == "claim":
+            with store.write() as tx:
+                tx.execute("UPDATE leases SET holder_identity = 'thief:1:1' WHERE name = 'runner'")
+            runner._last_renew = -1e9  # make the step renew now
+
+    runner.probe = probe
+    with pytest.raises(LeaseLost):
+        runner.run_pass()
+    assert lease_row(store)["holder_identity"] == "thief:1:1"
+    assert job_row(store, job_id)["status"] == "queued"
+
+
+def test_an_error_in_a_step_releases_the_lease(store: Store, runners: list[Runner]) -> None:
+    runner = make_runner(runners, store)
+
+    def probe(step: str) -> None:
+        if step == "claim":
+            raise RuntimeError("boom")
+
+    runner.probe = probe
+    with pytest.raises(RuntimeError):
+        runner.run_pass()
+    assert lease_row(store) is None
+
+
+def test_an_abandoned_pass_passes_a_request_on(
+    store: Store, runners: list[Runner], spawned: list[dict[str, Any]]
+) -> None:
+    runner = make_runner(runners, store)
+
+    def probe(step: str) -> None:
+        if step == "delivery":
+            with Store.open(store.paths.root) as other:
+                with other.write() as tx:
+                    counter_incr(tx, PASS_REQUESTED)
+            raise RuntimeError("boom")
+
+    runner.probe = probe
+    with pytest.raises(RuntimeError):
+        runner.run_pass()
+    (call,) = spawned
+    assert call["argv"][-4:] == ["run", "--quiet", "--triggered", "0"]
+
+
+# -- spawn failures and reaping ------------------------------------------------------------------
+
+
+def test_a_missing_interpreter_requeues_then_fails_for_good_on_the_third_try(
+    store: Store, runners: list[Runner]
+) -> None:
+    (job_id,) = job_ids(1)
+    add_queued(store, job_id, position="9".zfill(20))
+    runner = make_runner(runners, store, python="/nonexistent/python")
+    for n in (1, 2):
+        result = runner.run_pass()
+        assert result.started == []
+        (warning,) = result.warnings
+        assert warning["code"] == "shim_spawn_failed" and warning["job_id"] == job_id
+        validate_against("cli/run.json", result.as_json())
+        row = job_row(store, job_id)
+        assert (row["status"], row["spawn_failures"], row["position"]) == (
+            "queued",
+            n,
+            "9".zfill(20),
+        )
+        assert attempts_of(store, job_id) == []
+    result = runner.run_pass()
+    row = job_row(store, job_id)
+    assert (row["status"], row["reason"]) == ("failed", "spawn_failed")
+    assert [a["status"] for a in attempts_of(store, job_id)] == ["failed"]
+    assert result.warnings[0]["job_id"] == job_id
+    assert runner.run_pass().started == []  # final: never claimed again
+    assert lease_row(store) is None
+
+
+def test_an_unreadable_shim_identity_requeues_and_keeps_the_handle_for_reaping(
+    store: Store, kit: ShimKit, runners: list[Runner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl.proc_identity import ProcessGone
+
+    (job_id,) = job_ids(1)
+    add_queued(store, job_id)
+
+    def gone(host: object, pid: int) -> str:
+        raise ProcessGone(pid)
+
+    monkeypatch.setattr("jobsctl.runner.identity_text", gone)
+    runner = make_runner(runners, store, kit=kit)
+    result = runner.run_pass()
+    assert result.started == [] and result.warnings[0]["code"] == "shim_spawn_failed"
+    assert job_row(store, job_id)["status"] == "queued"
+    assert len(runner.children) == 1  # still reaped by its handle; never signaled by the pass
+
+
+def test_a_shim_child_that_exits_unconfirmed_is_requeued_as_claim_orphaned(
+    store: Store, runners: list[Runner]
+) -> None:
+    (job_id,) = job_ids(1)
+    add_queued(store, job_id, position="3".zfill(20))
+    runner = make_runner(runners, store, python="/bin/true")
+    first = runner.run_pass()
+    assert first.started == [job_id] and first.reconciled == []
+    assert job_row(store, job_id)["status"] == "starting"
+    runner.children[0].popen.wait(timeout=10)
+    second = runner.run_pass()
+    assert {
+        "job_id": job_id,
+        "finding": "claim_orphaned",
+        "action": "requeued",
+    } in second.reconciled
+    validate_against("cli/run.json", second.as_json())
+    # requeued, then claimed again by the same pass: a new attempt, no spawn failure counted
+    row = job_row(store, job_id)
+    assert row["spawn_failures"] == 0 and row["position"] == "3".zfill(20)
+    assert any(
+        e["event"] == "reconcile" and e["finding"] == "claim_orphaned" for e in log_events(store)
+    )
+
+
+def test_a_confirmed_shim_that_exits_is_left_to_reconcile(
+    store: Store, runners: list[Runner]
+) -> None:
+    (job_id,) = job_ids(1)
+    add_queued(store, job_id)
+    runner = make_runner(runners, store, cfg(default_cap=1), python="/bin/true")
+    runner.run_pass()
+    with store.write() as tx:
+        tx.execute("UPDATE attempts SET shim_confirmed_at = ?", ["2026-01-01T00:00:00.000Z"])
+    runner.children[0].popen.wait(timeout=10)
+    result = runner.run_pass()
+    assert result.reconciled == []
+    assert job_row(store, job_id)["status"] == "starting"  # TODO(#22): shim_dead
+
+
+# -- the other steps -----------------------------------------------------------------------------
+
+
+def test_retention_runs_with_the_pass_clock_and_config(
+    store: Store, runners: list[Runner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake(store_: Store, writer: object, **kwargs: Any) -> PruneResult:
+        calls.append(kwargs)
+        return PruneResult()
+
+    monkeypatch.setattr("jobsctl.runner.run_retention", fake)
+    conf = cfg(retention="1h", queues={"known": {"cap": 2}})
+    make_runner(runners, store, conf).run_pass()
+    (kwargs,) = calls
+    assert kwargs["retention"] == 3600
+    assert set(kwargs["configured_queues"]) == {"known"}
+    assert isinstance(kwargs["now"], dt.datetime) and kwargs["now"].tzinfo is not None
+
+
+@pytest.mark.parametrize("failure", ["audit", "busy", "oserror"])
+def test_a_failed_retention_does_not_skip_the_checkpoint_or_the_release(
+    store: Store, runners: list[Runner], monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    def fake(store_: Store, writer: object, **kwargs: Any) -> PruneResult:
+        if failure == "busy":
+            raise JobsctlError("busy", "state.db is busy")
+        if failure == "oserror":
+            raise OSError("disk")
+        return PruneResult(audit_error=RuntimeError("audit"))
+
+    monkeypatch.setattr("jobsctl.runner.run_retention", fake)
+    checkpoints: list[int] = []
+    runner = make_runner(runners, store)
+    original = runner._checkpoint
+    runner._checkpoint = lambda: (checkpoints.append(1), original())[1]  # type: ignore[method-assign]
+    result = runner.run_pass()
+    assert not result.already_running and checkpoints == [1] and lease_row(store) is None
+    (warn,) = [e for e in log_events(store) if e["event"] == "pass"]
+    assert warn["level"] == "warn" and warn["details"]["step"] == "retention"
+
+
+def test_delivery_is_requested_for_undelivered_events_unless_a_holder_is_alive(
+    store: Store, runners: list[Runner], spawned: list[dict[str, Any]]
+) -> None:
+    (job_id,) = job_ids(1)
+    add_queued(store, job_id, status="failed")
+    with store.write() as tx:
+        insert_row(
+            tx, "hook_outbox",
+            {"event_id": "e1", "job_id": job_id, "hook": "post-fail", "payload": "{}",
+             "async": 0, "created_at": "2026-01-01T00:00:00.000Z"},
+        )  # fmt: skip
+    make_runner(runners, store).run_pass()
+    assert [c["argv"][-1] for c in spawned] == ["_deliver"]
+    assert counter_get_(store, "deliver_requested") == 1
+    # a live job lease holder: the shim delivers it itself
+    spawned.clear()
+    now = dt.datetime.now(dt.UTC)
+    take_lease(
+        store, f"job:{job_id}", own_identity(default_host()), now=format_timestamp(now),
+        expires_at=expiry(now), is_alive=lambda _h: True,
+    )  # fmt: skip
+    make_runner(runners, store).run_pass()
+    assert spawned == []
+    # ... but an async event is always handed over, unless `deliver` has a live holder
+    with store.write() as tx:
+        tx.execute("UPDATE hook_outbox SET async = 1")
+    take_lease(
+        store, "deliver", own_identity(default_host()), now=format_timestamp(now),
+        expires_at=expiry(now), is_alive=lambda _h: True,
+    )  # fmt: skip
+    make_runner(runners, store).run_pass()
+    assert spawned == []
+    with store.write() as tx:
+        tx.execute("DELETE FROM leases WHERE name = 'deliver'")
+    make_runner(runners, store).run_pass()
+    assert [c["argv"][-1] for c in spawned] == ["_deliver"]
+
+
+def test_nothing_to_deliver_spawns_nothing_and_a_quiet_pass_logs_nothing(
+    store: Store, runners: list[Runner], spawned: list[dict[str, Any]]
+) -> None:
+    make_runner(runners, store).run_pass()
+    assert spawned == [] and log_events(store) == []
+
+
+def test_an_untrusted_env_file_keeps_pass_env_jobs_queued_and_warns(
+    store: Store, kit: ShimKit, runners: list[Runner], tmp_path: Path
+) -> None:
+    wants, plain = job_ids(2)
+    add_queued(store, wants, position="1".zfill(20), pass_env='["TOKEN"]')
+    add_queued(store, plain, position="2".zfill(20))
+    env_file = tmp_path / "secrets.env"
+    env_file.write_text("TOKEN=abc123secret\n", encoding="utf-8")
+    env_file.chmod(0o666)  # group- and world-writable: not trusted
+    runner = make_runner(runners, store, cfg(default_cap=None, env_file=str(env_file)), kit=kit)
+    result = runner.run_pass()
+    assert result.started == [plain]
+    assert job_row(store, wants)["status"] == "queued"
+    assert [w["code"] for w in result.warnings] == ["env_file_unsafe"]
+    validate_against("cli/run.json", result.as_json())
+    assert "abc123secret" not in (store.paths.root / "log.jsonl").read_text(encoding="utf-8")
+    assert "abc123secret" not in str(kit.record(plain)["env"])
+
+
+def test_the_pass_summary_is_logged_only_when_something_changed(
+    store: Store, kit: ShimKit, runners: list[Runner]
+) -> None:
+    runner = make_runner(runners, store, kit=kit)
+    runner.run_pass()
+    assert log_events(store) == []
+    add_queued(store, job_ids(1)[0])
+    runner.run_pass()
+    assert [e["event"] for e in log_events(store)][-1] == "pass"

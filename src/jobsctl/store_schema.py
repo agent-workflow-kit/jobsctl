@@ -129,10 +129,7 @@ _V1: tuple[str, ...] = (
     "CREATE TABLE pruned_ids (id TEXT NOT NULL PRIMARY KEY)",
 )
 
-# Version 2: when a lease holder took the lease (`run --json` reports it as `holder.since`).
-_V2: tuple[str, ...] = ("ALTER TABLE leases ADD COLUMN since TEXT",)
-
-MIGRATIONS: tuple[tuple[str, ...], ...] = (_V1, _V2)
+MIGRATIONS: tuple[tuple[str, ...], ...] = (_V1,)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 _CREATE_RE = re.compile(r"^CREATE (UNIQUE )?(TABLE|INDEX) (IF NOT EXISTS )?\"?\w+\"?\b", re.I)

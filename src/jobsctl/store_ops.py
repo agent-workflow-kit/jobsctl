@@ -11,6 +11,7 @@ and the timestamp grammar plug in at the marked places; the store only compares 
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 import sqlite3
@@ -21,6 +22,7 @@ from typing import Any
 from jobsctl.errors import JobsctlError
 from jobsctl.store_db import Store, Tx
 from jobsctl.store_schema import ALL_STATUSES, NON_TERMINAL_STATUSES
+from jobsctl.timestamps import format_timestamp, parse_timestamp
 
 LEASE_TTL_SECONDS = 60  # callers compute `expires_at` = now + this (interface.md, Leases)
 _LEASE_NAME_RE = re.compile(r"^(runner|deliver|job:[a-z0-9-]{1,64})\Z")  # TODO(#4): job id type
@@ -337,11 +339,14 @@ def _take_lease_once(
     if row is None:
         with store.write() as tx:
             cur = tx.execute(
-                "INSERT INTO leases (name, holder_identity, expires_at, since) "
-                "VALUES (?, ?, ?, ?) ON CONFLICT (name) DO NOTHING",
-                [name, holder, expires_at, now],
+                "INSERT INTO leases (name, holder_identity, expires_at) VALUES (?, ?, ?) "
+                "ON CONFLICT (name) DO NOTHING",
+                [name, holder, expires_at],
             )
-            return True if cur.rowcount == 1 else None
+            if cur.rowcount != 1:
+                return None
+            _mark_since(tx, name, now)
+            return True
     observed_holder, observed_expiry = str(row["holder_identity"]), str(row["expires_at"])
     if observed_holder != holder:
         alive = is_alive(observed_holder)
@@ -351,12 +356,38 @@ def _take_lease_once(
             return False
     with store.write() as tx:
         cur = tx.execute(
-            "UPDATE leases SET holder_identity = ?, expires_at = ?, "
-            "since = CASE WHEN holder_identity = ? THEN coalesce(since, ?) ELSE ? END "
+            "UPDATE leases SET holder_identity = ?, expires_at = ? "
             "WHERE name = ? AND holder_identity = ? AND expires_at = ?",
-            [holder, expires_at, holder, now, now, name, observed_holder, observed_expiry],
+            [holder, expires_at, name, observed_holder, observed_expiry],
         )
-        return True if cur.rowcount == 1 else None
+        if cur.rowcount != 1:
+            return None
+        if observed_holder != holder:  # a refresh by the holder keeps its start
+            _mark_since(tx, name, now)
+        return True
+
+
+def _since_counter(name: str) -> str:
+    return f"lease_since:{name}"
+
+
+def _mark_since(tx: Tx, name: str, now: str) -> None:
+    """Record when the holder took lease `name` (epoch milliseconds in a counter, so the schema
+    stays as it is); `run --json` reports it as `holder.since`."""
+    millis = round(parse_timestamp(now).timestamp() * 1000)
+    tx.execute(
+        "INSERT INTO counters (name, value) VALUES (?, ?) "
+        "ON CONFLICT (name) DO UPDATE SET value = excluded.value",
+        [_since_counter(name), millis],
+    )
+
+
+def lease_since(store: Store, name: str) -> str | None:
+    """When the current holder took lease `name`, as a timestamp; `None` when not recorded."""
+    row = store.query_one("SELECT value FROM counters WHERE name = ?", [_since_counter(name)])
+    if row is None:
+        return None
+    return format_timestamp(dt.datetime.fromtimestamp(int(row["value"]) / 1000, dt.UTC))
 
 
 def lease_renew(tx: Tx, name: str, holder: str, expires_at: str) -> bool:
@@ -374,4 +405,6 @@ def lease_release(tx: Tx, name: str, holder: str) -> bool:
     """Delete the lease only if ``holder`` holds it."""
     _check_lease_name(name)
     cur = tx.execute("DELETE FROM leases WHERE name = ? AND holder_identity = ?", [name, holder])
+    if cur.rowcount == 1:
+        tx.execute("DELETE FROM counters WHERE name = ?", [_since_counter(name)])
     return cur.rowcount == 1
