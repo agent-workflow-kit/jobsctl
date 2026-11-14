@@ -54,3 +54,38 @@ def sleeper() -> Iterator[str]:
     finally:
         proc.kill()
         proc.wait(timeout=10)
+
+
+class PassSpawns(list[dict[str, object]]):
+    """The triggered passes a test caused (a start trigger spawns nothing in tests)."""
+
+
+@pytest.fixture(autouse=True)
+def trigger_spawns(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> PassSpawns:
+    """No test starts a real detached pass by accident: `add` and the other start triggers record
+    the spawn here instead. Tests of the real spawn patch `gateway.spawn_detached` themselves."""
+    calls = PassSpawns()
+    if request.node.get_closest_marker("real_trigger") is not None:
+        return calls
+
+    def fake(
+        state_dir: Path, config: object, config_path: Path | None, *, retried: int = 0
+    ) -> object:
+        calls.append({"state_dir": state_dir, "config_path": config_path, "retried": retried})
+        return _Done()
+
+    monkeypatch.setattr("jobsctl.triggers.spawn_pass", fake)
+    return calls
+
+
+class _Done:
+    pid = 4_000_000
+
+    def poll(self) -> int:
+        return 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+    def kill(self) -> None:
+        return None

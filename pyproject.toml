@@ -43,7 +43,10 @@ pythonVersion = "3.12"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["live: needs real models/hosts/credentials; never run in CI"]
+markers = [
+  "live: needs real models/hosts/credentials; never run in CI",
+  "real_trigger: a start trigger really spawns its detached pass",
+]
 addopts = "-m 'not live'"
 
 [tool.semantic_release]
