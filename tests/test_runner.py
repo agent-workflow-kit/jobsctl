@@ -545,3 +545,30 @@ def test_the_pass_summary_is_logged_only_when_something_changed(
     add_queued(store, job_ids(1)[0])
     runner.run_pass()
     assert [e["event"] for e in log_events(store)][-1] == "pass"
+
+
+def test_reaping_waits_for_exact_pids_never_for_any_child(
+    store: Store, runners: list[Runner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    waited: list[tuple[str, tuple[Any, ...]]] = []
+    real_waitpid, real_waitid = os.waitpid, os.waitid
+
+    def waitpid(pid: int, flags: int) -> Any:
+        waited.append(("waitpid", (pid,)))
+        return real_waitpid(pid, flags)
+
+    def waitid(idtype: int, ident: int, flags: int) -> Any:
+        waited.append(("waitid", (idtype, ident)))
+        return real_waitid(idtype, ident, flags)
+
+    monkeypatch.setattr(os, "waitpid", waitpid)
+    monkeypatch.setattr(os, "waitid", waitid)
+    (job_id,) = job_ids(1)
+    add_queued(store, job_id)
+    runner = make_runner(runners, store, python="/bin/true")
+    runner.run_pass()
+    pid = runner.children[0].popen.pid
+    runner.children[0].popen.wait(timeout=10)
+    runner.run_pass()
+    assert waited and all(call[1][0] == pid for call in waited if call[0] == "waitpid")
+    assert not [c for c in waited if c[0] == "waitid" and c[1][0] == os.P_ALL]

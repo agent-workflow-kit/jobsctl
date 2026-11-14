@@ -19,9 +19,9 @@ listing the anchored directory and matching names against the job-id grammar, so
 traverse and no attempt number is out of reach.
 Counters (`seq:*`, `warn:*`) are never touched; `audit.jsonl` and `log.jsonl` are never rotated.
 
-TODO(#14): the runner pass calls `run_retention` at step 6 with its own clock, and must check
-`result.audit_error`: treat it as a failed step (log it) without aborting the checkpoint or the
-lease release.
+The runner pass calls `run_retention` at step 6 (`Runner._retention`) with its own clock; it
+treats `result.audit_error` and a store error as a failed step (logged) without skipping the
+checkpoint or the lease release.
 """
 
 from __future__ import annotations

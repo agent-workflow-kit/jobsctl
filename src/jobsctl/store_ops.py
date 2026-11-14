@@ -291,7 +291,7 @@ def counter_cas(tx: Tx, name: str, expected: int, new: int) -> bool:
 
 # -- leases ------------------------------------------------------------------------------------
 
-# Liveness of a holder identity, injected by the process layer (TODO(#7)): True = alive,
+# Liveness of a holder identity, injected by the caller (`leases.liveness_probe`): True = alive,
 # False = dead (including a different boot id), None = the check was inconclusive.
 IsAlive = Callable[[str], bool | None]
 

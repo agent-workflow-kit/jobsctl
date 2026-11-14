@@ -27,11 +27,11 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 | `proc_host.py`, `proc_identity.py`, `proc_signal.py`, `proc_group.py`, `proc_linux.py` | 0 | the `Host` seam (`/proc` reads, libproc); process identity (Linux `/proc` field 22, boot id; macOS `libproc`, `kern.bootsessionuuid`), liveness, pidfd with the allow-listed ctypes `syscall()` fallback and the re-check before `kill` without pidfds, dumpability, group probing |
 | `store.py` | 0 | connection setup, additive migrations at open for CLI commands, `user_version` checks for long-lived and internal processes, compare-and-set helpers, outbox writes |
 | `log_records.py`, `log_files.py`, `log_writer.py`, `log_export.py` | 0 | `log.jsonl`/`audit.jsonl` with `flock` + `state.db` `seq` counters, once-per-change-of-state warnings, `export` |
-| `diag.py` | 2 (planned) | diagnostics files of triggered passes and internal processes (`diag/<kind>-<pid>.log`, 0600, created on first write, capped at 1 MiB, deleted after 7 days; D43) |
+| `diag.py` | 2 | diagnostics files of triggered passes and internal processes (`diag/<kind>-<pid>.log`, 0600, created on first write by the process itself, capped at 1 MiB, deleted after 7 days; D43) |
 | `order.py` | 1 | position keys, `rank`, `move`/`pin`/`priority`, selection across queues, `blocked_by`, capacity |
 | `env_file.py`, `env_canonical.py`, `env_job.py`, `env_mask.py` | 1 | `env_file` loading and checks (ancestors, `O_NOFOLLOW`/`O_NONBLOCK`, format, `PR_SET_DUMPABLE`); canonical environment; job environment; masking set |
 | `commands/` | 1–4 | one module per command group |
-| `runner.py` | 2 | the pass: lease, reconcile, claim loop with the `pass_requested` counter, shim spawn and identity record, delivery hand-off, retention, checkpoint; `run --loop` |
+| `runner.py`, `claims.py`, `triggers.py`, `spawn.py`, `leases.py` | 2 | the pass: lease, reconcile hook point, claim loop with the `pass_requested` counter, shim spawn and identity record, delivery hand-off, retention, checkpoint; start triggers; `run --loop` (`commands/run.py`) |
 | `shim.py` | 2–4 | start sequence, output pump, tail flush, final commit and result file, timeout, signal sequence |
 | `output.py` | 2 | ring buffer, masking (window rules), sanitizing, compression |
 | `kill.py` | 3 | `_kill` for force-cancel after a shim loss |
