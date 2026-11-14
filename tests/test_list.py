@@ -267,3 +267,10 @@ def test_raw_output_is_ascii_json(capsys: pytest.CaptureFixture[str]) -> None:
         "\u65e5\u672c\u8a9e",
         "\u202e",
     ]
+
+
+def test_human_line_quotes_arguments(capsys: pytest.CaptureFixture[str]) -> None:
+    seed_job("jb-aaaaaa22", argv=["echo", "a b", "it's", ""])
+    res = run_cli(capsys, "list")
+    assert res.out.endswith("-- echo 'a b' 'it'\"'\"'s' ''\n")
+    assert "rank=1" in res.out and "queue=q" in res.out

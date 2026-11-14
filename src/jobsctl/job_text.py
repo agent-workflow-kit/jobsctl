@@ -7,6 +7,7 @@ indented under a fixed prefix so no output line can pass for a field.
 
 from __future__ import annotations
 
+import shlex
 from typing import Any
 
 from jobsctl.textsafe import sanitize
@@ -16,6 +17,15 @@ TAIL_PREFIX = "  | "
 
 def clean(value: object) -> str:
     return sanitize(str(value), inline=True)
+
+
+def exit_text(record: dict[str, Any]) -> str:
+    kind = record["kind"]
+    if kind == "exited":
+        return f"exited {record['code']}"
+    if kind == "signaled":
+        return f"signaled {record['signal']}" + (" (core dumped)" if record["core"] else "")
+    return str(kind)
 
 
 def job_line(job: dict[str, Any]) -> str:
@@ -30,7 +40,7 @@ def job_line(job: dict[str, Any]) -> str:
     if job["blocked_by"]:
         parts.append(f"blocked_by={job['blocked_by']}")
     parts.append("--")
-    parts.extend(clean(arg) for arg in job["argv"])
+    parts.extend(shlex.quote(clean(arg)) for arg in job["argv"])
     return " ".join(parts)
 
 
@@ -51,7 +61,7 @@ def show_text(job: dict[str, Any]) -> str:
     for name in ("created_at", "enqueued_at", "status_changed_at", "claimed_at", "ended_at"):
         _field(lines, name, job[name])
     _field(lines, "not_before", job["not_before"])
-    _field(lines, "exit", None if job["exit"] is None else clean(job["exit"]))
+    _field(lines, "exit", None if job["exit"] is None else exit_text(job["exit"]))
     _field(lines, "resolved_by", None if job["resolved_by"] is None else clean(job["resolved_by"]))
     _field(lines, "note", None if job["note"] is None else clean(job["note"]))
     if job["shim_lost"]:
@@ -63,7 +73,7 @@ def show_text(job: dict[str, Any]) -> str:
             state += f"({detail})"
         lines.append(f"attempt {attempt['attempt']}: {state} claimed {attempt['claimed_at']}")
         if attempt["exit"] is not None:
-            lines.append(f"  exit: {clean(attempt['exit'])}")
+            lines.append(f"  exit: {exit_text(attempt['exit'])}")
         for message in attempt["hook_messages"]:
             lines.append(
                 f"  hook {clean(message['hook_id'])} {message['outcome']}: "
