@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import fcntl
 import subprocess
+import time
 
 
 def run(
@@ -40,3 +41,8 @@ def funlock(fd: int) -> None:
 def utc_now() -> dt.datetime:
     """The wall clock, timezone-aware UTC (tests replace this or pass their own clock)."""
     return dt.datetime.now(dt.UTC)
+
+
+def monotonic() -> float:
+    """A monotonic clock in seconds, for budgets (tests replace this or pass their own)."""
+    return time.monotonic()
