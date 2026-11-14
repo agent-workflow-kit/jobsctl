@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import posixpath
 import re
 from collections.abc import Callable
 from typing import Final
@@ -157,14 +156,14 @@ def actor(text: str) -> str:
 
 
 def cwd(text: str) -> str:
-    """`--cwd`: absolute after lexical normalization (`.` and `..` resolved, symlinks kept)."""
+    """`--cwd`: an absolute path, returned as given; `add` normalizes it after the secret check."""
     if "\x00" in text:
         raise _bad("--cwd contains a NUL byte")
     if "\n" in text:
         raise _bad("--cwd contains a newline")
     if not text.startswith("/"):
         raise _bad("--cwd must be an absolute path")  # the text could be a secret: not echoed
-    return posixpath.normpath(text)
+    return text
 
 
 def job_id(text: str) -> str:

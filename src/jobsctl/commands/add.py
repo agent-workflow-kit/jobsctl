@@ -49,6 +49,7 @@ class Request:
     top: bool
     pin: bool
     cwd: str
+    cwd_given: str  # the text before normalization (secret check only)
     env: dict[str, str] = field(repr=False)
     pass_env: list[str]
     labels: list[tuple[str, str]]
@@ -124,11 +125,12 @@ def build_request(ctx: Context) -> Request:
     for name in pass_env:
         if name in env:
             raise usage_error(f"{name} is given with both --env and --pass-env")
-    cwd = (
-        normalize_cwd(args.cwd)
-        if args.cwd is not None
-        else normalize_cwd(caller_cwd(), default=True)
-    )
+    if args.cwd is not None:
+        cwd_given = args.cwd
+        cwd = normalize_cwd(cwd_given)
+    else:
+        cwd_given = caller_cwd()
+        cwd = normalize_cwd(cwd_given, default=True)
     return Request(
         argv=list(args.argv),
         queue=args.queue if args.queue is not None else "default",
@@ -137,6 +139,7 @@ def build_request(ctx: Context) -> Request:
         top=args.top,
         pin=args.pin,
         cwd=cwd,
+        cwd_given=cwd_given,
         env=env,
         pass_env=pass_env,
         labels=sorted(set(args.label)),
@@ -196,8 +199,9 @@ def _check_fields(req: Request, masking: MaskingSet) -> None:
                 code="secret_in_label",
                 label=key,
             )
-    # The stored (normalized) path; `..` that drops a secret never reaches the log or the store.
-    if masking.contains_secret(req.cwd):
+    # As given (`//`, `/./` or a trailing `/` are normalized away but leave the secret readable)
+    # and as stored (`..` that drops a secret never reaches the log or the store).
+    if masking.contains_secret(req.cwd_given) or masking.contains_secret(req.cwd):
         raise usage_error(
             "the working directory contains a secret value; pass a different --cwd",
             code="secret_in_cwd",

@@ -57,6 +57,13 @@ def secret_flags(token: str) -> dict[str, tuple[list[str], dict[str, str]]]:
 
 
 FIELDS = list(secret_flags(TOKEN))
+WORDING = {
+    "queue": "--queue contains a secret value",
+    "unique_key": "--unique-key contains a secret value",
+    "label_value": "the value of --label ticket contains a secret value",
+    "label_key": "a --label key contains a secret value",
+    "cwd": "the working directory contains a secret value",
+}
 
 
 def run_add(capsys: pytest.CaptureFixture[str], cfg: str, flags: list[str]) -> Result:
@@ -96,6 +103,7 @@ def test_the_human_message_names_the_field_and_not_the_value(
         flags = [*flags, "--cwd", "/work"]
     res = run_cli(capsys, "add", "--config", cfg_for(tmp_path), *flags, "--", "true")
     assert res.code == 2 and res.out == ""
+    assert WORDING[field] in res.err
     assert_clean(res, TOKEN)
 
 
@@ -114,12 +122,30 @@ def test_a_secret_with_padding_or_inside_a_longer_value_is_refused(
     assert_clean(res, TOKEN, padded)
 
 
-def test_a_cwd_whose_normalization_drops_the_secret_stores_and_prints_no_secret(
+def test_a_cwd_whose_normalization_drops_the_secret_is_refused_as_given(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     res = run_add_cwd(capsys, cfg_for(tmp_path), ["--cwd", f"/work/{TOKEN}/.."])
-    assert ok(res)["job"]["cwd"] == "/work"
+    assert res.code == 2
+    assert res.envelope()["error"]["details"] == {"code": "secret_in_cwd"}
     assert_clean(res, TOKEN)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(
+    "shape", ["/srv//{t}/work", "/srv/{t}/", "/srv/./{t}/work", "/srv/{t}/../{t}//", "/srv//{t}"]
+)
+def test_a_cwd_that_normalization_would_keep_readable_is_refused_as_given(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, shape: str, dry_run: bool
+) -> None:
+    raw = shape.format(t=TOKEN)
+    flags = ["--cwd", raw, *(["--dry-run"] if dry_run else [])]
+    res = run_add_cwd(capsys, cfg_for(tmp_path), flags)
+    assert res.code == 2
+    assert res.envelope()["error"]["details"] == {"code": "secret_in_cwd"}
+    assert_clean(res, TOKEN)
+    assert not (resolve_state_dir() / "state.db").exists()
+    assert not (resolve_state_dir() / "log.jsonl").exists()
 
 
 def test_a_default_cwd_holding_a_secret_is_refused(
@@ -184,6 +210,27 @@ def test_a_secret_in_a_field_is_refused_before_a_unique_key_hit_and_strict_queue
     )
     res = run_add_cwd(capsys, cfg, ["--queue", TOKEN])
     assert res.code == 2  # not 10 unknown_queue, which would also be echoed nowhere
+    assert_clean(res, TOKEN)
+
+
+def test_a_secret_in_a_field_is_refused_on_a_unique_key_hit_and_nothing_is_logged(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    cfg = cfg_for(tmp_path)
+    first = run_cli(
+        capsys, "--json", "add", "--config", cfg, "--unique-key", "k1", "--cwd", "/work", "--",
+        "true",
+    )  # fmt: skip
+    assert first.code == 0
+    before = state_text()
+    res = run_cli(
+        capsys, "--json", "add", "--config", cfg, "--unique-key", "k1", "--label",
+        f"ticket={TOKEN}", "--cwd", "/work", "--", "false",
+    )  # fmt: skip
+    assert res.code == 2  # not the unique-key hit (exit 0 with the holder)
+    assert res.envelope()["error"]["details"] == {"code": "secret_in_label", "label": "ticket"}
+    assert log_records("unique_key_reused") == []
+    assert state_text() == before
     assert_clean(res, TOKEN)
 
 
