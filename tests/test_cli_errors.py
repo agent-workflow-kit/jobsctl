@@ -195,7 +195,7 @@ def test_env_value_never_echoed(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_unimplemented_command_is_internal_error(capsys: pytest.CaptureFixture[str]) -> None:
-    res = run_cli(capsys, "--json", "queues")
+    res = run_cli(capsys, "--json", "reconcile")
     assert res.code == 1
     env = res.envelope()
     validate_against("cli/error.json", env)
