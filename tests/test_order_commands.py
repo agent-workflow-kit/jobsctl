@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from jobsctl.order import integer_key
 from jobsctl.store_dir import resolve_state_dir
 from tests.conftest import validate_against, validate_record_file
 from tests.helpers import Result, run_cli
@@ -405,19 +406,20 @@ def dry_then_real(capsys: pytest.CaptureFixture[str], *argv: str) -> None:
 
 def test_dry_run_move_with_a_key_over_the_length_limit(capsys: pytest.CaptureFixture[str]) -> None:
     a, b, c = jobs(capsys, 3)
-    base = "00000000001000000000000000"
-    seed({a: base, b: base + "." + "0" * 60 + "1", c: "00000000001000000000000005"})
+    base = integer_key(10**15)
+    seed({a: base, b: base + "." + "0" * 60 + "1", c: integer_key(10**15 + 5)})
     dry_then_real(capsys, "move", c, "--after", a)
     assert queued_order() == [a, c, b]
 
 
 def test_dry_run_move_with_equal_keys(capsys: pytest.CaptureFixture[str]) -> None:
     a, b, c = jobs(capsys, 3)
-    same = "00000000001000000000000000"
-    seed({a: same, b: same, c: "00000000001000000000000005"})
-    dry_then_real(capsys, "move", c, "--before", a)
-    order = queued_order()
-    assert order.index(c) + 1 == order.index(a)
+    lo, hi = sorted([a, b])  # equal keys tie-break by id, so moving before `hi` must renumber
+    same = integer_key(10**15)
+    seed({a: same, b: same, c: integer_key(10**15 + 5)})
+    dry_then_real(capsys, "move", c, "--before", hi)
+    assert queued_order() == [lo, c, hi]
+    assert len(set(positions())) == 3  # the tie was broken, so the renumber path ran
 
 
 def test_dry_run_top_at_integer_part_zero(capsys: pytest.CaptureFixture[str]) -> None:
@@ -436,8 +438,8 @@ def test_dry_run_bottom_at_the_last_integer_part(capsys: pytest.CaptureFixture[s
 
 def test_noop_move_does_not_renumber(capsys: pytest.CaptureFixture[str]) -> None:
     a, b, c = jobs(capsys, 3)
-    same = "00000000001000000000000000"
-    seed({a: same, b: same, c: "00000000001000000000000005"})
+    same = integer_key(10**15)
+    seed({a: same, b: same, c: integer_key(10**15 + 5)})
     first, second = sorted([a, b])
     before = snapshot_state()
     doc = change(run(capsys, "move", second, "--after", first))
