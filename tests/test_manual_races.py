@@ -101,7 +101,8 @@ def pool(tmp_path: Path, private_home: Path) -> Iterator[Pool]:
 @pytest.fixture
 def config(tmp_path: Path) -> str:
     path = tmp_path / "config.yaml"
-    path.write_text(json.dumps(HOOKS), encoding="utf-8")
+    # auto_run off: a changed release in a worker process must not start a real pass
+    path.write_text(json.dumps({**HOOKS, "auto_run": False}), encoding="utf-8")
     return str(path)
 
 
