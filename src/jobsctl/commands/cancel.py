@@ -26,6 +26,7 @@ from jobsctl.transitions_manual import (
     run_manual,
     unchanged,
 )
+from jobsctl.triggers import request_pass_from_command
 
 
 def _force_running(ctx: Context, row: sqlite3.Row) -> Applied:
@@ -103,7 +104,8 @@ def cancel_command(ctx: Context) -> int:
         return _by_selectors(ctx, op)
 
     done, refusals = run_manual(ctx, body, load_env=lambda: load_env_file(ctx.config.env_file))
-    # TODO(#14): request a pass when a `starting` job was canceled (start trigger).
+    if not args.dry_run and any(d.changed and d.previous_status == "starting" for d in done):
+        request_pass_from_command(ctx.config, ctx.config_path, quiet=ctx.quiet)  # a slot is free
     _print(ctx, done, refusals)
     if args.id is None and refusals and not any(d.changed for d in done):
         return int(ExitCode.REFUSED)  # nothing canceled, something refused (selectors, --all)

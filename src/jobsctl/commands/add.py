@@ -36,6 +36,7 @@ from jobsctl.store_ops import insert_job
 from jobsctl.store_schema import NON_TERMINAL_STATUSES
 from jobsctl.textsafe import sanitize
 from jobsctl.timestamps import format_timestamp
+from jobsctl.triggers import request_pass_from_command
 
 
 @dataclass(frozen=True)
@@ -447,6 +448,7 @@ def add(ctx: Context) -> int:
         out = _dry_run(ctx, req, env_file, now)
     else:
         out = _write(ctx, req, env_file, canonical, masking, now)
-        # TODO(#14): request a pass unless --no-start (auto_run) once the runner exists.
+        if out.created and not args.no_start:
+            request_pass_from_command(ctx.config, ctx.config_path, quiet=ctx.quiet)
     _report(ctx, req, out, dry_run=args.dry_run)
     return 0

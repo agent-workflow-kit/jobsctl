@@ -252,6 +252,8 @@ def _add_run(sub: Any) -> None:
     p.add_argument("--loop", action="store_true")
     p.add_argument("--interval", type=v.duration, metavar="DURATION")
     p.add_argument("--max-starts", type=v.positive_int, metavar="N")
+    # Internal: set by a start trigger (the number of busy re-spawns so far: 0 or 1).
+    p.add_argument("--triggered", type=int, choices=(0, 1), default=None, help=argparse.SUPPRESS)
 
 
 def _add_reconcile(sub: Any) -> None:
@@ -387,6 +389,13 @@ def _check_cancel(a: argparse.Namespace) -> None:
         raise usage_error("--wait-timeout needs --force")
 
 
+def _check_run(a: argparse.Namespace) -> None:
+    if a.interval is not None and not a.loop:
+        raise usage_error("--interval needs --loop")
+    if a.triggered is not None and a.loop:
+        raise usage_error("--triggered cannot be combined with --loop")
+
+
 def _check_label_add(a: argparse.Namespace) -> None:
     _check_label_count(a.labels)
 
@@ -396,6 +405,7 @@ USAGE_CHECKS: dict[str, Callable[[argparse.Namespace], None]] = {
     "show": _check_show,
     "cancel": _check_cancel,
     "label add": _check_label_add,
+    "run": _check_run,
 }
 
 

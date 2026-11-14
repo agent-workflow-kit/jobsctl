@@ -337,9 +337,9 @@ def _take_lease_once(
     if row is None:
         with store.write() as tx:
             cur = tx.execute(
-                "INSERT INTO leases (name, holder_identity, expires_at) VALUES (?, ?, ?) "
-                "ON CONFLICT (name) DO NOTHING",
-                [name, holder, expires_at],
+                "INSERT INTO leases (name, holder_identity, expires_at, since) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT (name) DO NOTHING",
+                [name, holder, expires_at, now],
             )
             return True if cur.rowcount == 1 else None
     observed_holder, observed_expiry = str(row["holder_identity"]), str(row["expires_at"])
@@ -351,9 +351,10 @@ def _take_lease_once(
             return False
     with store.write() as tx:
         cur = tx.execute(
-            "UPDATE leases SET holder_identity = ?, expires_at = ? "
+            "UPDATE leases SET holder_identity = ?, expires_at = ?, "
+            "since = CASE WHEN holder_identity = ? THEN coalesce(since, ?) ELSE ? END "
             "WHERE name = ? AND holder_identity = ? AND expires_at = ?",
-            [holder, expires_at, name, observed_holder, observed_expiry],
+            [holder, expires_at, holder, now, now, name, observed_holder, observed_expiry],
         )
         return True if cur.rowcount == 1 else None
 
