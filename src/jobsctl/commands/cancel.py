@@ -103,6 +103,7 @@ def cancel_command(ctx: Context) -> int:
         return _by_selectors(ctx, op)
 
     done, refusals = run_manual(ctx, body, load_env=lambda: load_env_file(ctx.config.env_file))
+    # TODO(#14): request a pass when a `starting` job was canceled (start trigger).
     _print(ctx, done, refusals)
     if args.id is None and refusals and not any(d.changed for d in done):
         return int(ExitCode.REFUSED)  # nothing canceled, something refused (selectors, --all)

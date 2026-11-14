@@ -49,4 +49,5 @@ def release_command(ctx: Context) -> int:
         )
 
     done = run_manual(ctx, body, load_env=lambda: load_env_file(ctx.config.env_file))
+    # TODO(#14): when `done.changed` and auto_run, request a pass (start trigger).
     return _report(ctx, done, "released")
