@@ -157,7 +157,9 @@ def check_secrets(
 ) -> None:
     """Refuse (exit 2, naming an index, a variable or a field, never a value) any argv element,
     `--env` value, queue, unique key, label key or value or cwd holding a masked value, and any
-    `--env` name that is in `mask_env` or `env_file`."""
+    `--env` name that is in `mask_env` or `env_file`. The names come first: no later message may
+    echo a variable name that itself holds a secret."""
+    _check_names(req, masking)
     for index, element in enumerate(req.argv):
         if masking.contains_secret(element):
             raise usage_error(
@@ -180,6 +182,27 @@ def check_secrets(
                 variable=name,
             )
     _check_fields(req, masking)
+
+
+def _check_names(req: Request, masking: MaskingSet) -> None:
+    """The actor, the decision ids and the variable names are logged, audited or printed as
+    given, and their grammars admit a secret. The refusals name the field, never the value or
+    the position (the name is the secret)."""
+    if masking.contains_secret(req.actor):
+        raise usage_error("--actor contains a secret value", code="secret_in_actor")
+    for decision_id in req.decision_ids:
+        if masking.contains_secret(decision_id):
+            raise usage_error(
+                "a --decision-id contains a secret value", code="secret_in_decision_id"
+            )
+    for name in req.env:
+        if masking.contains_secret(name):
+            raise usage_error("an --env name contains a secret value", code="secret_in_env_name")
+    for name in req.pass_env:
+        if masking.contains_secret(name):
+            raise usage_error(
+                "a --pass-env name contains a secret value", code="secret_in_pass_env_name"
+            )
 
 
 def _check_fields(req: Request, masking: MaskingSet) -> None:
