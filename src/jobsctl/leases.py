@@ -54,7 +54,7 @@ def liveness_probe(host: Host) -> IsAlive:
     def probe(holder: str) -> bool | None:
         ident = parse_identity(holder)
         if ident is None:
-            return None  # not an identity this code wrote: decided by expiry
+            return False  # not an identity: nothing can be alive under it
         state = check_identity(host, ident).state
         if state is Liveness.ALIVE:
             return True

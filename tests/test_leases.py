@@ -53,7 +53,7 @@ def test_the_probe_tells_alive_dead_and_unknown() -> None:
     me = identify(host, os.getpid())
     assert probe(format_identity(Identity(me.boot_id, me.pid, me.start + 1))) is False  # reused pid
     assert probe(format_identity(Identity("another-boot", me.pid, me.start))) is False
-    assert probe("not an identity") is None
+    assert probe("not an identity") is False  # no process can be alive under it
 
 
 def test_taking_a_lease_records_its_start_and_a_refresh_keeps_it(store: Store) -> None:

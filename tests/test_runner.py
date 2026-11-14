@@ -16,6 +16,7 @@ from jobsctl.config import Config
 from jobsctl.errors import JobsctlError
 from jobsctl.leases import expiry, own_identity
 from jobsctl.proc_host import default_host
+from jobsctl.proc_identity import Liveness, LivenessResult
 from jobsctl.retention import PruneResult
 from jobsctl.runner import LeaseLost, Runner
 from jobsctl.store_db import Store
@@ -256,20 +257,36 @@ def test_a_dead_holder_is_replaced(store: Store, runners: list[Runner]) -> None:
 
 @pytest.mark.parametrize(("offset", "taken"), [(120, False), (-120, True)])
 def test_an_inconclusive_holder_counts_until_the_lease_expires(
-    store: Store, runners: list[Runner], offset: int, taken: bool
+    store: Store,
+    runners: list[Runner],
+    monkeypatch: pytest.MonkeyPatch,
+    sleeper: str,
+    offset: int,
+    taken: bool,
 ) -> None:
+    unknown = LivenessResult(Liveness.UNKNOWN, "hidepid")  # e.g. /proc mounted with hidepid
+    monkeypatch.setattr("jobsctl.leases.check_identity", lambda *a, **k: unknown)
     now = dt.datetime.now(dt.UTC)
     when = format_timestamp(now + dt.timedelta(seconds=offset))
     with store.write() as tx:
         tx.execute(
-            "INSERT INTO leases (name, holder_identity, expires_at) VALUES ('runner', 'opaque', ?)",
-            [when],
+            "INSERT INTO leases (name, holder_identity, expires_at) VALUES ('runner', ?, ?)",
+            [sleeper, when],
         )
     result = make_runner(runners, store).run_pass()
     assert result.already_running is (not taken)
-    if not taken:  # a holder that is not one of ours has no pid to report
-        assert result.holder is not None and result.holder.pid is None
-        assert result.as_json()["holder"] is None
+    if not taken:
+        validate_against("cli/run.json", result.as_json())
+        assert result.as_json()["holder"]["pid"] == int(sleeper.split(":")[1])
+
+
+def test_a_holder_text_that_is_no_identity_is_free(store: Store, runners: list[Runner]) -> None:
+    with store.write() as tx:
+        tx.execute(
+            "INSERT INTO leases (name, holder_identity, expires_at) VALUES ('runner', 'opaque', ?)",
+            [format_timestamp(dt.datetime.now(dt.UTC) + dt.timedelta(hours=1))],
+        )
+    assert not make_runner(runners, store).run_pass().already_running
 
 
 def test_a_live_holder_that_stopped_renewing_is_logged_stuck_once(

@@ -574,8 +574,10 @@ def test_concurrent_moves_and_adds_keep_keys_unique(capsys: pytest.CaptureFixtur
     procs: list[subprocess.Popen[str]] = []
     for i in range(12):
         procs.append(jobsctl_cmd("move", ids[i % 4], "--after", ids[(i + 1) % 4]))
-        procs.append(jobsctl_cmd("add", "--queue", "q", "--top", "--cwd", "/w", "--", "true"))
-        procs.append(jobsctl_cmd("add", "--queue", "q", "--cwd", "/w", "--", "true"))
+        procs.append(
+            jobsctl_cmd("add", "--no-start", "--queue", "q", "--top", "--cwd", "/w", "--", "true")
+        )
+        procs.append(jobsctl_cmd("add", "--no-start", "--queue", "q", "--cwd", "/w", "--", "true"))
     try:
         results = [(p.communicate(timeout=120), p.returncode) for p in procs]
     finally:
