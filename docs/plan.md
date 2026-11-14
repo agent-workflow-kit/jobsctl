@@ -84,7 +84,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 - timeouts and `overrides` (`none`); automatic retry (`not_before`, budget from the attempt's `effective` snapshot, the 3rd spawn failure final); `retry --attempt N` replay after a cancel or hold; `wait` exits 0/12/13/20/22/130.
 - result file written before the final commit; final-commit retry under contention.
 
-**Status**: Not Started
+**Status**: In Progress (runner pass, start triggers and the shim spawn contract done; the shim, output capture, `wait`, `retry` and automatic retry remain)
 
 ## Stage 3: Cancellation and recovery (0.3)
 
