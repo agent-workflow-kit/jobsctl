@@ -153,6 +153,22 @@ def test_unreadable_ended_at_text_is_kept(store: Store) -> None:
     assert run(store).pruned == []
 
 
+@pytest.mark.parametrize("stamp", ["", "0", "2026-06-01"])
+def test_non_timestamp_ended_at_is_never_pruned(store: Store, stamp: str) -> None:
+    add_job(store, jid(1))
+    with store.write() as tx:
+        tx.execute("UPDATE jobs SET ended_at = ?", [stamp])
+    assert run(store).pruned == []
+    assert ids_in(store) == {jid(1)}
+
+
+def test_oldest_jobs_are_pruned_first(store: Store) -> None:
+    for n in range(1, 6):
+        add_job(store, jid(n), age=(40 + n) * DAY)
+    result = run(store, batch_size=2, monotonic=FakeClock(step=4.0), budget=5.0)
+    assert result.pruned == [jid(5), jid(4)]
+
+
 def test_job_with_undelivered_hook_events_survives(store: Store) -> None:
     add_job(store, jid(1))
     add_job(store, jid(2))
@@ -354,6 +370,59 @@ def test_large_batch_is_split_into_several_audit_records(store: Store) -> None:
     assert len(set(i for a in audits() for i in a["inputs"]["ids"])) == total
 
 
+def seed_many(store: Store, total: int) -> None:
+    with store.write() as tx:
+        for n in range(total):
+            insert_row(tx, "jobs", job_values(jid(n + 1), status="done", ended_at=ago(40 * DAY)))
+
+
+def test_audit_failure_keeps_the_result_and_stops(store: Store) -> None:
+    seed_many(store, 250)
+    (resolve_state_dir() / "audit.jsonl").mkdir()
+    result = run(store)
+    assert len(result.pruned) == 100  # the committed batch is reported
+    assert result.audit_error is not None
+    assert len(ids_in(store)) == 150  # no further batch
+    assert len(ids_in(store, "pruned_ids")) == 100
+
+
+def test_command_audit_failure_prints_ids_and_exits_nonzero(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with Store.open(mode=OpenMode.CLI) as s:
+        seed_many(s, 250)
+    (resolve_state_dir() / "audit.jsonl").mkdir()
+    res = run_cli(capsys, "prune", "--older-than", "30d")
+    assert res.code != 0
+    assert len(res.out.split()) == 100
+    assert res.err.strip()
+
+
+def test_retention_step_reports_audit_failure(store: Store) -> None:
+    seed_many(store, 3)
+    (resolve_state_dir() / "audit.jsonl").mkdir()
+    result = retention.run_retention(
+        store, RecordWriter(store), retention=30 * DAY, configured_queues=set(), now=NOW
+    )
+    assert len(result.pruned) == 3 and result.audit_error is not None
+
+
+def test_retention_step_forwards_budget_and_batch_size(store: Store) -> None:
+    seed_many(store, 250)
+    result = retention.run_retention(
+        store,
+        RecordWriter(store),
+        retention=30 * DAY,
+        configured_queues=set(),
+        now=NOW,
+        monotonic=FakeClock(step=4.0),
+        budget=10.0,
+        batch_size=50,
+    )
+    assert result.out_of_budget is True
+    assert 0 < len(result.pruned) < 250 and len(result.pruned) % 50 == 0
+
+
 def test_retention_trigger_uses_the_reserved_actor(store: Store) -> None:
     add_job(store, jid(1))
     run(store, trigger="retention", actor="auto:jobsctl")
@@ -425,6 +494,15 @@ def test_malformed_ids_are_never_pruned_or_resolved_to_paths(store: Store, tmp_p
     assert victim.read_text() == "keep"
 
 
+def test_result_files_of_any_attempt_number_are_removed(store: Store) -> None:
+    add_job(store, jid(1), attempts=0, attempt=1500)
+    (store.paths.shims / f"{jid(1)}.1500.result").write_text("x")
+    (store.paths.shims / f"{jid(1)}.1.result").write_text("x")
+    (store.paths.shims / f"{jid(1)}.x.result").write_text("x")  # not an attempt number: kept
+    run(store)
+    assert os.listdir(store.paths.shims) == [f"{jid(1)}.x.result"]
+
+
 def test_huge_attempt_number_is_bounded(store: Store) -> None:
     add_job(store, jid(1), attempts=0, attempt=10**9)
     run(store)  # must not loop a billion times
@@ -450,6 +528,61 @@ def test_diag_files_older_than_seven_days_are_removed(store: Store, tmp_path: Pa
     assert removed == 2  # the old file and the old symlink (the link itself, not its target)
     assert sorted(os.listdir(diag)) == ["run-2.log", "sub"]
     assert target.read_text() == "keep" and (odd / "f").exists()
+
+
+def test_orphan_shim_files_of_pruned_ids_are_swept(store: Store, tmp_path: Path) -> None:
+    shims = store.paths.shims
+    add_job(store, jid(2), age=DAY)  # live job: untouched
+    with store.write() as tx:
+        tx.execute("INSERT INTO pruned_ids (id) VALUES (?)", [jid(1)])
+    target = tmp_path / "precious"
+    target.write_text("keep")
+    for name in (f"{jid(1)}.log", f"{jid(1)}.7.result", f"{jid(2)}.log", f"{jid(3)}.log"):
+        (shims / name).write_text("x")
+    os.symlink(target, shims / f"{jid(1)}.9.result")
+    assert retention.sweep_orphans(store, cap=100) == 3
+    assert sorted(os.listdir(shims)) == sorted([f"{jid(2)}.log", f"{jid(3)}.log"])
+    assert target.read_text() == "keep"
+
+
+def test_orphan_sweep_is_capped(store: Store) -> None:
+    with store.write() as tx:
+        tx.execute("INSERT INTO pruned_ids (id) VALUES (?)", [jid(1)])
+    for n in range(1, 6):
+        (store.paths.shims / f"{jid(1)}.{n}.result").write_text("x")
+    assert retention.sweep_orphans(store, cap=3) <= 3
+    assert len(os.listdir(store.paths.shims)) >= 2
+
+
+def test_retention_step_sweeps_orphans(store: Store) -> None:
+    with store.write() as tx:
+        tx.execute("INSERT INTO pruned_ids (id) VALUES (?)", [jid(1)])
+    (store.paths.shims / f"{jid(1)}.log").write_text("x")
+    retention.run_retention(
+        store, RecordWriter(store), retention=30 * DAY, configured_queues=set(), now=NOW
+    )
+    assert os.listdir(store.paths.shims) == []
+
+
+def test_diag_fifo_and_foreign_entries_are_left(store: Store) -> None:
+    diag = store.paths.diag
+    os.mkfifo(diag / "pipe")
+    (diag / "old.log").write_text("x")
+    for name in ("pipe", "old.log"):
+        os.utime(diag / name, (0, 0))
+    assert retention.sweep_diag(store.paths, NOW) == 1
+    assert os.listdir(diag) == ["pipe"]
+
+
+def test_diag_sweep_stops_at_the_budget(store: Store) -> None:
+    for n in range(5):
+        path = store.paths.diag / f"old{n}.log"
+        path.write_text("x")
+        os.utime(path, (0, 0))
+    calls = iter([False, False, True, True, True, True, True])
+    removed = retention.sweep_diag(store.paths, NOW, out_of_time=lambda: next(calls))
+    assert removed == 2
+    assert len(os.listdir(store.paths.diag)) == 3
 
 
 def test_diag_boundary_and_missing_directory(store: Store) -> None:
@@ -633,3 +766,12 @@ def test_command_nothing_to_prune(capsys: pytest.CaptureFixture[str]) -> None:
     res = cli(capsys, "--older-than", "30d")
     assert res.code == 0 and res.envelope() == {"dry_run": False, "pruned": []}
     assert json.loads(res.out)["pruned"] == []
+
+
+def test_command_does_not_forget_queues(capsys: pytest.CaptureFixture[str]) -> None:
+    seed_state(capsys)
+    with Store.open(mode=OpenMode.CLI) as s, s.write() as tx:
+        tx.execute("INSERT INTO queues_seen VALUES ('idle', ?)", [ago(DAY)])
+    assert cli(capsys, "--older-than", "30d").code == 0
+    with Store.open(mode=OpenMode.CLI) as s:
+        assert "idle" in ids_in(s, "queues_seen", "name")
