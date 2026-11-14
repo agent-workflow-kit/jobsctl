@@ -279,7 +279,9 @@ def test_env_entry_limits(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_cancel_wait_timeout_zero_allowed_with_force(capsys: pytest.CaptureFixture[str]) -> None:
-    assert run_cli(capsys, "cancel", JID, "--force", "--wait-timeout", "0").code == 1
+    assert (
+        run_cli(capsys, "cancel", JID, "--force", "--wait-timeout", "0").code == 10
+    )  # parses; no such job
     for bad in ("0s", "0m", "0d", "00"):
         assert run_cli(capsys, "cancel", JID, "--force", "--wait-timeout", bad).code == 2
 
