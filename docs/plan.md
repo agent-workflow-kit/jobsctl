@@ -60,7 +60,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 **Success Criteria**: `add`, `list`, `show`, `move`, `pin`, `unpin`, `priority`, `hold`, `release` (manual holds), `cancel` (queued and held, selectors), `label`, `capacity`, `queues`, `prune` and `export` behave as interface.md specifies, with golden `--json` outputs.
 **Tests**:
 
-- `add`: implicit queues and `queue_created`, `strict_queues`, unique keys across queues (racing adds create one job), `existing_job_held` and `pass_env_undefined` warnings, secret refusals (`secret_in_argv`, `secret_in_env`, `--env` names defined in `env_file`), size limits, `--dry-run` projection.
+- `add`: implicit queues and `queue_created`, `strict_queues`, unique keys across queues (racing adds create one job), `existing_job_held` and `pass_env_undefined` warnings, secret refusals (`secret_in_argv`, `secret_in_env`, `--env` names defined in `env_file`, and secrets in the queue, unique key, labels and cwd), size limits, `--dry-run` projection.
 - `env_file`: ancestor checks, symlink and FIFO rejection (spike C5), format rules (CRLF, invalid lines, duplicates, ignored names), unavailable vs. not configured.
 - ordering: pin > priority > position; `move --before/--after` adopts the neighbor's priority and pin; self-move no-op; held jobs keep their place; `rank`.
 - selection (pure function): queue priority, oldest head, caps, `global_cap`, `not_before`, skipped `--pass-env` jobs, tie-breakers; capacity (`free`, global ready count, `effective_free ≤ free`, `cap: null`, `blocked_by` incl. `global_paused`).
