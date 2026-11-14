@@ -186,18 +186,18 @@ def sweep_orphans(
     store: Store, *, cap: int = ORPHAN_SCAN_CAP, out_of_time: Callable[[], bool] | None = None
 ) -> int:
     """Remove job files in `shims/` whose id is in `pruned_ids` (left by a crash between a
-    commit and the removal); looks at no more than `cap` entries. Returns the count."""
+    commit and the removal); looks at no more than `cap` matching entries. Returns the count."""
     with _anchored(store.paths, "shims") as fd:
         if fd is None:
             return 0
         found: list[tuple[str, str]] = []
         try:
             with os.scandir(fd) as entries:
-                for scanned, entry in enumerate(entries):
-                    if scanned >= cap:
-                        break
+                for entry in entries:
                     m = _FILE_RE.fullmatch(entry.name)
                     if m:
+                        if len(found) >= cap:
+                            break
                         found.append((entry.name, m.group(1)))
         except OSError:
             return 0
@@ -231,6 +231,7 @@ def sweep_diag(
     with _anchored(paths, "diag") as fd:
         if fd is None:
             return 0
+        names: list[str] = []
         with os.scandir(fd) as entries:
             for entry in entries:
                 if out_of_time is not None and out_of_time():
@@ -243,8 +244,10 @@ def sweep_diag(
                     continue
                 if st.st_uid != uid or st.st_mtime >= limit:
                     continue
-                if _unlink(fd, entry.name):
-                    removed += 1
+                names.append(entry.name)
+        for name in names:
+            if _unlink(fd, name):
+                removed += 1
     return removed
 
 

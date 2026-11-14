@@ -554,6 +554,16 @@ def test_orphan_sweep_is_capped(store: Store) -> None:
     assert len(os.listdir(store.paths.shims)) >= 2
 
 
+def test_orphan_sweep_cap_counts_only_matching_entries(store: Store) -> None:
+    with store.write() as tx:
+        tx.execute("INSERT INTO pruned_ids (id) VALUES (?)", [jid(1)])
+    for n in range(60):
+        (store.paths.shims / f"unrelated-{n}.txt").write_text("x")
+    (store.paths.shims / f"{jid(1)}.log").write_text("x")
+    assert retention.sweep_orphans(store, cap=3) == 1
+    assert not (store.paths.shims / f"{jid(1)}.log").exists()
+
+
 def test_retention_step_sweeps_orphans(store: Store) -> None:
     with store.write() as tx:
         tx.execute("INSERT INTO pruned_ids (id) VALUES (?)", [jid(1)])
