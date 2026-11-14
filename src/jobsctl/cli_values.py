@@ -163,7 +163,7 @@ def cwd(text: str) -> str:
     if "\n" in text:
         raise _bad("--cwd contains a newline")
     if not text.startswith("/"):
-        raise _bad(f"--cwd must be an absolute path, not {_q(text)}")
+        raise _bad("--cwd must be an absolute path")  # the text could be a secret: not echoed
     return posixpath.normpath(text)
 
 

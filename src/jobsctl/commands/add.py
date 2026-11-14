@@ -152,8 +152,9 @@ def build_request(ctx: Context) -> Request:
 def check_secrets(
     req: Request, masking: MaskingSet, config_mask_env: Sequence[str], env_file: EnvFile
 ) -> None:
-    """Refuse (exit 2, naming an index or a variable, never a value) any argv element or `--env`
-    value holding a masked value, and any `--env` name that is in `mask_env` or `env_file`."""
+    """Refuse (exit 2, naming an index, a variable or a field, never a value) any argv element,
+    `--env` value, queue, unique key, label key or value or cwd holding a masked value, and any
+    `--env` name that is in `mask_env` or `env_file`."""
     for index, element in enumerate(req.argv):
         if masking.contains_secret(element):
             raise usage_error(
@@ -175,6 +176,32 @@ def check_secrets(
                 code="secret_in_env",
                 variable=name,
             )
+    _check_fields(req, masking)
+
+
+def _check_fields(req: Request, masking: MaskingSet) -> None:
+    """The stored fields that are not argv or env: each is logged or printed as given, so a
+    masked value in one is refused. The messages and details name the field (and a label's key),
+    never the value; a label key that itself holds a secret is not named."""
+    if masking.contains_secret(req.queue):
+        raise usage_error("--queue contains a secret value", code="secret_in_queue")
+    if req.unique_key is not None and masking.contains_secret(req.unique_key):
+        raise usage_error("--unique-key contains a secret value", code="secret_in_unique_key")
+    for key, value in req.labels:
+        if masking.contains_secret(key):
+            raise usage_error("a --label key contains a secret value", code="secret_in_label")
+        if masking.contains_secret(value):
+            raise usage_error(
+                f"the value of --label {key} contains a secret value",
+                code="secret_in_label",
+                label=key,
+            )
+    # The stored (normalized) path; `..` that drops a secret never reaches the log or the store.
+    if masking.contains_secret(req.cwd):
+        raise usage_error(
+            "the working directory contains a secret value; pass a different --cwd",
+            code="secret_in_cwd",
+        )
 
 
 # -- the decision ----------------------------------------------------------------------------
