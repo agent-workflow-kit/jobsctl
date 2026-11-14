@@ -591,7 +591,9 @@ Reports [Capacity](#capacity) for one queue (known or not) or for every known qu
 
 ### `prune`
 
-`jobsctl prune --older-than DURATION [--dry-run]`: deletes terminal jobs whose `ended_at` is before the cutoff, with their attempts and tails, in batches; their ids stay reserved ([Identifiers](#identifiers)). A job with undelivered hook events is never deleted. Every pass applies config `retention` (default `30d`; `null` disables) the same way, as actor `auto:jobsctl`. Audited. Output: `schemas/cli/prune.json`, `{"dry_run": <bool>, "pruned": [<id>...]}`.
+`jobsctl prune --older-than DURATION [--dry-run]`: deletes terminal jobs whose `ended_at` is before the cutoff, with their attempts and tails, in batches; their ids stay reserved ([Identifiers](#identifiers)). A job with undelivered hook events is never deleted. Every pass applies config `retention` (default `30d`; `null` disables) the same way, as actor `auto:jobsctl`. Audited. Output: `schemas/cli/prune.json`, `{"dry_run": <bool>, "pruned": [<id>...]}` (without `--json`, one id per line unless `--quiet`).
+
+Each batch of 100 jobs is selected and deleted in one transaction, together with its `job:<id>` lease row, a `pruned_ids` row per id and (after the commit) the job's files in `shims/` (`<id>.log`, `<id>.<n>.result`); an audit record is appended after the commit, split into records of at most 15,000 ids if a batch were larger. Rows whose id is not a well-formed job id are never pruned, and file removals never follow a symlink out of the state directory. The `seq:*` and `warn:*` counters are never touched. After deleting jobs, `prune` (not `--dry-run`) also deletes the records of queues that are not configured and have no jobs, as a pass does.
 
 ### `export`
 
