@@ -76,9 +76,15 @@ def interrupts_as_keyboard_interrupt() -> Iterator[None]:
             old[number] = signal.signal(number, raise_interrupt)
         yield
     finally:
-        fired = True  # from here on a signal does nothing
+        try:
+            fired = True  # from here on a signal does nothing
+        except KeyboardInterrupt:
+            # A first signal landed after the body finished: the handler has already set
+            # `fired`, the body's result stands, and the restore below must still run.
+            pass
         for number, handler in old.items():
-            signal.signal(number, handler)
+            # `getsignal` is None for a handler installed outside Python; it cannot be restored.
+            signal.signal(number, signal.SIG_DFL if handler is None else handler)
 
 
 def _open(ctx: Context) -> Store | None:

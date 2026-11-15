@@ -395,6 +395,73 @@ def test_the_handlers_ignore_every_signal_after_the_first(
     assert {s: signal.getsignal(s) for s in before} == before
 
 
+def test_a_first_signal_after_the_body_finished_does_not_skip_the_restore() -> None:
+    import inspect
+    import signal
+    import sys
+
+    from jobsctl.commands.wait import interrupts_as_keyboard_interrupt
+
+    source, first = inspect.getsourcelines(interrupts_as_keyboard_interrupt)
+    target = first + next(i for i, line in enumerate(source) if "fired = True  # from" in line)
+    code = interrupts_as_keyboard_interrupt.__wrapped__.__code__  # type: ignore[attr-defined]
+    sent = False
+
+    def local(frame: Any, event: str, arg: Any) -> Any:
+        nonlocal sent
+        if event == "line" and frame.f_lineno == target and not sent:
+            sent = True
+            signal.raise_signal(signal.SIGTERM)  # the first signal, at the vulnerable line
+        return local
+
+    def tracer(frame: Any, event: str, arg: Any) -> Any:
+        return local if frame.f_code is code else None
+
+    before = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    sys.settrace(tracer)
+    try:
+        with interrupts_as_keyboard_interrupt():
+            pass
+    finally:
+        sys.settrace(None)
+    assert sent
+    assert {s: signal.getsignal(s) for s in before} == before
+
+
+def test_a_handler_installed_outside_python_is_restored_as_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import signal
+
+    from jobsctl.commands.wait import interrupts_as_keyboard_interrupt
+
+    real_get = signal.getsignal
+    real_set = signal.signal
+    restored: list[Any] = []
+
+    def fake_get(number: int) -> Any:
+        return None if number == signal.SIGHUP else real_get(number)
+
+    def fake_set(number: int, handler: Any) -> Any:
+        if number == signal.SIGHUP:
+            restored.append(handler)
+            if handler is None:
+                raise TypeError("signal handler must be SIG_IGN, SIG_DFL, or a callable")
+            return None
+        return real_set(number, handler)
+
+    original = real_get(signal.SIGHUP)
+    monkeypatch.setattr(signal, "getsignal", fake_get)
+    monkeypatch.setattr(signal, "signal", fake_set)
+    try:
+        with interrupts_as_keyboard_interrupt():
+            pass
+    finally:
+        monkeypatch.undo()
+        real_set(signal.SIGHUP, original)
+    assert restored[-1] is signal.SIG_DFL
+
+
 def test_a_signal_ignored_at_entry_is_left_ignored(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
