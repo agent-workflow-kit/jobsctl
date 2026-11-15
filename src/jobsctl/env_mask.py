@@ -7,8 +7,8 @@ fewer than 8 characters are not masked (`short_secret_not_masked`, naming the va
 empty value is neither masked nor warned about. A multi-line value is masked line by line.
 
 This module owns the *set* and the replacement of its members in text. The rest of the masking
-pipeline (windowing, decoding, escape removal, sanitizing) belongs to the output module
-(TODO(#16)), which uses `MaskingSet.mask` and `MaskingSet.longest_bytes`.
+pipeline (windowing, decoding, escape removal, sanitizing) is `output_tail.py`, which uses
+`MaskingSet.mask`, `MaskingSet.spans` and `MaskingSet.longest_bytes`.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ class MaskingSet:
     values: tuple[str, ...] = field(repr=False)
     warnings: tuple[EnvWarning, ...] = ()
     _pattern: re.Pattern[str] | None = field(default=None, repr=False, compare=False)
+    _overlap: re.Pattern[str] | None = field(default=None, repr=False, compare=False)
 
     @property
     def longest_bytes(self) -> int:
@@ -45,12 +46,81 @@ class MaskingSet:
         """Whether `text` contains a masked value (`add`'s `secret_in_argv`/`secret_in_env`)."""
         return self._pattern is not None and self._pattern.search(text) is not None
 
+    def spans(self, text: str) -> list[tuple[int, int]]:
+        """The `(start, end)` intervals `mask` replaces, in order and disjoint.
+
+        Leftmost-longest matches are found first (one linear pass). A value that starts inside
+        a match and ends after it (`abcdefgh` and `fghijklm` in `abcdefghijklm`) extends the
+        match, so no part of any occurrence is left unmasked, however long the overlap (this
+        repeats until no value extends the match)."""
+        if self._pattern is None or self._overlap is None:
+            return []
+        merged: list[tuple[int, int]] = []
+        for m in self._pattern.finditer(text):
+            start, end = m.span()
+            end = self._extend(text, start, end)
+            if merged and start < merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        return merged
+
+    def _extend(self, text: str, start: int, end: int) -> int:
+        """The end of the match `text[start:end]` once every value that starts inside it and
+        ends after it is included (and so on for the values starting in the added part).
+
+        Two exact strategies, picked by which is cheaper for this match. Few values: for each
+        value, the furthest occurrence that starts before `end` and reaches past it (`rfind`
+        over the only starts that can: the `len(v) - 1` before `end`). Many values: try each
+        start position within the longest value's reach with the prefix-tree regex."""
+        longest = len(self.values[0])
+        positions = min(end - start - 1, longest - 1)
+        if positions <= 0:
+            return end
+        if len(self.values) <= positions:
+            while True:
+                furthest = end
+                for value in self.values:
+                    size = len(value)
+                    lo = max(start, end - size + 1)
+                    hi = min(len(text), end + size - 1)
+                    if hi - lo < size:
+                        continue
+                    at = text.rfind(value, lo, hi)
+                    if at >= 0 and at + size > furthest:
+                        furthest = at + size
+                if furthest == end:
+                    return end
+                end = furthest
+        assert self._overlap is not None
+        pos = max(start + 1, end - longest + 1)
+        while pos < end:
+            at = self._overlap.match(text, pos)
+            if at is not None and at.end(1) > end:
+                end = at.end(1)
+                pos = max(pos + 1, end - longest + 1)
+            else:
+                pos += 1
+        return end
+
     def mask(self, text: str) -> str:
-        """Replace every occurrence of a masked value with `***` in one left-to-right pass: at a
-        position the longest value wins, and replaced text is never scanned again."""
-        if self._pattern is None:
-            return text
-        return self._pattern.sub(REPLACEMENT, text)
+        """Replace every occurrence of a masked value with `***` (see `spans`); replaced text is
+        never scanned again."""
+        return replace_spans(text, self.spans(text))
+
+
+def replace_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    """`text` with each of the sorted, disjoint `spans` replaced by `***`."""
+    if not spans:
+        return text
+    parts: list[str] = []
+    pos = 0
+    for start, stop in spans:
+        parts.append(text[pos:start])
+        parts.append(REPLACEMENT)
+        pos = stop
+    parts.append(text[pos:])
+    return "".join(parts)
 
 
 def _candidates(value: str) -> list[str]:
@@ -92,8 +162,13 @@ def masking_values(
         chosen.update(c for c in _candidates(value) if len(c) >= MIN_MASKED_LENGTH)
 
     ordered = tuple(sorted(chosen, key=lambda v: (-len(v), v)))
-    pattern = re.compile(_trie_pattern(sorted(chosen), 0)) if ordered else None
-    return MaskingSet(ordered, tuple(warnings), pattern)
+    trie = _trie_pattern(sorted(chosen), 0)
+    # TODO(#8): the walk costs a few microseconds per position when many values share a long
+    # prefix with the text (190 values "a"*k+"b" on 20000 "a" take about 1 s): an Aho-Corasick
+    # automaton would be linear.
+    pattern = re.compile(trie) if ordered else None
+    overlap = re.compile("(?=(" + trie + "))") if ordered else None
+    return MaskingSet(ordered, tuple(warnings), pattern, overlap)
 
 
 def _trie_pattern(strings: list[str], depth: int) -> str:
