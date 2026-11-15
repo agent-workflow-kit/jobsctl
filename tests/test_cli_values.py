@@ -9,18 +9,20 @@ from typing import Any
 import pytest
 
 from jobsctl.cli_values import (
-    DurationError,
     cwd,
     duration,
     duration_or_none,
     duration_or_zero,
     env_name,
-    format_timestamp,
-    parse_duration,
-    parse_timestamp,
+    job_id,
+    label_pair,
+    nonneg_int,
     positive_int,
+    priority,
     timestamp_or_duration,
 )
+from jobsctl.durations import DurationError, parse_duration
+from jobsctl.timestamps import format_timestamp, parse_timestamp
 
 
 @pytest.mark.parametrize(
@@ -165,3 +167,48 @@ def test_parse_timestamp_accepts_rfc3339_with_any_offset(text: str, iso: str) ->
 def test_parse_timestamp_rejects(text: str) -> None:
     with pytest.raises(ValueError):
         parse_timestamp(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("ab", "invalid label 'ab': expected key=value"),
+        ("A=b", "invalid label key 'A': use [a-z0-9][a-z0-9_.-]{0,63}"),
+        ("=b", "invalid label key '': use [a-z0-9][a-z0-9_.-]{0,63}"),
+        ("a=b c", "invalid label value for 'a': 0 to 256 characters from [A-Za-z0-9._:/#@+=,-]"),
+    ],
+)
+def test_label_pair_messages(text: str, message: str) -> None:
+    with pytest.raises(argparse.ArgumentTypeError) as exc:
+        label_pair(text)
+    assert str(exc.value) == message
+
+
+def test_label_pair_splits_at_the_first_equals() -> None:
+    assert label_pair("a=b=c") == ("a", "b=c")
+
+
+def test_job_id_message_cuts_at_equals() -> None:
+    with pytest.raises(argparse.ArgumentTypeError) as exc:
+        job_id("abcd=S3CRET")
+    assert "'abcd=...'" in str(exc.value) and "S3CRET" not in str(exc.value)
+
+
+@pytest.mark.parametrize("pad", [17, 18, 30, 5000])
+def test_zero_padding_does_not_change_the_value(pad: int) -> None:
+    assert positive_int("0" * pad + "1") == 1
+    assert nonneg_int("0" * pad) == 0
+    assert priority("-" + "0" * pad + "5") == -5
+
+
+def test_zero_padded_out_of_range_keeps_the_range_message() -> None:
+    with pytest.raises(argparse.ArgumentTypeError) as exc:
+        priority("0" * 20 + "1001")
+    assert str(exc.value).endswith(": must be -1000 to 1000")
+
+
+@pytest.mark.parametrize("text", ["9" * 19, "1" + "0" * 18, "0" * 5 + "9" * 19, "-" + "9" * 19])
+def test_nineteen_significant_digits_are_out_of_range(text: str) -> None:
+    with pytest.raises(argparse.ArgumentTypeError) as exc:
+        nonneg_int(text)
+    assert str(exc.value).endswith(": must be at least 0")
