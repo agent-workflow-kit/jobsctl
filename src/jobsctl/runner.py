@@ -27,7 +27,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, cast
 
 from jobsctl import gateway
 from jobsctl.claims import (
@@ -129,13 +129,6 @@ class PassResult:
         }
 
 
-class Polled(Protocol):
-    @property
-    def pid(self) -> int: ...
-
-    def poll(self) -> int | None: ...
-
-
 class AdoptedShim:
     """A shim spawned by the previous image of a re-exec'd `run --loop`: still this process's
     child, polled by its exact PID. `ours` is `False` once the PID turned out not to be a child
@@ -157,7 +150,7 @@ class AdoptedShim:
 class Child:
     """A process this runner spawned. `claim_id` is set for a shim."""
 
-    popen: Polled
+    popen: subprocess.Popen[bytes]  # an AdoptedShim after a re-exec (`poll` and `pid` only)
     kind: str
     job_id: str | None = None
     claim_id: str | None = None
@@ -494,7 +487,12 @@ class Runner:
                 continue
             known.add(ident.pid)
             self.children.append(
-                Child(AdoptedShim(ident.pid), "shim", str(row["job_id"]), str(row["claim_id"]))
+                Child(
+                    cast("subprocess.Popen[bytes]", AdoptedShim(ident.pid)),
+                    "shim",
+                    str(row["job_id"]),
+                    str(row["claim_id"]),
+                )
             )
 
     def spawn_kill(self, job_id: str) -> subprocess.Popen[bytes]:

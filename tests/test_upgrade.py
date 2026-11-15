@@ -7,14 +7,15 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from importlib import metadata
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from jobsctl import gateway, upgrade
 from jobsctl import cli as cli_module
+from jobsctl import gateway, upgrade
 from jobsctl.config import Config
 from jobsctl.leases import identity_text, parse_identity
 from jobsctl.proc_host import default_host
@@ -32,9 +33,9 @@ def no_diag_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def store() -> Store:
+def store() -> Iterator[Store]:
     with Store.open(mode=OpenMode.CLI) as opened:
-        yield opened  # type: ignore[misc]
+        yield opened
 
 
 # -- installed_version -------------------------------------------------------------------------
@@ -133,7 +134,7 @@ def test_reexec_passes_the_environment_plus_the_reason_and_refuses_a_missing_int
     monkeypatch.setattr(gateway, "exec_replace", lambda argv, env: calls.append((argv, dict(env))))
     monkeypatch.setenv("FOO", "bar")
     UpgradeWatch().reexec("why")
-    (argv, env), = calls
+    ((argv, env),) = calls
     assert argv[0] == sys.executable
     assert env["FOO"] == "bar" and env[REEXEC_ENV] == "why"
     monkeypatch.setattr(sys, "executable", "/nonexistent/python")

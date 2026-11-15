@@ -77,7 +77,12 @@ class RealShims:
                 **seed,
             )
         popen = spawn_internal(
-            resolve_state_dir(), self.config, self.config_path, "_shim", [job_id, CLAIM], python=python
+            resolve_state_dir(),
+            self.config,
+            self.config_path,
+            "_shim",
+            [job_id, CLAIM],
+            python=python,
         )
         self.handles.append(popen)
         if record_identity:

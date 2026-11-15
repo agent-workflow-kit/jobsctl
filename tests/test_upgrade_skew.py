@@ -45,7 +45,9 @@ def launcher(tmp_path: Path, version: str) -> str:
     import sys
 
     path = tmp_path / f"jobsctl-{version}"
-    path.write_text(LAUNCHER.format(python=sys.executable, version=version, root=ROOT), encoding="utf-8")
+    path.write_text(
+        LAUNCHER.format(python=sys.executable, version=version, root=ROOT), encoding="utf-8"
+    )
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return str(path)
 
