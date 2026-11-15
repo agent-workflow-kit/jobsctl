@@ -37,6 +37,8 @@ from jobsctl.leases import live_holder, parse_identity
 from jobsctl.log_files import check_appendable
 from jobsctl.proc_host import default_host
 from jobsctl.proc_signal import Result, signal_process
+from jobsctl.reconcile import Reconciler, Step, reconcile_job
+from jobsctl.result_file import read_result
 from jobsctl.spawn import spawn_internal
 from jobsctl.store_db import OpenMode, Store
 from jobsctl.store_dir import resolve_state_dir
@@ -60,13 +62,59 @@ class ForceTarget:
 
 def apply_reconcile(op: Op, row: sqlite3.Row) -> sqlite3.Row:
     """The Reconcile rules applied to the job before the request (with `--dry-run`: evaluated,
-    not applied). Returns the job's row afterwards.
+    not applied). Returns the job's row afterwards (a dry run: its projection). A job the rules
+    end is reported in that state and gets no request. `force_resumed` is not applied here: the
+    request that follows starts the `_kill` itself (`deliver_request`)."""
+    tx = op.tx
+    if tx is None:
+        return row
+    job_id = str(row["id"])
+    reconciler = Reconciler(op.config, default_host(), tx.store.paths.shims, warn=_warn)
+    applied, _ = reconcile_job(tx, reconciler, job_id, now=op.now, write=op.write)
+    if not applied:
+        return row
+    if op.write:
+        for item in applied:
+            for rec in item.records:
+                op.logs.append((rec.event, rec.fields, rec.level))
+            for action in item.after:
+                tx.after_commit(action)
+        after = tx.one("SELECT * FROM jobs WHERE id = ?", [job_id])
+        assert after is not None
+        return after
+    return _projected(op, row, applied)  # type: ignore[return-value]
 
-    TODO(#22): reconcile's rules for one job (result_file_finalized, boot_changed, job_gone,
-    shim_lost, ...) run here; a job they finalize is reported in its finalized state and gets no
-    request.
-    """
-    return row
+
+def _projected(op: Op, row: sqlite3.Row, applied: list[Step]) -> dict[str, Any]:
+    """The job row a dry run shows after the rules `applied`: the status they would give it."""
+    merged = dict(row)
+    for item in applied:
+        action = item.finding.action
+        if action == "marked_shim_lost":
+            merged["shim_lost"] = 1
+        elif action == "requeued":
+            merged.update(status="queued", attempt=int(row["attempt"]) - 1)
+        elif action == "canceled_forced":
+            merged.update(status="canceled", reason="forced", ended_at=op.now)
+        elif item.finding.finding == "result_file_finalized":
+            merged.update(_from_result(op, row))
+        else:  # failed_lost
+            merged.update(status="failed", reason="lost", ended_at=op.now)
+    return merged
+
+
+def _from_result(op: Op, row: sqlite3.Row) -> dict[str, Any]:
+    """The end the result file records (a force request committed after it is not applied in a
+    dry run, which shows the file's end)."""
+    assert op.tx is not None
+    record = read_result(op.tx.store.paths.shims, str(row["id"]), int(row["attempt"]))
+    assert record is not None
+    return {
+        "status": record.status,
+        "reason": record.reason,
+        "hold_reason": record.hold_reason,
+        "ended_at": op.now if record.status != "held" else row["ended_at"],
+    }
 
 
 def default_timeout(target: ForceTarget) -> int:

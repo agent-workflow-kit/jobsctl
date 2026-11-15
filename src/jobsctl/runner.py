@@ -3,8 +3,8 @@
 One :meth:`Runner.run_pass`:
 
 1. takes the ``runner`` lease (a live holder: ``already_running``, nothing done);
-2. hands the identity checks to ``reconcile`` (a hook point, ``TODO(#22)``) and reaps the shims
-   this process spawned, by PID;
+2. reaps the shims this process spawned, by PID, and applies the reconcile rules
+   (:mod:`jobsctl.reconcile`);
 3. claims jobs in one ``BEGIN IMMEDIATE`` transaction (counts read and claims written together,
    so the caps hold under any number of concurrent passes), recording the ``pass_requested``
    counter it started from;
@@ -52,26 +52,55 @@ from jobsctl.leases import (
 )
 from jobsctl.log_writer import RecordWriter
 from jobsctl.proc_host import Host, default_host
+from jobsctl.reconcile import Finding, Reconciler, run_rules
 from jobsctl.retention import run_retention
 from jobsctl.spawn import spawn_internal
 from jobsctl.store_db import Store
 from jobsctl.store_ops import (
     counter_get,
+    counter_incr,
     lease_release,
     lease_renew,
     take_lease,
     update_attempt_by_claim,
 )
 from jobsctl.timestamps import format_timestamp
-from jobsctl.triggers import PASS_REQUESTED, request_delivery, spawn_pass
+from jobsctl.triggers import PASS_REQUESTED, redeliverable_jobs, request_delivery, spawn_pass
 
 Reconcile = Callable[["Runner", "PassResult"], None]
 
 
 def no_reconcile(runner: Runner, result: PassResult) -> None:
-    """The identity-check hook point of pass step 2."""
-    # TODO(#22): reconcile's rules (boot change, claim_orphaned for dead claimers, shim_dead,
-    # job_gone, shim_lost, force_resumed, redelivery) run here, under the lease.
+    """A reconcile that does nothing (tests that exercise the other steps alone)."""
+
+
+def reconcile_step(runner: Runner, result: PassResult) -> None:
+    """Pass step 2 (interface.md, Reconcile): the rules of :mod:`jobsctl.reconcile` under the
+    lease. One job's failure is logged and skipped; the lease is renewed before each job; the step
+    stops after ``BUDGET_SECONDS`` and the rest waits for the next pass."""
+    reconciler = Reconciler(
+        runner.config,
+        runner.host,
+        runner.store.paths.shims,
+        warn=runner.warn_line,
+        spawn_kill=runner.spawn_kill,
+    )
+    applied = run_rules(
+        reconciler,
+        read=runner.store.read,
+        write=runner.store.write,
+        clock=runner.clock,
+        dry_run=False,
+        tick=runner.renew,
+        children=[],
+        emit=runner._emit,
+        fail=runner.job_failed,
+    )
+    for item in applied:
+        result.reconciled.append(item.finding.as_json())
+        result.changed = True
+        if item.frees_slot:
+            result.freed = True
 
 
 @dataclass
@@ -82,6 +111,7 @@ class PassResult:
     reconciled: list[dict[str, str]] = field(default_factory=list)
     warnings: list[dict[str, str]] = field(default_factory=list)
     changed: bool = False
+    freed: bool = False  # reconcile ended or requeued a job (a slot or a queued job appeared)
 
     def as_json(self) -> dict[str, Any]:
         holder = None
@@ -121,7 +151,7 @@ class Runner:
         host: Host | None = None,
         clock: Callable[[], dt.datetime] = gateway.utc_now,
         python: str | None = None,
-        reconcile: Reconcile = no_reconcile,
+        reconcile: Reconcile = reconcile_step,
     ) -> None:
         self.store = store
         self.config = config
@@ -142,9 +172,43 @@ class Runner:
     # -- the pass ------------------------------------------------------------------------------
 
     def run_pass(self, *, max_starts: int | None = None) -> PassResult:
+        result = PassResult()
+        if not self._acquire(result):
+            return result
+        released = False
+        try:
+            released = self._locked_pass(result, max_starts)
+        finally:
+            if not released:
+                self._abandon()
+        return result
+
+    def run_reconcile(self) -> PassResult:
+        """`jobsctl reconcile`: the identity checks, delivery and retention of a pass without
+        claiming. At release the ``pass_requested`` counter is compared with its value before the
+        lease was taken, and a changed one spawns a pass (``_abandon``)."""
+        result = PassResult()
+        if not self._acquire(result):
+            return result
+        try:
+            self._step("reconcile")
+            self._guarded("reconcile", result, lambda r: self.reconcile(self, r))
+            if result.freed:  # a slot or a requeued job: ask for a pass, answered at release
+                with self.store.write() as tx:
+                    counter_incr(tx, PASS_REQUESTED)
+            self._step("delivery")
+            self._guarded("delivery", result, self._request_delivery)
+            self._step("retention")
+            self._guarded("retention", result, self._retention)
+            self._checkpoint()
+        finally:
+            self._abandon()
+        return result
+
+    def _acquire(self, result: PassResult) -> bool:
+        """Take the runner lease; `False` when a live process holds it (`result` says who)."""
         self._env_file = None
         self.lease_taken = False
-        result = PassResult()
         now = self.clock()
         self._holder = own_identity(self.host)
         probe = liveness_probe(self.host)
@@ -162,19 +226,13 @@ class Runner:
             ):
                 break
             if self._already_running(result):
-                return result
+                return False
             # the holder vanished between the failed take and the read: take the lease once more
         else:
-            return result
+            return False
         self.lease_taken = True
         self._last_renew = gateway.monotonic()
-        released = False
-        try:
-            released = self._locked_pass(result, max_starts)
-        finally:
-            if not released:
-                self._abandon()
-        return result
+        return True
 
     def _counter_now(self) -> int:
         row = self.store.query_one("SELECT value FROM counters WHERE name = ?", [PASS_REQUESTED])
@@ -207,7 +265,7 @@ class Runner:
     def _locked_pass(self, result: PassResult, max_starts: int | None) -> bool:
         self._step("reconcile")
         self.reap(result)
-        self.reconcile(self, result)
+        self._guarded("reconcile", result, lambda r: self.reconcile(self, r))
         total = 0
         while True:
             self._step("claim")
@@ -246,6 +304,10 @@ class Runner:
         interval has passed (one cheap compare-and-set)."""
         if self.probe is not None:
             self.probe(name)
+        self.renew()
+
+    def renew(self) -> None:
+        """Renew the lease when a third of the renewal interval has passed."""
         if gateway.monotonic() - self._last_renew < RENEW_SECONDS / 3:
             return
         now = self.clock()
@@ -386,12 +448,40 @@ class Runner:
                 )
         self.children = still
 
+    def spawn_kill(self, job_id: str) -> subprocess.Popen[bytes]:
+        popen = spawn_internal(
+            self.store.paths.root, self.config, self.config_path, "_kill", [job_id]
+        )
+        self.children.append(Child(popen, "kill", job_id))
+        return popen
+
+    def warn_line(self, message: str) -> None:
+        self._safely_warn(message)
+
+    def job_failed(self, job_id: str, rule: str, exc: Exception) -> None:
+        self._safely_warn(f"reconcile {rule} of {job_id} failed ({type(exc).__name__})")
+
+    def _found(self, result: PassResult, job_id: str, finding: str, action: str) -> None:
+        item = Finding(job_id, finding, action)
+        result.reconciled.append(item.as_json())
+        self._safely(
+            lambda: self.writer.log(
+                "reconcile",
+                fields={"job_id": job_id, "finding": finding, "action": action},
+            )
+        )
+
     def _request_delivery(self, result: PassResult) -> None:
+        with self.store.read() as tx:
+            redeliver = redeliverable_jobs(tx, self.host, self.clock())
         child = request_delivery(
             self.store, self.config, self.config_path, host=self.host, now=self.clock()
         )
         if child is not None:
             self.children.append(Child(child, "deliver"))
+        # TODO(#24): `_deliver` delivers; until then the same jobs match again at every pass.
+        for job_id in redeliver:
+            self._found(result, job_id, "hooks_redelivered", "redelivered")
 
     def _retention(self, result: PassResult) -> None:
         outcome = run_retention(
@@ -403,6 +493,8 @@ class Runner:
         )
         if outcome.pruned or outcome.orphans_removed or outcome.queues_forgotten:
             result.changed = True
+        for job_id in outcome.pruned:
+            self._found(result, job_id, "pruned", "deleted")
         if outcome.audit_error is not None:
             self._fail_step("retention", type(outcome.audit_error).__name__, "audit append failed")
 

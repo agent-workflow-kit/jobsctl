@@ -251,68 +251,95 @@ def finish_running(
     tail: TailSnapshot | None,
     clock: Callable[[], str],
 ) -> FinalResult:
-    """Start sequence step 9, the final transaction: the transition, the final tail and the hook
-    events in one commit. It reads `force_requested_by`: a committed force request makes the end
-    `canceled` (`forced`) whatever the exit (interface.md, Status transitions).
-
-    `outcome` is what the shim decided: the exit's natural outcome, or `timeout` / `terminated` when
-    its signal sequence ran. The force request read here overrides it. A failed attempt that
-    automatic retry applies to (`auto_retry.plan_requeue`) returns the job to `queued` with
-    `not_before` instead of ending it; the attempt is `failed` either way.
-    """
+    """Start sequence step 9, the final transaction (see :func:`finish_running_in`), in a
+    transaction of its own. The clock is read inside it, after the write lock is held."""
     with store.write() as tx:
-        now = clock()  # read inside the transaction, after the write lock is held
-        view = read_claim_in(tx, job_id, claim_id)
-        if view is None or view.status != "running":
-            return FinalResult(False, None)
-        if view.force_requested_by is not None:
-            outcome = forced_outcome()
-        plan = None
-        if outcome.status == "failed" and outcome.reason is not None:
-            plan = plan_requeue(tx, config, job_id, claim_id, reason=outcome.reason, now=now)
-        job_updates: dict[str, Any] = {"status_changed_at": now, "not_before": None}
-        if plan is not None:
-            job_updates = plan
-        elif outcome.terminal:
-            job_updates.update(reason=outcome.reason, ended_at=now)
-        else:
-            job_updates.update(hold_reason=outcome.hold_reason)
-        won = transition_job_by_claim(
+        return finish_running_in(
             tx,
-            job_id,
-            claim_id=claim_id,
-            expect_status="running",
-            to_status=outcome.status if plan is None else "queued",
-            updates=job_updates,
-        )
-        if not won:
-            return FinalResult(False, None)
-        update_attempt_by_claim(
-            tx,
+            config,
             job_id,
             claim_id,
-            {
-                "status": outcome.status,
-                "reason": outcome.reason,
-                "hold_reason": outcome.hold_reason,
-                "ended_at": now,
-                "exit": json.dumps(exit_record.as_json()),
-                "leftovers": leftovers,
-            },
+            outcome=outcome,
+            exit_record=exit_record,
+            leftovers=leftovers,
+            tail=tail,
+            now=clock(),
         )
-        if tail is not None:  # `_kill` keeps the last flushed tail when it has no other
-            save_tail(tx, job_id, view.attempt, tail, now)
-        _post_event(tx, config, post_hook(outcome), job_id, view.attempt, "running", now)
-        record = transition_record(
-            job_id,
-            view.queue,
-            "running",
-            outcome.status if plan is None else "queued",
-            view.attempt,
-            reason=outcome.reason if plan is None else None,
-            hold_reason=outcome.hold_reason,
-            attempt_status=outcome.status,
-            attempt_reason=outcome.reason,
-            retry_pending=plan is not None,
-        )
-        return FinalResult(True, outcome, (record,))
+
+
+def finish_running_in(
+    tx: Tx,
+    config: Config,
+    job_id: str,
+    claim_id: str,
+    *,
+    outcome: Outcome,
+    exit_record: ExitRecord,
+    leftovers: int | None,
+    tail: TailSnapshot | None,
+    now: str,
+) -> FinalResult:
+    """The final transition of a `running` attempt, in the caller's transaction: the transition,
+    the final tail and the hook events together. It reads `force_requested_by`: a committed force
+    request makes the end `canceled` (`forced`) whatever the exit (interface.md, Status
+    transitions).
+
+    `outcome` is what the caller decided: the exit's natural outcome, or `timeout` / `terminated`
+    when a signal sequence ran, or `lost` (reconcile). The force request read here overrides it. A
+    failed attempt that automatic retry applies to (`auto_retry.plan_requeue`) returns the job to
+    `queued` with `not_before` instead of ending it; the attempt is `failed` either way.
+    """
+    view = read_claim_in(tx, job_id, claim_id)
+    if view is None or view.status != "running":
+        return FinalResult(False, None)
+    if view.force_requested_by is not None:
+        outcome = forced_outcome()
+    plan = None
+    if outcome.status == "failed" and outcome.reason is not None:
+        plan = plan_requeue(tx, config, job_id, claim_id, reason=outcome.reason, now=now)
+    job_updates: dict[str, Any] = {"status_changed_at": now, "not_before": None}
+    if plan is not None:
+        job_updates = plan
+    elif outcome.terminal:
+        job_updates.update(reason=outcome.reason, ended_at=now)
+    else:
+        job_updates.update(hold_reason=outcome.hold_reason)
+    won = transition_job_by_claim(
+        tx,
+        job_id,
+        claim_id=claim_id,
+        expect_status="running",
+        to_status=outcome.status if plan is None else "queued",
+        updates=job_updates,
+    )
+    if not won:
+        return FinalResult(False, None)
+    update_attempt_by_claim(
+        tx,
+        job_id,
+        claim_id,
+        {
+            "status": outcome.status,
+            "reason": outcome.reason,
+            "hold_reason": outcome.hold_reason,
+            "ended_at": now,
+            "exit": json.dumps(exit_record.as_json()),
+            "leftovers": leftovers,
+        },
+    )
+    if tail is not None:  # `_kill` keeps the last flushed tail when it has no other
+        save_tail(tx, job_id, view.attempt, tail, now)
+    _post_event(tx, config, post_hook(outcome), job_id, view.attempt, "running", now)
+    record = transition_record(
+        job_id,
+        view.queue,
+        "running",
+        outcome.status if plan is None else "queued",
+        view.attempt,
+        reason=outcome.reason if plan is None else None,
+        hold_reason=outcome.hold_reason,
+        attempt_status=outcome.status,
+        attempt_reason=outcome.reason,
+        retry_pending=plan is not None,
+    )
+    return FinalResult(True, outcome, (record,))

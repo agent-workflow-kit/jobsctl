@@ -425,7 +425,7 @@ def test_a_shim_identity_that_does_not_match_the_live_process_is_never_signaled(
     assert attempt_row(job_id)["force_requested_by"] == "human:kim"
 
 
-def test_a_shim_identity_from_another_boot_is_never_signaled(
+def test_a_shim_identity_from_another_boot_is_never_signaled_and_the_job_is_lost(
     capsys: pytest.CaptureFixture[str],
     procs: list[Any],
     tmp_path: Path,
@@ -435,9 +435,12 @@ def test_a_shim_identity_from_another_boot_is_never_signaled(
     bystander, log = start_fake_shim(procs, tmp_path, job_id, finalize=False)
     ident = Identity("0000-other-boot", bystander.pid, 1)
     sql("UPDATE attempts SET shim_identity = ? WHERE job_id = ?", format_identity(ident), job_id)
-    doc_of(force(capsys, job_id, "--wait-timeout", "0"))
+    doc = doc_of(force(capsys, job_id, "--wait-timeout", "0"))
     time.sleep(0.3)
-    assert lines(log) == [] and bystander.poll() is None and spawned_kills == [job_id]
+    # reconcile (`boot_changed`) ends the attempt first: no request, no wake-up, no `_kill`
+    assert lines(log) == [] and bystander.poll() is None and spawned_kills == []
+    assert doc["jobs"][0]["status"] == "failed" and doc["jobs"][0]["reason"] == "lost"
+    assert doc["changed"] is False
 
 
 @pytest.mark.parametrize("recorded", [None, "", "garbage", "a:b:c"])
