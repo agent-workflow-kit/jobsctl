@@ -16,6 +16,7 @@ from jobsctl import cancel_force
 from jobsctl.cli_output import print_json
 from jobsctl.cli_registry import Context, command
 from jobsctl.commands.wait import interrupts_as_keyboard_interrupt
+from jobsctl.delivery_cli import deliver_after_commit
 from jobsctl.env_file import load_env_file
 from jobsctl.errors import ExitCode, JobsctlError, refused
 from jobsctl.job_lookup import find_job, select_live_jobs
@@ -200,6 +201,10 @@ def cancel_command(ctx: Context) -> int:
                 done = _deliver_and_wait(ctx, done, targets)
     except KeyboardInterrupt:
         done = _interrupted(ctx, done, targets, already)
+    # a forced cancel's `post-cancel` is written by the shim or `_kill`, which deliver it
+    deliver_after_commit(
+        ctx, [d.job["id"] for d in done if d.changed and d.previous_status != "running"]
+    )
     if not args.dry_run and any(d.changed and d.previous_status == "starting" for d in done):
         request_pass_from_command(ctx.config, ctx.config_path, quiet=ctx.quiet)  # a slot is free
     _print(ctx, done, refusals)

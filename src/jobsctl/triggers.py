@@ -114,5 +114,28 @@ def request_delivery(
         holder = holder_of(tx.one(LEASE_COLUMNS, ["deliver"]), host, now)
     if holder is not None:
         return None
-    # TODO(#24): `_deliver` is not implemented yet; see the note in commands/internal.py.
     return spawn_internal(store.paths.root, config, config_path, "_deliver")
+
+
+def request_delivery_quietly(
+    store: Store,
+    config: Config,
+    config_path: Path | None,
+    *,
+    host: Host | None = None,
+    warn: bool = True,
+) -> subprocess.Popen[bytes] | None:
+    """Request delivery after this process left events for `_deliver` (`async` hooks). A request
+    that cannot be made never fails the caller: the next pass requests delivery again."""
+    if not config.auto_run:
+        return None
+    try:
+        return request_delivery(
+            store, config, config_path, host=host or default_host(), now=gateway.utc_now()
+        )
+    except (JobsctlError, OSError) as exc:
+        if warn:
+            reason = exc.message if isinstance(exc, JobsctlError) else type(exc).__name__
+            sys.stderr.write(f"jobsctl: warning: could not request delivery ({reason})\n")
+            sys.stderr.flush()
+        return None

@@ -11,6 +11,7 @@ import sys
 
 from jobsctl.cli_output import print_json
 from jobsctl.cli_registry import Context, command
+from jobsctl.delivery_cli import deliver_after_commit
 from jobsctl.env_file import load_env_file
 from jobsctl.job_lookup import find_job
 from jobsctl.textsafe import sanitize
@@ -35,6 +36,8 @@ def hold_command(ctx: Context) -> int:
         return hold(op, find_job(op.tx, ctx.args.id))
 
     done = run_manual(ctx, body, load_env=lambda: load_env_file(ctx.config.env_file))
+    if done.changed:
+        deliver_after_commit(ctx, [done.job["id"]])  # the `post-held` event
     return _report(ctx, done, "held")
 
 

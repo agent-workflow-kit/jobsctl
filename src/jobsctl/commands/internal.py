@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 
 from jobsctl.cli_registry import Context, command
+from jobsctl.deliver import Delivery
+from jobsctl.deliver import prepare_process as prepare_deliver
 from jobsctl.diag import install
 from jobsctl.env_file import disable_dumpable
 from jobsctl.kill import Killer
@@ -12,10 +14,6 @@ from jobsctl.kill import prepare_process as prepare_kill
 from jobsctl.shim import Shim, StopSignal, prepare_process
 from jobsctl.store_db import OpenMode, Store
 from jobsctl.store_dir import resolve_state_dir
-
-# TODO(#24): `_deliver` has no handler yet, so a spawned `_deliver` exits at once ("not implemented
-# yet", in its diag file) and the next pass requests (and spawns) it again for as long as events
-# stay undelivered. Interim churn only; the deliver issue registers the handler here.
 
 
 @command("_shim")
@@ -51,3 +49,16 @@ def kill(ctx: Context) -> int:
     prepare_kill(stop)
     with Store.open(mode=OpenMode.INTERNAL, busy_timeout=ctx.config.busy_timeout) as store:
         return Killer(store, ctx.config, ctx.config_path, ctx.args.id, stop=stop).run()
+
+
+@command("_deliver")
+def deliver(ctx: Context) -> int:
+    """The delivery process (`[python, -I, -m, jobsctl, _deliver]`, started by a pass or by a
+    process that left `async` events): diagnostics in `diag/deliver-<pid>.log`, then
+    `jobsctl.deliver` under the `deliver` lease."""
+    disable_dumpable()
+    install(resolve_state_dir() / "diag" / f"deliver-{os.getpid()}.log")
+    stop = StopSignal()
+    prepare_deliver(stop)
+    with Store.open(mode=OpenMode.INTERNAL, busy_timeout=ctx.config.busy_timeout) as store:
+        return Delivery(store, ctx.config, ctx.config_path, stop=stop).run()

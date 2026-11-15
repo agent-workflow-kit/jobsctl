@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from jobsctl.cli_registry import Context, command
 from jobsctl.commands.hold_release import _report  # pyright: ignore[reportPrivateUsage]
+from jobsctl.delivery_cli import deliver_after_commit
 from jobsctl.env_file import load_env_file
 from jobsctl.job_lookup import find_job
 from jobsctl.note_file import read_note
@@ -44,4 +45,6 @@ def resolve_command(ctx: Context) -> int:
         return resolve(op, find_job(op.tx, args.id), as_=args.as_, note=note)
 
     done = run_manual(ctx, body, load_env=lambda: load_env_file(ctx.config.env_file))
+    if done.changed:
+        deliver_after_commit(ctx, [done.job["id"]])  # the `post-finish`/`post-fail`/`post-cancel`
     return _report(ctx, done, "resolved")

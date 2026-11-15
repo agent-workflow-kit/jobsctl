@@ -11,7 +11,7 @@ SIGINT, SIGHUP and SIGTERM then only record themselves; ``run_hook`` sees ``stop
 the hook's group (SIGTERM, 5 seconds, SIGKILL, leader held unreaped) and returns. The command
 leaves the event undelivered (``_deliver`` delivers it later) and exits 130 (`interrupted`) for
 SIGINT, else 1 (`internal`).
-TODO(#24): the delivery code calls this around every synchronous hook it runs in a command.
+Used by ``delivery_cli`` around every synchronous hook a command runs.
 """
 
 from __future__ import annotations
@@ -57,15 +57,14 @@ class InterruptGuard:
         """The ``stop`` callback of ``run_hook``: the signal's name once one was received."""
         return None if self.signum is None else signal.Signals(self.signum).name
 
-    def check(self, result: HookResult) -> None:
+    def check(self, result: HookResult | None = None) -> None:
         """Raise the command's error if a signal was received, whether or not ``result`` was
         stopped by it (the signal may arrive after the last ``stop`` poll, while the hook ends on
         its own). Call it before marking the event delivered."""
         if self.signum is None:
             return
         name = signal.Signals(self.signum).name
-        message = (
-            f"interrupted by {name} while running hook {result.hook!r}; its event stays undelivered"
-        )
+        what = "between hooks" if result is None else f"while running hook {result.hook!r}"
+        message = f"interrupted by {name} {what}; its event stays undelivered"
         code = "interrupted" if self.signum == signal.SIGINT else "internal"
         raise JobsctlError(code, message)
