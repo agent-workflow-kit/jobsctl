@@ -29,7 +29,7 @@ from jobsctl.ids import generate_job_id
 from jobsctl.job_view import job_object, job_row
 from jobsctl.log_records import argv_sha256
 from jobsctl.log_writer import RecordWriter
-from jobsctl.positions import head_position, tail_position
+from jobsctl.order import head_position, tail_position
 from jobsctl.store_db import OpenMode, Store, Tx
 from jobsctl.store_dir import resolve_state_dir
 from jobsctl.store_ops import insert_job
@@ -56,6 +56,14 @@ class Request:
     overrides: dict[str, Any]
     actor: str
     decision_ids: list[str]
+    # `me.name` or the OS user name as given, when it became the default actor (the actor holds
+    # only its sanitized form); secret check only.
+    default_user_name: str | None = field(default=None, repr=False)
+    # True when --actor was given (changes only the wording of the secret_in_actor refusal).
+    actor_explicit: bool = False
+    # The `--env`/`--pass-env` duplicate or conflict error, raised only after the name checks
+    # (it would echo a variable name that may itself be a secret).
+    name_conflict: str | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -117,14 +125,15 @@ def _overrides(args: Any) -> dict[str, Any]:
 def build_request(ctx: Context) -> Request:
     args = ctx.args
     env: dict[str, str] = {}
+    name_conflict: str | None = None
     for name, value in args.env:
-        if name in env:
-            raise usage_error("an --env name is given more than once")
+        if name in env and name_conflict is None:
+            name_conflict = "an --env name is given more than once"
         env[name] = value
     pass_env = list(dict.fromkeys(args.pass_env))  # a repeated name is the same name
     for name in pass_env:
-        if name in env:
-            raise usage_error("a name is given with both --env and --pass-env")
+        if name in env and name_conflict is None:
+            name_conflict = "a name is given with both --env and --pass-env"
     if args.cwd is not None:
         cwd_given = args.cwd
         cwd = normalize_cwd(cwd_given)
@@ -146,6 +155,11 @@ def build_request(ctx: Context) -> Request:
         overrides=_overrides(args),
         actor=ctx.actor,
         decision_ids=list(args.decision_id),
+        default_user_name=(
+            ctx.me_name if ctx.explicit_actor is None and ctx.stdin_isatty else None
+        ),
+        actor_explicit=ctx.explicit_actor is not None,
+        name_conflict=name_conflict,
     )
 
 
@@ -157,7 +171,11 @@ def check_secrets(
 ) -> None:
     """Refuse (exit 2, naming an index, a variable or a field, never a value) any argv element,
     `--env` value, queue, unique key, label key or value or cwd holding a masked value, and any
-    `--env` name that is in `mask_env` or `env_file`."""
+    `--env` name that is in `mask_env` or `env_file`. The names come first: no later message may
+    echo a variable name that itself holds a secret."""
+    _check_names(req, masking)
+    if req.name_conflict is not None:
+        raise usage_error(req.name_conflict)
     for index, element in enumerate(req.argv):
         if masking.contains_secret(element):
             raise usage_error(
@@ -180,6 +198,34 @@ def check_secrets(
                 variable=name,
             )
     _check_fields(req, masking)
+
+
+def _check_names(req: Request, masking: MaskingSet) -> None:
+    """The actor, the decision ids and the variable names are logged, audited or printed as
+    given, and their grammars admit a secret. The refusals name the field, never the value or
+    the position (the name is the secret)."""
+    if masking.contains_secret(req.actor) or (
+        req.default_user_name is not None and masking.contains_secret(req.default_user_name)
+    ):
+        if req.actor_explicit:
+            raise usage_error("--actor contains a secret value", code="secret_in_actor")
+        raise usage_error(
+            "the default actor contains a secret value; pass a different --actor",
+            code="secret_in_actor",
+        )
+    for decision_id in req.decision_ids:
+        if masking.contains_secret(decision_id):
+            raise usage_error(
+                "a --decision-id contains a secret value", code="secret_in_decision_id"
+            )
+    for name in req.env:
+        if masking.contains_secret(name):
+            raise usage_error("an --env name contains a secret value", code="secret_in_env_name")
+    for name in req.pass_env:
+        if masking.contains_secret(name):
+            raise usage_error(
+                "a --pass-env name contains a secret value", code="secret_in_pass_env_name"
+            )
 
 
 def _check_fields(req: Request, masking: MaskingSet) -> None:
@@ -333,11 +379,7 @@ def decide(
     if not write:
         return out
     assert tx is not None
-    position = (
-        head_position(tx, req.queue, pinned=req.pin, priority=req.priority)
-        if req.top
-        else tail_position(tx, req.queue)
-    )
+    position = head_position(tx, req.queue) if req.top else tail_position(tx, req.queue)
     job_id = generate_job_id(lambda candidate: _taken(tx, candidate))
     if not insert_job(tx, _job_values(req, job_id, position, now)):
         raced = _holder(tx, req.unique_key)  # the partial index decided: reuse that job
