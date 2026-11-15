@@ -42,11 +42,8 @@ def _read_stdin() -> bytes:
         fd = None
     if fd is not None:
         # a non-blocking stdin would give short reads (silent truncation) or None
-        try:
-            os.set_blocking(fd, True)
-            return _read_fd(fd)
-        except BlockingIOError:
-            raise usage_error("stdin is not ready; it cannot supply the note") from None
+        os.set_blocking(fd, True)
+        return _read_fd(fd)
     binary = getattr(stream, "buffer", None)
     if binary is not None:
         return bytes(binary.read(_READ_LIMIT))

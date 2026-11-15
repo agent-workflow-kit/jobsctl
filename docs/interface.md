@@ -550,7 +550,7 @@ A job waiting for an automatic retry is `queued`, so `wait` keeps waiting. Exit 
 
 `jobsctl resolve <id> [--as done|failed|canceled] [--note-file PATH|-]`
 
-Closes a held job for good into the given terminal status (default `done`) with reason `resolved`; the note (untrusted, at most 4096 bytes, else exit 2; read with `O_NONBLOCK`, at most 4097 bytes, from a regular file or stdin; a note file or stdin that cannot be read, is not a regular file (a path) or is not UTF-8 also exits 2) and the actor are recorded on the job and on its current attempt, if any (`resolved_by`, `note`). A job already terminal with reason `resolved` and the same status: exit 0, `changed: false`. Refusal: `not_held` (with `details.status`).
+Closes a held job for good into the given terminal status (default `done`) with reason `resolved`; the note (untrusted, at most 4096 bytes, else exit 2; at most 4097 bytes are read; a note file path is opened with `O_NONBLOCK` and must be a regular file, and stdin is read blocking until EOF or 4097 bytes; a note file or stdin that cannot be read, is not UTF-8 also exits 2) and the actor are recorded on the job and on its current attempt, if any (`resolved_by`, `note`). A job already terminal with reason `resolved` and the same status: exit 0, `changed: false`. Refusal: `not_held` (with `details.status`).
 
 To continue an `exit_13` job under the same id, [`retry`](#retry) it instead: no terminal hook fires.
 
