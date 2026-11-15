@@ -79,12 +79,13 @@ class CrontabError(Exception):
 _CRONTAB_TIMEOUT = 30.0
 
 
-def _crontab(args: list[str]) -> subprocess.CompletedProcess[bytes]:
+def _crontab(args: list[str], data: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
     """Run ``crontab`` with bytes in and out (a crontab is not necessarily text) and the C locale,
     so its "no crontab" message is the one ``crontab_read`` looks for."""
     try:
         return subprocess.run(
             ["crontab", *args],
+            input=data,
             capture_output=True,
             env={**os.environ, "LC_ALL": "C"},
             timeout=_CRONTAB_TIMEOUT,
@@ -113,9 +114,10 @@ def crontab_read() -> bytes | None:
     raise CrontabError(_crontab_message(proc))
 
 
-def crontab_install(path: str) -> None:
-    """Replace the user's crontab with the file ``path`` (absolute)."""
-    proc = _crontab([path])
+def crontab_install(data: bytes) -> None:
+    """Replace the user's crontab with ``data``, sent on stdin (``crontab -``). A file argument
+    would be limited by the program's own path buffer (Debian's cron truncates long paths)."""
+    proc = _crontab(["-"], data)
     if proc.returncode != 0:
         raise CrontabError(_crontab_message(proc))
 

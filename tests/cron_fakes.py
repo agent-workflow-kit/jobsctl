@@ -23,13 +23,13 @@ case "$1" in
     case "$FAKE_CRONTAB_FAIL" in *remove*) echo "crontab: cannot remove" >&2; exit 2;; esac
     rm -f "$FAKE_CRONTAB"
     ;;
--*)
-    echo "crontab: bad option $1" >&2
-    exit 2
+-)
+    case "$FAKE_CRONTAB_FAIL" in *install*) echo "crontab: bad crontab" >&2; exit 2;; esac
+    cat > "$FAKE_CRONTAB.new" && mv "$FAKE_CRONTAB.new" "$FAKE_CRONTAB"
     ;;
 *)
-    case "$FAKE_CRONTAB_FAIL" in *install*) echo "crontab: bad crontab" >&2; exit 2;; esac
-    cp "$1" "$FAKE_CRONTAB.new" && mv "$FAKE_CRONTAB.new" "$FAKE_CRONTAB"
+    echo "crontab: bad argument $1" >&2
+    exit 2
     ;;
 esac
 """

@@ -209,7 +209,7 @@ def test_a_failing_crontab_install_leaves_the_crontab_alone(
     res = run_cli(capsys, "--json", "cron", "install")
     assert res.code == 1 and "unchanged" in res.envelope()["error"]["message"]
     assert fake.get() == b"precious\n"
-    assert not list(_state(tmp_path / "home").glob("crontab-*"))  # staging file removed
+    assert fake.calls() == ["-l", "-l", "-"]
 
 
 def test_a_failing_crontab_read_is_an_error_not_an_empty_crontab(
@@ -239,7 +239,7 @@ def test_a_write_that_does_not_read_back_is_reported(
 ) -> None:
     from jobsctl import gateway
 
-    monkeypatch.setattr(gateway, "crontab_install", lambda path: None)  # a no-op "success"
+    monkeypatch.setattr(gateway, "crontab_install", lambda data: None)  # a no-op "success"
     res = run_cli(capsys, "--json", "cron", "install")
     assert res.code == 1 and "read back" in res.envelope()["error"]["message"]
 

@@ -16,11 +16,9 @@ import os
 import shutil
 import stat
 import sys
-import tempfile
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from jobsctl import gateway
@@ -268,30 +266,18 @@ def _same(a: bytes | None, b: bytes | None) -> bool:
     return (a or b"") == (b or b"")
 
 
-def _write(data: bytes, state_dir: Path) -> None:
-    """Install ``data`` with the crontab command from a private temp file (never stdin), or remove
-    the crontab when ``data`` is empty."""
+def _write(data: bytes) -> None:
+    """Install ``data`` with the crontab command, or remove the crontab when ``data`` is empty."""
     try:
         if data == b"":
             gateway.crontab_remove()
-            return
-        fd, name = tempfile.mkstemp(prefix="crontab-", dir=state_dir)
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-            gateway.crontab_install(name)
-        finally:
-            try:
-                os.unlink(name)
-            except FileNotFoundError:
-                pass
+        else:
+            gateway.crontab_install(data)
     except gateway.CrontabError as exc:
         raise _fail(f"the crontab command failed; your crontab is unchanged: {exc}") from exc
-    except OSError as exc:
-        raise _fail(f"cannot stage the crontab: {exc.strerror}") from exc
 
 
-def _locked_state_dir() -> tuple[Path, int]:
+def _acquire_lock() -> int:
     paths = prepare_state_dir(resolve_state_dir(), create=True)
     lock = paths.root / "cron.lock"
     try:
@@ -306,13 +292,13 @@ def _locked_state_dir() -> tuple[Path, int]:
     except BaseException:
         os.close(fd)
         raise
-    return paths.root, fd
+    return fd
 
 
 def _commit(compute: Callable[[bytes | None], bytes]) -> tuple[bool, bytes | None]:
     """Under the cron lock: read, compute the new crontab, re-read to catch a concurrent editor,
     write, read back and check. Returns whether it wrote and the final crontab."""
-    state_dir, lock_fd = _locked_state_dir()
+    lock_fd = _acquire_lock()
     try:
         for _attempt in range(3):
             before = _read()
@@ -321,7 +307,7 @@ def _commit(compute: Callable[[bytes | None], bytes]) -> tuple[bool, bytes | Non
                 return False, before
             if not _same(_read(), before):
                 continue  # someone else edited the crontab meanwhile: recompute
-            _write(after, state_dir)
+            _write(after)
             seen = _read()
             if not _same(seen, after):
                 raise _fail(
