@@ -8,6 +8,8 @@ passed via stdin or files, never in argv or the environment.
 
 from __future__ import annotations
 
+import datetime as dt
+import fcntl
 import os
 import subprocess
 from collections.abc import Mapping
@@ -49,3 +51,18 @@ def spawn(
         close_fds=True,
         process_group=0 if new_process_group else None,
     )
+
+
+def flock_exclusive(fd: int) -> None:
+    """Block until this process holds an exclusive advisory lock on ``fd`` (released by
+    :func:`funlock` or by closing ``fd``; the kernel drops it when the process dies)."""
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def funlock(fd: int) -> None:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def utc_now() -> dt.datetime:
+    """The wall clock, timezone-aware UTC (tests replace this or pass their own clock)."""
+    return dt.datetime.now(dt.UTC)

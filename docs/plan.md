@@ -17,18 +17,19 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 
 | Module | Stage | Responsibility |
 |---|---|---|
-| `cli.py`, `cli_surface.py`, `cli_values.py`, `cli_registry.py`, `cli_output.py` | 0 | entry point and dispatch; the argparse surface and usage checks; flag value grammars (`TODO(#4)`: parsing moves to `durations.py`, `timestamps.py`, `ids.py`); the `@command` registry and `Context`; human and `--json` output and error envelopes |
+| `cli.py`, `cli_surface.py`, `cli_values.py`, `cli_registry.py`, `cli_output.py` | 0 | entry point and dispatch; the argparse surface and usage checks; flag value `type=` adapters over the grammar modules; the `@command` registry and `Context`; human and `--json` output and error envelopes |
 | `actors.py`, `checks.py`, `errors.py`, `textsafe.py` | 0 | actors and the human-only gate; the check order (usage → not found/ambiguous → refusals → human gate); error codes, exit codes, the envelope; the sanitizer |
 | `config.py` | 0 | YAML + `config.d` merge, Pydantic models, defaults equal to `config.example.yaml`, unknown-queue-selector warnings, absolute `--config` propagation |
-| `validate.py`, `durations.py`, `timestamps.py` | 0 (planned; `TODO(#4)`) | grammars (queues, labels, unique keys, env names, actors, decision ids, hook names), durations, UTC millisecond timestamps |
-| `ids.py` | 0 (planned; `TODO(#4)`) | `jb-` id generation against jobs and `pruned_ids`, prefix resolution (2/10/21) |
+| `validate.py`, `durations.py`, `timestamps.py` | 0 | grammars (queues, labels and the 32-label set, unique keys, env names, decision ids; actors stay in `actors.py`, hook names come with the hooks issue), durations, UTC millisecond timestamps |
+| `ids.py` | 0 | `jb-` id generation with a pluggable `taken` predicate (jobs and `pruned_ids`, supplied by the store), prefix resolution (2/10/21) with a pluggable lookup |
 | `gateway.py` | 0 | the single boundary for subprocess calls (`run`, `spawn`, `Popen`) |
 | `gateway_proc.py` | 0 | raw process syscalls through `os` and `ctypes`: `kill`/`killpg` with argument validation, pidfds and the allow-listed `syscall()` fallback, `prctl`, `waitid`/`waitpid`, libproc, `sysctl` |
 | `proc_host.py`, `proc_identity.py`, `proc_signal.py`, `proc_group.py`, `proc_linux.py` | 0 | the `Host` seam (`/proc` reads, libproc); process identity (Linux `/proc` field 22, boot id; macOS `libproc`, `kern.bootsessionuuid`), liveness, pidfd with the allow-listed ctypes `syscall()` fallback and the re-check before `kill` without pidfds, dumpability, group probing |
 | `store.py` | 0 | connection setup, additive migrations at open for CLI commands, `user_version` checks for long-lived and internal processes, compare-and-set helpers, outbox writes |
-| `audit.py` | 0 | `log.jsonl`/`audit.jsonl` with `flock` + `state.db` `seq` counters, once-per-change-of-state warnings |
+| `log_records.py`, `log_files.py`, `log_writer.py`, `log_export.py` | 0 | `log.jsonl`/`audit.jsonl` with `flock` + `state.db` `seq` counters, once-per-change-of-state warnings, `export` |
+| `diag.py` | 2 (planned) | diagnostics files of triggered passes and internal processes (`diag/<kind>-<pid>.log`, 0600, created on first write, capped at 1 MiB, deleted after 7 days; D43) |
 | `order.py` | 1 | position keys, `rank`, `move`/`pin`/`priority`, selection across queues, `blocked_by`, capacity |
-| `env.py` | 1 | `env_file` loading and checks (ancestors, `O_NOFOLLOW`/`O_NONBLOCK`, format), canonical environment, job environment, masking set |
+| `env_file.py`, `env_canonical.py`, `env_job.py`, `env_mask.py` | 1 | `env_file` loading and checks (ancestors, `O_NOFOLLOW`/`O_NONBLOCK`, format, `PR_SET_DUMPABLE`); canonical environment; job environment; masking set |
 | `commands/` | 1–4 | one module per command group |
 | `runner.py` | 2 | the pass: lease, reconcile, claim loop with the `pass_requested` counter, shim spawn and identity record, delivery hand-off, retention, checkpoint; `run --loop` |
 | `shim.py` | 2–4 | start sequence, output pump, tail flush, final commit and result file, timeout, signal sequence |

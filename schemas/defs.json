@@ -392,7 +392,24 @@
         "path": {
           "type": "string",
           "minLength": 1,
-          "description": "path_entry_dropped: the dropped PATH entry (omitted when variable names a dropped XDG_* variable)."
+          "description": "path_entry_dropped: the dropped PATH entry (omitted when variable names a dropped XDG_* variable, and for an empty entry)."
+        },
+        "reason": {
+          "enum": [
+            "mode",
+            "size",
+            "owner",
+            "not_regular",
+            "ancestor",
+            "open",
+            "path",
+            "read",
+            "empty",
+            "relative",
+            "temporary",
+            "missing"
+          ],
+          "description": "env_file_unsafe: mode, size, owner, not_regular, ancestor, open, path or read; path_entry_dropped from PATH cleaning: empty, relative, temporary or missing."
         }
       },
       "additionalProperties": false,
@@ -451,8 +468,97 @@
                 "required": [
                   "variable"
                 ]
+              },
+              {
+                "properties": {
+                  "reason": {
+                    "const": "empty"
+                  }
+                },
+                "required": [
+                  "reason"
+                ],
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "path"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "variable"
+                      ]
+                    }
+                  ]
+                }
               }
             ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "env_file_unsafe"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "mode",
+                  "size",
+                  "owner",
+                  "not_regular",
+                  "ancestor",
+                  "open",
+                  "path",
+                  "read"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "path_entry_dropped"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "empty",
+                  "relative",
+                  "temporary",
+                  "missing"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "env_file_unsafe",
+                  "path_entry_dropped"
+                ]
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "reason"
+              ]
+            }
           }
         }
       ],
