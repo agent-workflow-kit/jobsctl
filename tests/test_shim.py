@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import sys
 import threading
 import time
@@ -18,7 +17,6 @@ from jobsctl.errors import JobsctlError
 from jobsctl.store_db import Store
 from tests.conftest import validate_against
 from tests.shim_helpers import (
-    CLAIM,
     JOB,
     attempt,
     environ,
@@ -26,6 +24,7 @@ from tests.shim_helpers import (
     job,
     log_records,
     make_shim,
+    one,
     seed_claimed,
     shims_dir,
     tail_of,
@@ -320,9 +319,9 @@ def test_an_unsafe_env_file_makes_pass_env_unavailable(store: Store, tmp_path: P
 
 def test_a_stale_claim_id_writes_nothing(store: Store) -> None:
     seed_claimed(store, ["true"])
-    before = store.query_one("SELECT * FROM attempts")
+    before = one(store, "SELECT * FROM attempts")
     assert make_shim(store, claim_id="claim-other").run() == 0
-    assert dict(store.query_one("SELECT * FROM attempts")) == dict(before)
+    assert dict(one(store, "SELECT * FROM attempts")) == dict(before)
     assert job(store)["status"] == "starting"
 
 
@@ -385,7 +384,8 @@ def test_a_cancel_between_the_checks_and_the_start_transaction_wins(
     """The cancel commits after cwd, environment and `argv[0]` were checked but before the start
     transaction: the transaction re-reads the job and spawns nothing."""
     seed_claimed(store, ["true"])
-    from jobsctl import gateway, shim as shim_module
+    from jobsctl import gateway
+    from jobsctl import shim as shim_module
 
     spawned: list[object] = []
     monkeypatch.setattr(gateway, "spawn_job", lambda *a, **k: spawned.append(1))
@@ -416,7 +416,7 @@ def test_a_cancel_after_the_start_transaction_sees_running(store: Store) -> None
         with Store.open() as other:
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
-                row = other.query_one("SELECT status FROM jobs WHERE id = ?", [JOB])
+                row = one(other, "SELECT status FROM jobs WHERE id = ?", [JOB])
                 if row["status"] == "running":
                     seen.append("running")
                     return
@@ -445,7 +445,7 @@ def test_the_job_lease_wait_writes_nothing_and_ends_on_sigterm(store: Store, sle
     t.join()
     assert time.monotonic() - started >= 0.5
     assert job(store)["status"] == "starting" and attempt(store)["effective"] is None
-    lease = store.query_one("SELECT holder_identity FROM leases WHERE name = ?", [f"job:{JOB}"])
+    lease = one(store, "SELECT holder_identity FROM leases WHERE name = ?", [f"job:{JOB}"])
     assert lease["holder_identity"] == sleeper  # not stolen, not released
 
 
@@ -502,7 +502,7 @@ def test_confirming_resets_the_spawn_failure_count(store: Store) -> None:
         with Store.open() as other:
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
-                row = other.query_one("SELECT status, spawn_failures FROM jobs WHERE id = ?", [JOB])
+                row = one(other, "SELECT status, spawn_failures FROM jobs WHERE id = ?", [JOB])
                 if row["status"] == "running":
                     seen.append(row["spawn_failures"])
                     return
@@ -527,7 +527,7 @@ def test_a_committed_force_request_makes_the_end_canceled_forced_whatever_the_ex
         with Store.open() as other:
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
-                row = other.query_one("SELECT status FROM jobs WHERE id = ?", [JOB])
+                row = one(other, "SELECT status FROM jobs WHERE id = ?", [JOB])
                 if row["status"] == "running":
                     with other.write() as tx:
                         tx.execute(

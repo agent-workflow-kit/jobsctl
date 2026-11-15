@@ -141,3 +141,10 @@ def shims_dir() -> Path:
     from jobsctl.store_dir import resolve_state_dir
 
     return resolve_state_dir() / "shims"
+
+
+def one(store: Store, sql: str, params: list[Any] | None = None) -> Any:
+    """One row that must exist."""
+    row = store.query_one(sql, params or [])
+    assert row is not None
+    return row
