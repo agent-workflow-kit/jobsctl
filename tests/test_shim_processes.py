@@ -138,7 +138,7 @@ def test_a_job_that_writes_after_the_shim_died_gets_sigpipe_spike_b4(
     raise AssertionError("the writing job survived the loss of its reader")
 
 
-def test_two_gigabytes_style_flood_stays_in_bounded_memory_spike_b4(
+def test_a_flood_of_output_stays_in_bounded_memory_spike_b4(
     real_shims: RealShims,
 ) -> None:
     """256 MiB through the pipe: the shim's resident set stays small (the spike measured 12 MB
