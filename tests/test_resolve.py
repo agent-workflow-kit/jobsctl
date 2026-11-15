@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -412,3 +413,44 @@ def test_human_output_sanitizes_the_note(
     make_held(job_id, "manual")
     res = run_cli(capsys, "resolve", job_id, "--note-file", str(f))
     assert res.code == 0 and "\x1b" not in res.out
+
+
+def _nonblocking_pipe() -> tuple[int, int]:
+    r, w = os.pipe()
+    os.set_blocking(r, False)
+    return r, w
+
+
+def test_a_nonblocking_stdin_pipe_is_read_to_the_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    r, w = _nonblocking_pipe()
+    os.write(w, b"first ")
+
+    def finish() -> None:
+        time.sleep(0.2)
+        os.write(w, b"second")
+        os.close(w)
+
+    t = threading.Thread(target=finish)
+    t.start()
+    stream = os.fdopen(r, "r", encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", stream)
+    try:
+        assert read_note("-") == "first second"
+    finally:
+        t.join()
+        stream.close()
+
+
+def test_an_empty_nonblocking_stdin_with_an_open_writer_does_not_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    r, w = _nonblocking_pipe()
+    timer = threading.Timer(0.2, os.close, args=(w,))
+    timer.start()
+    stream = os.fdopen(r, "r", encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", stream)
+    try:
+        assert read_note("-") == ""
+    finally:
+        timer.join()
+        stream.close()

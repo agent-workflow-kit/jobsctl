@@ -12,6 +12,7 @@ from jobsctl.config import Config
 from jobsctl.order import integer_key
 from jobsctl.store_db import OpenMode, Store
 from tests.shim_helpers import (
+    CLAIM,
     JOB,
     attempt,
     job,
@@ -20,7 +21,7 @@ from tests.shim_helpers import (
     one,
     seed_claimed,
 )
-from tests.store_helpers import insert_row, job_values
+from tests.store_helpers import NOW, insert_row, job_values
 
 
 @pytest.fixture
@@ -198,3 +199,106 @@ def test_the_job_keeps_its_unique_key_and_override_hooks(store: Store) -> None:
     row = job(store)
     assert row["status"] == "queued" and row["unique_key"] == "k"
     assert row["override_hooks"] == '["h"]'
+
+
+def test_a_failure_after_a_retried_start_keeps_no_not_before(store: Store) -> None:
+    seed_claimed(store, ["false"])
+    with store.write() as tx:
+        tx.execute("UPDATE jobs SET not_before = ?, auto_retries = 2 WHERE id = ?", [NOW, JOB])
+    make_shim(store, config(retries=2)).run()
+    row = job(store)
+    assert (row["status"], row["not_before"]) == ("failed", None)
+
+
+def test_an_exit_13_hold_after_a_retried_start_keeps_no_not_before(store: Store) -> None:
+    seed_claimed(store, ["sh", "-c", "exit 13"])
+    with store.write() as tx:
+        tx.execute("UPDATE jobs SET not_before = ?, auto_retries = 1 WHERE id = ?", [NOW, JOB])
+    make_shim(store, config()).run()
+    row = job(store)
+    assert (row["status"], row["not_before"]) == ("held", None)
+
+
+def test_a_non_requeue_failure_while_starting_keeps_no_not_before(
+    store: Store, tmp_path: Any
+) -> None:
+    seed_claimed(store, ["true"], cwd=str(tmp_path / "gone"))
+    with store.write() as tx:
+        tx.execute("UPDATE jobs SET not_before = ? WHERE id = ?", [NOW, JOB])
+    make_shim(store, config()).run()
+    row = job(store)
+    assert (row["status"], row["reason"], row["not_before"]) == ("failed", "cwd_missing", None)
+
+
+def test_the_final_commit_reads_the_clock_inside_the_transaction(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import jobsctl.shim as shim_module
+
+    seed_claimed(store, ["true"])
+    shim = make_shim(store, config())
+    reads: list[int] = []
+    real_clock = shim.clock
+
+    def counting() -> Any:
+        reads.append(1)
+        return real_clock()
+
+    shim.clock = counting  # type: ignore[method-assign]
+    real = shim_module.finish_running
+    seen: list[tuple[int, int]] = []
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        before = len(reads)
+        out = real(*args, **kwargs)
+        seen.append((before, len(reads)))
+        return out
+
+    monkeypatch.setattr(shim_module, "finish_running", spy)
+    shim.run()
+    ((before, after),) = seen
+    assert after > before  # the commit itself asked for the time
+
+
+def test_the_third_consecutive_spawn_failure_stays_failed_despite_retries(store: Store) -> None:
+    from jobsctl.claims import fail_spawn
+
+    seed_claimed(store, ["true"], spawn_failures=2)
+    with store.write() as tx:
+        outcome, _ = fail_spawn(
+            tx, config(retries=3), JOB, CLAIM, now="2026-01-01T00:00:05.000Z", message="no python"
+        )
+    assert outcome is not None and outcome.final
+    row = job(store)
+    assert (row["status"], row["reason"]) == ("failed", "spawn_failed")
+
+
+def test_a_post_fail_event_shows_queued_for_a_requeued_spawn_failure(store: Store) -> None:
+    cfg = config(hooks={"post-fail": [{"cmd": "true"}]})
+    run(store, ["no-such-command-xyz"], cfg)
+    payload = json.loads(one(store, "SELECT * FROM hook_outbox")["payload"])
+    assert payload["job"]["status"] == "queued"
+    assert payload["attempt"]["reason"] == "spawn_failed"
+
+
+def test_a_post_fail_event_shows_queued_for_a_terminated_start(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = config(hooks={"post-fail": [{"cmd": "true"}]})
+    seed_claimed(store, ["true"])
+    shim = make_shim(store, cfg)
+    real = shim._still_starting  # pyright: ignore[reportPrivateUsage]
+    calls: list[int] = []
+
+    def look_then_term() -> object:
+        out = real()
+        calls.append(1)
+        if len(calls) == 2:
+            shim.request_stop()
+        return out
+
+    monkeypatch.setattr(shim, "_still_starting", look_then_term)
+    shim.run()
+    payload = json.loads(one(store, "SELECT * FROM hook_outbox")["payload"])
+    assert payload["job"]["status"] == "queued"
+    assert payload["attempt"]["reason"] == "terminated"

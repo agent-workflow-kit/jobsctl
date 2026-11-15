@@ -218,7 +218,7 @@ def _add_cancel(sub: Any) -> None:
 
 
 def _add_retry(sub: Any) -> None:
-    p = _command(sub, "retry", "retry a finished job", mutating=True)
+    p = _command(sub, "retry", "retry a finished job or an exit-13 hold", mutating=True)
     p.add_argument("id", type=v.job_id)
     p.add_argument("--top", action="store_true")
     p.add_argument("--attempt", type=v.positive_int, metavar="N")

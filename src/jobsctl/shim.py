@@ -899,7 +899,7 @@ class Shim:
                     exit_record=record,
                     leftovers=leftovers.recorded,
                     tail=tail,
-                    now=self._now(),
+                    clock=self._now,
                 ),
                 FINAL_COMMIT_SECONDS,
             )

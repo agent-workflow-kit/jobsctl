@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -145,7 +146,7 @@ def fail_starting(
         claim_id=claim_id,
         expect_status="starting",
         to_status="failed" if plan is None else "queued",
-        updates={"reason": reason, "ended_at": now, "status_changed_at": now}
+        updates={"reason": reason, "ended_at": now, "status_changed_at": now, "not_before": None}
         if plan is None
         else plan,
     )
@@ -248,7 +249,7 @@ def finish_running(
     exit_record: ExitRecord,
     leftovers: int | None,
     tail: TailSnapshot,
-    now: str,
+    clock: Callable[[], str],
 ) -> FinalResult:
     """Start sequence step 9, the final transaction: the transition, the final tail and the hook
     events in one commit. It reads `force_requested_by`: a committed force request makes the end
@@ -260,6 +261,7 @@ def finish_running(
     `not_before` instead of ending it; the attempt is `failed` either way.
     """
     with store.write() as tx:
+        now = clock()  # read inside the transaction, after the write lock is held
         view = read_claim_in(tx, job_id, claim_id)
         if view is None or view.status != "running":
             return FinalResult(False, None)
@@ -268,7 +270,7 @@ def finish_running(
         plan = None
         if outcome.status == "failed" and outcome.reason is not None:
             plan = plan_requeue(tx, config, job_id, claim_id, reason=outcome.reason, now=now)
-        job_updates: dict[str, Any] = {"status_changed_at": now}
+        job_updates: dict[str, Any] = {"status_changed_at": now, "not_before": None}
         if plan is not None:
             job_updates = plan
         elif outcome.terminal:

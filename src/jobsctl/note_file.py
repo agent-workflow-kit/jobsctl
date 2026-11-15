@@ -36,6 +36,17 @@ def _read_stdin() -> bytes:
     stream = sys.stdin
     if stream is None:
         raise usage_error("stdin is closed; it cannot supply the note")
+    try:
+        fd = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        fd = None
+    if fd is not None:
+        # a non-blocking stdin would give short reads (silent truncation) or None
+        try:
+            os.set_blocking(fd, True)
+            return _read_fd(fd)
+        except BlockingIOError:
+            raise usage_error("stdin is not ready; it cannot supply the note") from None
     binary = getattr(stream, "buffer", None)
     if binary is not None:
         return bytes(binary.read(_READ_LIMIT))
