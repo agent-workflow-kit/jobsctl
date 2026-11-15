@@ -79,16 +79,20 @@ class Pump:
             total += len(data)
         return total
 
+    def pump_once(self, seconds: float = POLL_SECONDS) -> None:
+        """Wait up to `seconds` for output and read what is available."""
+        if self.eof:
+            gateway.sleep(seconds)
+            return
+        ready, _, _ = select.select([self._fd], [], [], seconds)
+        if ready:
+            self._read_some()
+
     def run(self) -> os.waitid_result:
         """Pump until the leader exits; returns its (unreaped) wait result."""
         next_periodic = gateway.monotonic() + self._interval
         while True:
-            if self.eof:
-                gateway.sleep(POLL_SECONDS)
-            else:
-                ready, _, _ = select.select([self._fd], [], [], POLL_SECONDS)
-                if ready:
-                    self._read_some()
+            self.pump_once()
             self._tick()
             if gateway.monotonic() >= next_periodic:
                 self._periodic()
