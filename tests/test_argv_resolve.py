@@ -61,7 +61,7 @@ def test_a_path_with_a_slash_is_used_as_is(tmp_path: Path) -> None:
 
 def test_a_relative_path_with_a_slash_is_taken_relative_to_the_job_cwd(tmp_path: Path) -> None:
     make_exe(tmp_path / "bin" / "run.sh")
-    assert resolve_argv0("./bin/run.sh", {}, str(tmp_path)) == str(tmp_path / "./bin/run.sh")
+    assert resolve_argv0("./bin/run.sh", {}, str(tmp_path)) == f"{tmp_path}/./bin/run.sh"
     assert resolve_argv0("./nope", {}, str(tmp_path)) is None
 
 
