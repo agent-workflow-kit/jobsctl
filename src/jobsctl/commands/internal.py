@@ -7,7 +7,8 @@ import os
 from jobsctl.cli_registry import Context, command
 from jobsctl.diag import install
 from jobsctl.env_file import disable_dumpable
-from jobsctl.kill import Killer, prepare_process as prepare_kill
+from jobsctl.kill import Killer
+from jobsctl.kill import prepare_process as prepare_kill
 from jobsctl.shim import Shim, StopSignal, prepare_process
 from jobsctl.store_db import OpenMode, Store
 from jobsctl.store_dir import resolve_state_dir

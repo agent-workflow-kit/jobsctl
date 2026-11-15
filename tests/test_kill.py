@@ -21,7 +21,6 @@ import pytest
 from jobsctl.config import Config
 from jobsctl.kill import Killer
 from jobsctl.leases import expiry
-from jobsctl.proc_host import ProcInfo
 from jobsctl.result_file import ResultRecord, ResultTail, write_result
 from jobsctl.shim import StopSignal
 from jobsctl.shim_exit import ExitRecord
@@ -83,8 +82,12 @@ class Rig:
             sleep=sleep,
         )
 
-    def die(self, pid: int) -> Callable[[], None]:
-        return lambda: self.host.procs.pop(pid, None) and None
+    def die(self, *pids: int) -> Callable[[], None]:
+        def go() -> None:
+            for pid in pids:
+                self.host.procs.pop(pid, None)
+
+        return go
 
     def signals(self) -> list[tuple]:
         return self.host.sent()
@@ -282,10 +285,7 @@ def test_a_leader_that_obeys_sigterm_gets_one_signal_to_its_pid(rig: Rig) -> Non
 def test_a_stubborn_leader_gets_sigterm_then_the_group_then_sigkill_after_each_grace(
     rig: Rig,
 ) -> None:
-    rig.host.reactions[("killpg", LEADER, signal.SIGKILL)] = lambda: (
-        rig.host.procs.pop(LEADER),
-        rig.host.procs.pop(MEMBER),
-    )
+    rig.host.reactions[("killpg", LEADER, signal.SIGKILL)] = rig.die(LEADER, MEMBER)
     assert rig.killer().run() == 0
     assert rig.signals() == [
         ("kill", LEADER, signal.SIGTERM),
@@ -298,10 +298,7 @@ def test_a_stubborn_leader_gets_sigterm_then_the_group_then_sigkill_after_each_g
 
 
 def test_only_the_leader_and_its_group_are_ever_signaled(rig: Rig) -> None:
-    rig.host.reactions[("killpg", LEADER, signal.SIGKILL)] = lambda: (
-        rig.host.procs.pop(LEADER),
-        rig.host.procs.pop(MEMBER),
-    )
+    rig.host.reactions[("killpg", LEADER, signal.SIGKILL)] = rig.die(LEADER, MEMBER)
     rig.killer().run()
     targets = {call[1] for call in rig.signals()}
     assert targets == {LEADER}  # not the member by PID, not the stranger, not the shim
@@ -331,7 +328,12 @@ def test_a_pid_reused_after_the_first_signal_receives_nothing_more(rig: Rig) -> 
 
 def test_sigkill_failing_to_end_a_stuck_leader_is_resent_until_it_goes(rig: Rig) -> None:
     gone_at = 45.0
-    rig.on_sleep = lambda: rig.host.procs.pop(LEADER, None) if rig.now >= gone_at else None
+
+    def maybe_die() -> None:
+        if rig.now >= gone_at:
+            rig.die(LEADER)()
+
+    rig.on_sleep = maybe_die
     assert rig.killer().run() == 0
     kills = [c for c in rig.signals() if c[2] == signal.SIGKILL]
     assert len(kills) > 2  # resent about every second
@@ -454,7 +456,7 @@ def test_a_result_file_gives_the_exit_record_leftovers_and_tail_and_nothing_is_s
     assert attempt(rig.store)["leftovers"] == 2
     assert list(shims_dir().glob("*.result")) == []
     tail = rig.store.query_one("SELECT tail FROM outputs WHERE job_id = ?", [JOB])
-    assert bytes(tail["tail"]) == b"last words\n"
+    assert tail is not None and bytes(tail["tail"]) == b"last words\n"
 
 
 def test_a_result_file_of_another_claim_is_ignored(rig: Rig) -> None:
