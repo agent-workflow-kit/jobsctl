@@ -51,7 +51,7 @@ def test_an_empty_pass_prints_the_documented_object(capsys: pytest.CaptureFixtur
 def test_a_pass_claims_up_to_the_cap_and_lists_the_started_jobs(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    cfg = config_file(tmp_path, queues={"default": {"cap": 2}})
+    cfg = config_file(tmp_path, queues={"default": {"cap": 2}}, auto_run=False)
     ids = [add_job(capsys, config=cfg) for _ in range(3)]
     res = run_cli(capsys, "--config", cfg, "--json", "run")
     (doc,) = lines(res.out)
@@ -60,7 +60,7 @@ def test_a_pass_claims_up_to_the_cap_and_lists_the_started_jobs(
 
 
 def test_max_starts_limits_the_claims(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
-    cfg = config_file(tmp_path, default_cap=None)
+    cfg = config_file(tmp_path, default_cap=None, auto_run=False)
     for _ in range(3):
         add_job(capsys, config=cfg)
     (doc,) = lines(run_cli(capsys, "--config", cfg, "--json", "run", "--max-starts", "1").out)
@@ -88,7 +88,7 @@ def test_a_live_holder_prints_already_running_and_exits_zero(
 def test_human_output_lists_started_jobs_and_quiet_prints_nothing(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    cfg = config_file(tmp_path, default_cap=None)
+    cfg = config_file(tmp_path, default_cap=None, auto_run=False)
     first, second = add_job(capsys, config=cfg), add_job(capsys, config=cfg)
     res = run_cli(capsys, "--config", cfg, "run", "--max-starts", "1")
     assert res.out.strip() in (f"started {first}", f"started {second}")
@@ -230,7 +230,7 @@ def test_loop_interval_flag_overrides_the_config(
 def test_loop_finishes_the_current_pass_when_signaled_during_it(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    cfg = config_file(tmp_path, default_cap=None)
+    cfg = config_file(tmp_path, default_cap=None, auto_run=False)
     first = add_job(capsys, config=cfg)
     real = Runner.run_pass
 
@@ -248,15 +248,22 @@ def test_loop_finishes_the_current_pass_when_signaled_during_it(
 def test_loop_reaps_its_own_shim_children_each_iteration(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The stub shim exits at once, unconfirmed: the next iteration sees its exit and requeues."""
-    cfg = config_file(tmp_path, run_interval="1s")
+    """The real shim confirms its identity and ends the job (its cwd is missing): the loop reaps
+    the exited child by its handle, and a confirmed shim is never a `claim_orphaned` requeue."""
+    cfg = config_file(tmp_path, run_interval="1s", auto_run=False)
     job = add_job(capsys, config=cfg)
     sleeps: list[float] = []
+    reaped: list[int] = []
+    real_reap = Runner.reap
+
+    def counting_reap(self: Runner, result: Any) -> None:
+        real_reap(self, result)
+        reaped.append(len(self.children))
 
     def sleep(seconds: float) -> None:
         sleeps.append(seconds)
         if len(sleeps) == 1:
-            # wait for the stub shim (this process's child) to exit; poll by its handle only
+            # wait for the shim (this process's child) to exit; poll by its handle only
             import time
 
             time.sleep(1.5)
@@ -264,12 +271,18 @@ def test_loop_reaps_its_own_shim_children_each_iteration(
             os.kill(os.getpid(), signal.SIGTERM)
 
     monkeypatch.setattr(gateway, "sleep", sleep)
+    monkeypatch.setattr(Runner, "reap", counting_reap)
     res = run_cli(capsys, "--config", cfg, "--json", "run", "--loop")
     docs = lines(res.out)
     assert docs[0]["started"] == [job]
-    findings = [f for d in docs[1:] for f in d["reconciled"]]
-    assert {"job_id": job, "finding": "claim_orphaned", "action": "requeued"} in findings
-    assert row(job)["spawn_failures"] == 0
+    assert [f for d in docs[1:] for f in d["reconciled"]] == []
+    assert reaped[-1] == 0  # the exited shim is no longer a child of the loop
+    found = row(job)
+    assert (found["status"], found["reason"], found["spawn_failures"]) == (
+        "failed",
+        "cwd_missing",
+        0,
+    )
 
 
 def test_loop_keeps_the_last_config_when_a_reload_fails(
@@ -298,7 +311,7 @@ def test_loop_survives_a_busy_database_or_a_lost_lease_in_one_pass(
 ) -> None:  # fmt: skip
     from jobsctl.runner import LeaseLost
 
-    cfg = config_file(tmp_path, run_interval="1s")
+    cfg = config_file(tmp_path, run_interval="1s", auto_run=False)
     real = Runner.run_pass
     calls: list[int] = []
 

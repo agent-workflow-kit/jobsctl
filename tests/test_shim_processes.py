@@ -10,9 +10,13 @@ from pathlib import Path
 
 import pytest
 
+from jobsctl.config import Config
 from jobsctl.proc_host import default_host
 from jobsctl.proc_identity import Liveness, check_identity
+from jobsctl.runner import PassResult, Runner
+from jobsctl.store_db import Store
 from jobsctl.store_dir import resolve_state_dir
+from tests.runner_helpers import add_queued, job_ids, make_runner
 from tests.shim_helpers import JOB, shims_dir
 from tests.shim_real import RealShims
 
@@ -194,3 +198,44 @@ def test_a_shim_whose_recorded_identity_is_another_process_exits_at_once(
         tx.execute("UPDATE attempts SET shim_identity = ?", [sleeper])
     assert popen.wait(timeout=30) == 0
     assert real_shims.row("SELECT status FROM jobs")["status"] == "starting"
+
+
+def test_passes_and_real_shims_run_a_queue_to_completion_within_the_cap(
+    real_shims: RealShims, runners: list[Runner]
+) -> None:
+    """A pass claims up to the cap, spawns real shims, and a later pass starts the rest once the
+    first jobs have ended; the cap is never exceeded while they run."""
+    ids = job_ids(5)
+    config = Config.model_validate({"auto_run": False, "queues": {"q": {"cap": 2}}})
+    with Store.open() as store:
+        for i, job_id in enumerate(ids):
+            add_queued(
+                store,
+                job_id,
+                position=f"{i + 1:020d}",
+                argv=json.dumps(["sh", "-c", f"sleep 0.4; echo {job_id}"]),
+                cwd="/",
+            )
+    peak = 0
+    counts: dict[str, int] = {}
+    deadline = time.monotonic() + 120
+    with Store.open() as store:
+        runner = make_runner(runners, store, config)
+        while time.monotonic() < deadline:
+            runner.run_pass()
+            counts = {
+                r["status"]: r["n"]
+                for r in store.query_all("SELECT status, count(*) AS n FROM jobs GROUP BY status")
+            }
+            peak = max(peak, counts.get("starting", 0) + counts.get("running", 0))
+            if counts.get("done", 0) == len(ids):
+                break
+            time.sleep(0.1)
+        runner.reap(PassResult())
+        outputs = {
+            r["job_id"]: bytes(r["tail"]).decode()
+            for r in store.query_all("SELECT job_id, tail FROM outputs")
+        }
+        assert counts == {"done": 5}
+    assert 1 <= peak <= 2
+    assert outputs == {job_id: f"{job_id}\n" for job_id in ids}
