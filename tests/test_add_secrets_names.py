@@ -222,8 +222,8 @@ def test_duplicate_name_errors_never_echo_a_secret_name(
 @pytest.mark.parametrize(
     ("flags", "message"),
     [
-        (["--env", "A=1", "--env", "A=2"], "--env A is given more than once"),
-        (["--env", "A=1", "--pass-env", "A"], "A is given with both --env and --pass-env"),
+        (["--env", "A=1", "--env", "A=2"], "an --env name is given more than once"),
+        (["--env", "A=1", "--pass-env", "A"], "a name is given with both --env and --pass-env"),
     ],
 )
 def test_non_secret_duplicate_names_keep_their_usage_errors(
