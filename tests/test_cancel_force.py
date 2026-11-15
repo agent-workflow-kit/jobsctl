@@ -831,6 +831,34 @@ def test_a_failing_wait_still_delivers_the_post_cancel_of_the_plain_cancels(
     assert all(e["delivered_at"] is not None for e in outbox() if e["job_id"] == queued)
 
 
+def test_a_signal_during_the_final_delivery_does_not_replace_the_error_in_flight(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from jobsctl.commands import cancel as cancel_cmd
+    from jobsctl.errors import JobsctlError
+
+    cfg = config_file(tmp_path)
+    add_job(capsys, "--label", "g=1")
+    real = cancel_cmd._run
+
+    def run_with_a_target(ctx: Any, targets: list[Any], reconciled: list[str]) -> Any:
+        result = real(ctx, targets, reconciled)
+        targets.append(object())
+        return result
+
+    def timed_out(ctx: Any, done: Any, targets: Any) -> Any:
+        raise cancel_force.cancel_pending("jb-aaaaaaaa", "is still running after 1 seconds")
+
+    def interrupted(ctx: Any, ids: Any) -> None:
+        raise JobsctlError("interrupted", "interrupted")
+
+    monkeypatch.setattr(cancel_cmd, "_run", run_with_a_target)
+    monkeypatch.setattr(cancel_cmd, "_deliver_and_wait", timed_out)
+    monkeypatch.setattr(cancel_cmd, "deliver_after_commit", interrupted)
+    res = run_cli(capsys, "--config", cfg, "--json", "cancel", "--label", "g=1", "--all", *HUMAN)
+    error_of(res, 12, "cancel_pending")  # not replaced by `interrupted`
+
+
 def test_the_events_a_forced_cancels_reconcile_wrote_are_delivered_by_the_command(
     capsys: pytest.CaptureFixture[str], procs: list[Any], tmp_path: Path
 ) -> None:

@@ -112,24 +112,37 @@ class Delivery:
             self.diag("another live process holds the deliver lease; nothing to do")
             return 0
         self._lease = lease
+        self._skipped = set()  # kept across the re-runs of one run, so a stuck job is not re-run
+        self._unkillable = None
         try:
             while True:
                 with self.store.read() as tx:
                     seen = counter_get(tx, DELIVER_REQUESTED)
-                self._round()
+                try:
+                    self._round()
+                except JobsctlError as exc:
+                    if exc is not self._unkillable:
+                        raise
                 if self.stop.is_set or not lease.held:
-                    return 0
+                    return self._end_run()
                 with self.store.write() as tx:
-                    if counter_get(tx, DELIVER_REQUESTED) == seen:
+                    quiet = counter_get(tx, DELIVER_REQUESTED) == seen
+                    if quiet:
                         lease.release_in(tx)
-                        return 0
+                if quiet:  # outside the transaction: raising inside it would undo the release
+                    return self._end_run()
         finally:
             lease.release()
 
+    def _end_run(self) -> int:
+        """End the run: the deferred unkillable-hook error (if any) is raised only now, after the
+        counter re-check and the lease release, so a request made meanwhile is not lost."""
+        if self._unkillable is not None:
+            raise self._unkillable
+        return 0
+
     def _round(self) -> None:
         self.deliverer.refresh()
-        self._skipped = set()
-        self._unkillable = None
         self._redeliver_sync()
         if not self.stop.is_set:
             self._run_async()

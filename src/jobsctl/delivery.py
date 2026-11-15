@@ -12,7 +12,8 @@ Delivery is at least once and in order per job:
   stop request leaves the event undelivered, and a crash between a hook and the mark runs the
   hook again (the same ``event_id``). A lease lost while hooks run does not undo them: the
   event whose hooks all ran is still marked delivered (a duplicate run by the new holder is
-  allowed, delivery being at least once) and nothing further is started once the loss is seen;
+  allowed, delivery being at least once); once the loss is seen no further *event* is started,
+  but the hooks of the event in progress finish;
 - the hooks of an event are selected **at delivery** from ``payload.labels`` and
   ``payload.job.queue`` with the delivering process's config; the outbox ``async`` column is a
   hint only: an event delivered as synchronous runs the entries that are not ``async`` now, an

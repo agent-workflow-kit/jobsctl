@@ -209,6 +209,7 @@ def cancel_command(ctx: Context) -> int:
     )
     reconciled: list[str] = []
     to_deliver: list[str] = []
+    failing = True  # an exception is in flight while the `finally` below runs
     try:
         try:
             with interrupts_as_keyboard_interrupt() if args.force else nullcontext():
@@ -220,12 +221,24 @@ def cancel_command(ctx: Context) -> int:
                     done = _deliver_and_wait(ctx, done, targets)
         except KeyboardInterrupt:
             done = _interrupted(ctx, done, targets, already)
+        failing = False
     finally:
         # The committed plain cancels (and jobs the forced cancel's reconcile ended) have their
         # `post-*` events delivered here whatever became of the wait: a wait timeout, Ctrl-C or
         # `version_skew` must not leave them to `_deliver` only. A forced cancel's own
         # `post-cancel` is written by the shim or `_kill`, which deliver it.
-        deliver_after_commit(ctx, [*to_deliver, *reconciled])
+        try:
+            deliver_after_commit(ctx, [*to_deliver, *reconciled])
+        except JobsctlError as exc:
+            if not failing:
+                raise
+            # the original error (wait timeout, version_skew, ...) keeps its exit code
+            if not ctx.quiet:
+                sys.stderr.write(
+                    f"jobsctl: warning: hook delivery was cut short ({exc.code}); "
+                    "its events stay undelivered\n"
+                )
+                sys.stderr.flush()
     if not args.dry_run and any(d.changed and d.previous_status == "starting" for d in done):
         request_pass_from_command(ctx.config, ctx.config_path, quiet=ctx.quiet)  # a slot is free
     _print(ctx, done, refusals)

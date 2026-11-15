@@ -650,6 +650,49 @@ def test_an_unkillable_sync_hook_does_not_stop_the_other_jobs_and_fails_the_roun
     assert sorted(calls) == sorted([bad, good])
 
 
+def test_a_request_made_during_a_round_with_an_unkillable_hook_is_not_lost(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bad, other = async_events(capsys, tmp_path, 2, 1)
+    cfg = _async_cfg()
+    sql("UPDATE hook_outbox SET delivered_at = '2000-01-01T00:00:00.000Z' WHERE job_id = ?", other)
+    calls: list[str] = []
+
+    def runner(**kw: Any) -> HookResult:
+        job = kw["env"]["JOBSCTL_ID"]
+        calls.append(job)
+        if job == bad:
+            return _unkillable(kw["hook"], kw["hook_id"])
+        return fake_result(kw["hook"], kw["hook_id"])
+
+    real_round = Delivery._round  # pyright: ignore[reportPrivateUsage]
+    fired: list[int] = []
+
+    def round_then_request(self: Delivery) -> None:
+        try:
+            real_round(self)  # raises the deferred unkillable error
+        finally:
+            if not fired:  # a new event and a request land after the round's last scan
+                fired.append(1)
+                sql("UPDATE hook_outbox SET delivered_at = NULL WHERE job_id = ?", other)
+                sql(
+                    "INSERT INTO counters (name, value) VALUES (?, 1) "
+                    "ON CONFLICT (name) DO UPDATE SET value = value + 1",
+                    DELIVER_REQUESTED,
+                )
+
+    monkeypatch.setattr(Delivery, "_round", round_then_request)
+    with open_store() as store:
+        d = Deliverer(store, cfg, runner=runner)
+        with pytest.raises(JobsctlError) as err:
+            Delivery(store, cfg, None, deliverer=d, wait_seconds=0.01, diag=lambda m: None).run()
+        assert err.value.code == "internal"
+        assert {e["job_id"] for e in pending(store)} == {bad}  # the new event was delivered
+        with store.write() as tx:
+            assert tx.one("SELECT 1 FROM leases WHERE name = 'deliver'") is None
+    assert calls.count(bad) == 1 and calls.count(other) == 1  # the bad job was not re-run
+
+
 def test_an_unkillable_async_hook_skips_only_its_job_and_is_recorded_once(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
