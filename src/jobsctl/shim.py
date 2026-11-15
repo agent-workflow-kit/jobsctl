@@ -382,8 +382,10 @@ class Shim:
     def _deliver_events(self) -> None:
         """Deliver this job's undelivered synchronous events, in order, while holding the
         `job:<id>` lease, and request delivery for its `async` ones. SIGTERM stops a running
-        hook and leaves its event for `_deliver`. Never raises: the transitions are committed."""
-        if not self._lease_held:
+        hook and leaves its event for `_deliver`. Never raises: the transitions are committed.
+        With a config that could not be loaded there are no hooks to select: nothing is
+        delivered, and the events stay for `_deliver`."""
+        if not self._lease_held or self.config_error is not None:
             return
         try:
             deliverer = Deliverer(
@@ -404,7 +406,7 @@ class Shim:
                 request_delivery_quietly(
                     self.store, self.config, self.config_path, host=self.host, warn=False
                 )
-        except (JobsctlError, sqlite3.Error, OSError) as exc:
+        except Exception as exc:  # never blocks the final transition (SIGINT etc. still propagate)
             self._diag(f"hook delivery failed ({type(exc).__name__})")
 
     def _with_lease(self) -> int:

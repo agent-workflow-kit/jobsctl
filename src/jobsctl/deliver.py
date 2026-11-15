@@ -10,6 +10,11 @@ One `_deliver` runs at a time, under the `deliver` lease. A round does two thing
    main thread reads and writes the database, appends the log records and marks an event
    delivered once its hooks ended (exit or timeout).
 
+A hook whose leader outlived SIGKILL (an `internal` error) does not stop the round: the other jobs
+are delivered, that job is skipped for the rest of the round, its event stays undelivered (the next
+round or `_deliver` tries it again) and the error is raised at the end of the round, so the
+process exits non-zero.
+
 It re-reads the `deliver_requested` counter and releases the lease in one transaction and starts
 over if the counter changed, so a request made while it ran is not lost. SIGTERM stops running
 hooks (their events stay undelivered), releases the lease and exits.
@@ -27,6 +32,7 @@ from typing import Any
 
 from jobsctl.config import Config
 from jobsctl.delivery import Deliverer, EventPlan
+from jobsctl.errors import JobsctlError
 from jobsctl.hook_run import HookResult
 from jobsctl.job_lease import Lease
 from jobsctl.proc_host import Host, default_host
@@ -53,6 +59,7 @@ class _Flight:
     row: sqlite3.Row
     plan: EventPlan
     results: list[HookResult] = field(default_factory=list)
+    recorded: bool = False
 
 
 def prepare_process(stop: StopSignal) -> None:
@@ -87,6 +94,8 @@ class Delivery:
         self.diag = diag or self._diag
         self.deliverer = deliverer or Deliverer(store, config, host=self.host, diag=self.diag)
         self._lease: Lease | None = None
+        self._skipped: set[str] = set()  # jobs whose hook went unkillable, for this round
+        self._unkillable: JobsctlError | None = None
 
     def _diag(self, message: str) -> None:
         sys.stderr.write(f"_deliver: {message}\n")
@@ -119,9 +128,20 @@ class Delivery:
 
     def _round(self) -> None:
         self.deliverer.refresh()
+        self._skipped = set()
+        self._unkillable = None
         self._redeliver_sync()
         if not self.stop.is_set:
             self._run_async()
+        if self._unkillable is not None:
+            raise self._unkillable
+
+    def _note_unkillable(self, job_id: str, exc: JobsctlError) -> None:
+        """A hook of ``job_id`` outlived SIGKILL: skip the job for the rest of the round and
+        raise the error when the round ends."""
+        self._skipped.add(job_id)
+        self._unkillable = self._unkillable or exc
+        self.diag(f"a hook of {job_id} outlived SIGKILL; its event stays undelivered")
 
     # -- synchronous events of jobs with no live holder ----------------------------------------
 
@@ -132,6 +152,8 @@ class Delivery:
             if self.stop.is_set or not deliver_lease.held:
                 return
             job_id = str(row["job_id"])
+            if job_id in self._skipped:
+                continue
             lease = Lease.take(self.store, f"job:{job_id}", host=self.host)
             if lease is None:  # a live holder delivers its own events
                 continue
@@ -147,6 +169,10 @@ class Delivery:
                     held=lambda lease=lease: lease.held and deliver_lease.held,
                     tick=tick,
                 )
+            except JobsctlError as exc:
+                if exc.code != "internal":
+                    raise
+                self._note_unkillable(job_id, exc)  # the other jobs are still delivered
             finally:
                 lease.release()
 
@@ -157,46 +183,73 @@ class Delivery:
         assert lease is not None
         flights: dict[Future[bool], _Flight] = {}
         busy: set[str] = set()
-        error: BaseException | None = None
+        error: BaseException | None = None  # ends the round: no more dispatching, then raised
+
+        def fail(exc: BaseException) -> None:
+            nonlocal error
+            error = error or exc
+            self.stop.set()  # the running hooks are stopped; the flights are drained below
+
         with ThreadPoolExecutor(max_workers=self.max_async) as pool:
             while True:
                 if error is None and not self.stop.is_set and lease.held:
-                    self._dispatch(pool, flights, busy)
+                    try:
+                        while self._dispatch(pool, flights, busy):
+                            pass  # events marked without a hook may unblock the job's next one
+                    except Exception as exc:  # noqa: BLE001 - drain the flights, then raise
+                        fail(exc)
                 if not flights:
                     break
                 done, _ = wait(
                     list(flights), timeout=self.wait_seconds, return_when=FIRST_COMPLETED
                 )
-                lease.tick()
+                try:
+                    lease.tick()
+                except Exception as exc:  # noqa: BLE001
+                    fail(exc)
                 for future in done:
                     flight = flights.pop(future)
                     busy.discard(flight.plan.job_id)
                     try:
                         complete = future.result()
-                        self._finish(flight, complete)
+                    except JobsctlError as exc:
+                        self._record_once(flight)
+                        if exc.code == "internal":  # an unkillable hook: only its job is skipped
+                            self._note_unkillable(flight.plan.job_id, exc)
+                        else:
+                            fail(exc)
                     except BaseException as exc:  # noqa: BLE001 - finish the others, then raise
-                        error = error or exc
-                        for result in flight.results:
-                            self.deliverer.record(flight.plan, result)
+                        self._record_once(flight)
+                        fail(exc)
+                    else:
+                        try:
+                            self._finish(flight, complete)
+                        except BaseException as exc:  # noqa: BLE001
+                            fail(exc)
         if error is not None:
             raise error
 
     def _dispatch(
         self, pool: ThreadPoolExecutor, flights: dict[Future[bool], _Flight], busy: set[str]
-    ) -> None:
+    ) -> bool:
+        """Start the oldest async event of every idle job (up to the limit). ``True`` when an
+        event was marked delivered without a hook to run (none selected, damaged, no longer
+        configured): the job's next event is then due, so the caller dispatches again."""
+        marked = False
         if len(flights) >= self.max_async:
-            return
+            return False
         for row in self.store.query_all(_FIRST_ASYNC):
             job_id = str(row["job_id"])
-            if job_id in busy:
+            if job_id in busy or job_id in self._skipped:
                 continue
             if len(flights) >= self.max_async:
-                return
+                return marked
             plan = self.deliverer.plan_event(row)
             if plan.problem is not None or not plan.hooks:
                 if plan.problem is not None:
                     self.deliverer.record_problem(plan)
                 self.deliverer.mark_delivered(plan.event_id)
+                marked = True
                 continue
             flight = _Flight(row, plan)
             future = pool.submit(
@@ -207,9 +260,15 @@ class Delivery:
             )
             flights[future] = flight
             busy.add(job_id)
+        return marked
+
+    def _record_once(self, flight: _Flight) -> None:
+        if not flight.recorded:
+            flight.recorded = True
+            for result in flight.results:
+                self.deliverer.record(flight.plan, result)
 
     def _finish(self, flight: _Flight, complete: bool) -> None:
-        for result in flight.results:
-            self.deliverer.record(flight.plan, result)
+        self._record_once(flight)
         if complete:
             self.deliverer.mark_delivered(flight.plan.event_id)

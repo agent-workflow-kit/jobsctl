@@ -6,6 +6,7 @@ ordering and concurrency without processes.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import signal
@@ -480,3 +481,235 @@ def test_a_dead_deliver_mid_hook_leaves_the_event_for_the_next_one(
         with pytest.raises(KeyboardInterrupt):
             Delivery(store, cfg, None, deliverer=d, wait_seconds=0.01).run()
         assert len(pending(store)) == 1
+
+
+# -- round-1 review findings ---------------------------------------------------------------------
+
+
+def _held_event(capsys: pytest.CaptureFixture[str], cfg: str) -> tuple[str, dict[str, Any]]:
+    job_id = add_job(capsys, config=cfg)
+    assert hold(capsys, cfg, job_id).code == 0
+    return job_id, outbox()[-1]["payload"]
+
+
+def _put_event(job_id: str, payload: dict[str, Any], *, is_async: bool = False) -> None:
+    sql(
+        "INSERT INTO hook_outbox (event_id, job_id, hook, payload, async, created_at) "
+        "VALUES (?, ?, ?, ?, ?, 'x')",
+        payload["event_id"],
+        job_id,
+        payload["hook"],
+        json.dumps(payload),
+        int(is_async),
+    )
+
+
+def test_a_stored_output_tail_never_reaches_a_hook_that_did_not_ask_for_it(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    hooks = {
+        "post-held": [{"name": "w", "cmd": recorder(out, "held")}],
+        "post-start": [{"name": "s", "cmd": recorder(out, "start")}],
+    }
+    cfg = config_file(tmp_path, hooks=hooks)
+    job_id, good = _held_event(capsys, cfg)
+    leaky = {**good, "event_id": f"{job_id}:post-held:leak", "output_tail": "LEAKED"}
+    _put_event(job_id, leaky)
+    start = {k: v for k, v in good.items() if k not in ("output_available", "output_tail")}
+    start = {
+        **start,
+        "hook": "post-start",
+        "event_id": f"{job_id}:post-start:leak",
+    }
+    _put_event(job_id, {**start, "output_tail": "LEAKED"})
+    with open_store() as store:
+        assert Deliverer(store, Config.model_validate({"hooks": hooks})).deliver_sync(job_id)
+    held = json.loads(ran(out, "held")[-1].read_text())
+    validate_against("hooks/post-held.json", held)
+    assert held["event_id"].endswith(":leak") and held["output_tail"] is None
+    started = json.loads(ran(out, "start")[0].read_text())
+    assert "output_tail" not in started
+
+
+def test_a_hook_stopped_before_it_started_has_no_record_and_leaves_its_event(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    cfg = config_file(tmp_path, hooks={"post-held": [{"name": "w", "cmd": recorder(out)}]})
+    job_id = add_job(capsys, config=cfg)
+    assert hold(capsys, cfg, job_id).code == 0
+    runs, records = len(ran(out)), len(log_records("hook_ran"))
+    sql("UPDATE hook_outbox SET delivered_at = NULL")
+    answers = iter([None])  # `deliver_sync`'s own check passes; the hook's first poll stops
+    with open_store() as store:
+        d = Deliverer(
+            store,
+            Config.model_validate({"hooks": {"post-held": [{"name": "w", "cmd": recorder(out)}]}}),
+        )
+        assert d.deliver_sync(job_id, stop=lambda: next(answers, "SIGTERM")) is False
+        assert len(pending(store)) == 1
+    assert len(ran(out)) == runs and len(log_records("hook_ran")) == records
+
+
+def test_a_lease_lost_between_hooks_still_finishes_and_marks_the_event(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Delivery is at least once: the hooks of an event run to their end and the event is
+    marked even when the lease was lost meanwhile; nothing further is started afterwards."""
+    out = tmp_path / "out"
+    hooks = {
+        "post-held": [
+            {"name": "a", "cmd": recorder(out, "a")},
+            {"name": "b", "cmd": recorder(out, "b")},
+        ]
+    }
+    cfg = config_file(tmp_path, hooks=hooks)
+    job_id, good = _held_event(capsys, cfg)
+    sql("UPDATE hook_outbox SET delivered_at = NULL")
+    _put_event(job_id, {**good, "event_id": f"{job_id}:post-held:second"})
+    lost = threading.Event()
+
+    def runner(**kw: Any) -> HookResult:
+        lost.set()  # the lease is lost while the first hook of the first event runs
+        return fake_result(kw["hook"], kw["hook_id"])
+
+    with open_store() as store:
+        d = Deliverer(store, Config.model_validate({"hooks": hooks}), runner=runner)
+        calls: list[str] = []
+        d.runner = lambda **kw: (calls.append(kw["hook_id"]), runner(**kw))[1]  # type: ignore[assignment]
+        assert d.deliver_sync(job_id, held=lambda: not lost.is_set()) is False
+        assert calls == ["a", "b"]  # both hooks of the first event ran
+        (left,) = pending(store)
+        assert left["event_id"].endswith(":second")  # the first was marked, the next not started
+
+
+def _async_cfg(**entry: Any) -> Config:
+    hook = {"name": "w", "cmd": "true", "async": True, **entry}
+    return Config.model_validate({"hooks": {"post-held": [hook]}})
+
+
+def test_async_events_marked_without_a_hook_do_not_end_the_round_for_their_job(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    async_events(capsys, tmp_path, 1, 3)
+    with open_store() as store:  # no hook is configured any more: all three are skipped
+        d = Deliverer(store, Config())
+        assert Delivery(store, Config(), None, deliverer=d, wait_seconds=0.01).run() == 0
+        assert pending(store) == []
+
+
+def test_a_later_async_event_runs_after_an_earlier_one_selected_no_hook(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    (job_id,) = async_events(capsys, tmp_path, 1, 1)
+    first = outbox()[0]["payload"]
+    second = {**first, "event_id": f"{job_id}:post-held:second", "labels": ["a=b"]}
+    _put_event(job_id, second, is_async=True)
+    cfg = _async_cfg(labels=["a=b"])  # selects only the second event
+    calls: list[str] = []
+
+    def runner(**kw: Any) -> HookResult:
+        calls.append(json.loads(kw["payload"])["event_id"])
+        return fake_result(kw["hook"], kw["hook_id"])
+
+    with open_store() as store:
+        d = Deliverer(store, cfg, runner=runner)
+        assert Delivery(store, cfg, None, deliverer=d, wait_seconds=0.01).run() == 0
+        assert pending(store) == []
+    assert calls == [second["event_id"]]
+
+
+def _unkillable(hook: str, hook_id: str) -> HookResult:
+    return dataclasses.replace(fake_result(hook, hook_id), unkillable=True)
+
+
+def test_an_unkillable_sync_hook_does_not_stop_the_other_jobs_and_fails_the_round_at_its_end(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    bad, good = async_events(capsys, tmp_path, 2, 1)
+    sql("UPDATE hook_outbox SET async = 0")
+    cfg = Config.model_validate({"hooks": {"post-held": [{"name": "w", "cmd": "true"}]}})
+    calls: list[str] = []
+
+    def runner(**kw: Any) -> HookResult:
+        job = kw["env"]["JOBSCTL_ID"]
+        calls.append(job)
+        if job == bad:
+            return _unkillable(kw["hook"], kw["hook_id"])
+        return fake_result(kw["hook"], kw["hook_id"])
+
+    with open_store() as store:
+        d = Deliverer(store, cfg, runner=runner)
+        with pytest.raises(JobsctlError) as err:
+            Delivery(store, cfg, None, deliverer=d, wait_seconds=0.01, diag=lambda m: None).run()
+        assert err.value.code == "internal"
+        assert [e["job_id"] for e in pending(store)] == [bad]
+        with store.write() as tx:
+            assert tx.one("SELECT 1 FROM leases WHERE name = 'deliver'") is None
+    assert sorted(calls) == sorted([bad, good])
+
+
+def test_an_unkillable_async_hook_skips_only_its_job_and_is_recorded_once(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    bad, good = async_events(capsys, tmp_path, 2, 2)
+    cfg = _async_cfg()
+    calls: list[str] = []
+
+    def runner(**kw: Any) -> HookResult:
+        job = kw["env"]["JOBSCTL_ID"]
+        calls.append(job)
+        if job == bad:
+            return _unkillable(kw["hook"], kw["hook_id"])
+        return fake_result(kw["hook"], kw["hook_id"])
+
+    with open_store() as store:
+        d = Deliverer(store, cfg, runner=runner)
+        with pytest.raises(JobsctlError) as err:
+            Delivery(store, cfg, None, deliverer=d, wait_seconds=0.01, diag=lambda m: None).run()
+        assert err.value.code == "internal"
+        assert {e["job_id"] for e in pending(store)} == {bad}
+        assert len(pending(store)) == 2  # neither of the bad job's events was marked
+    assert calls.count(bad) == 1 and calls.count(good) == 2  # not retried within the round
+    assert len(log_records("hook_ran")) == 3
+
+
+def test_an_error_while_dispatching_drains_the_running_hooks_then_raises(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    first, second = async_events(capsys, tmp_path, 2, 1)
+    cfg = _async_cfg()
+    with open_store() as store:
+        d = Deliverer(store, cfg, runner=lambda **kw: fake_result(kw["hook"], kw["hook_id"]))
+        real = d.plan_event
+
+        def plan(row: Any) -> Any:
+            if row["job_id"] == second:
+                raise RuntimeError("boom")
+            return real(row)
+
+        d.plan_event = plan  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError):
+            Delivery(store, cfg, None, deliverer=d, wait_seconds=0.01).run()
+        assert [e["job_id"] for e in pending(store)] == [second]  # the first flight finished
+        with store.write() as tx:
+            assert tx.one("SELECT 1 FROM leases WHERE name = 'deliver'") is None
+    assert len(log_records("hook_ran")) == 1  # the first flight, recorded
+
+
+def test_a_failure_after_recording_does_not_record_the_hook_twice(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    async_events(capsys, tmp_path, 1, 1)
+    cfg = _async_cfg()
+    with open_store() as store:
+        d = Deliverer(store, cfg, runner=lambda **kw: fake_result(kw["hook"], kw["hook_id"]))
+
+        def broken(event_id: str) -> None:
+            raise RuntimeError("cannot mark")
+
+        d.mark_delivered = broken  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError):
+            Delivery(store, cfg, None, deliverer=d, wait_seconds=0.01).run()
+    assert len(log_records("hook_ran")) == 1

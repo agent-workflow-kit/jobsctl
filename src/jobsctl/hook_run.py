@@ -92,6 +92,7 @@ class HookResult:
     signals_sent: tuple[str, ...]  # group signals sent, in order
     unkillable: bool  # the leader outlived SIGKILL: it was left unreaped
     duration: float
+    started: bool = True  # False: ``stop`` answered before the hook process was started
 
     @property
     def vetoes(self) -> bool:
@@ -115,9 +116,8 @@ class HookResult:
 
     def log_fields(self, job_id: str) -> dict[str, Any]:
         """The fields of the `hook_ran` log record (`schemas/log.json`), without seq, ts, level.
-
-        TODO(#6): the `hook_ran` writer consumes these fields and ``warnings`` (the
-        `invalid_decision_id` log warnings)."""
+        The `hook_ran` writer (``delivery.Deliverer.record``) consumes these fields and
+        ``warnings`` (the `invalid_decision_id` log warnings)."""
         fields: dict[str, Any] = {
             "event": "hook_ran",
             "job_id": job_id,
@@ -325,7 +325,7 @@ def _noop_mask(text: str) -> str:
 def _stopped_before_start(hook: str, hook_id: str, reason: str) -> HookResult:
     return HookResult(
         hook, hook_id, "failed", None, None, (), (), None, None, False, False, None, reason,
-        None, (), False, 0.0,
+        None, (), False, 0.0, False,
     )  # fmt: skip
 
 
@@ -352,7 +352,7 @@ def run_hook(
     timeout: float,
     env: Mapping[str, str],
     cwd: str | Path,
-    mask: Callable[[str], str] = _noop_mask,  # TODO(#8): the masked-values set
+    mask: Callable[[str], str] = _noop_mask,
     stop: Callable[[], str | None] | None = None,
     host: Host | None = None,
     tuning: HookTuning | None = None,

@@ -205,3 +205,48 @@ def test_kill_leaves_events_to_a_live_lease_holder(store: Store, tmp_path: Path)
         holder.kill()
         holder.wait(timeout=10)
     assert not trace.exists() and len(pending(store)) == 1
+
+
+def test_a_config_error_never_delivers_events_with_an_empty_config(
+    store: Store, tmp_path: Path
+) -> None:
+    """With the config unreadable the shim has no hooks to run: delivering would mark the
+    earlier attempts' events delivered without running anything, so they stay for `_deliver`."""
+    from jobsctl.errors import JobsctlError
+
+    seed_claimed(store, ["true"])
+    put_event(store, JOB, "post-fail", 1)
+    shim = make_shim(store, config_error=JobsctlError("config_invalid", "bad config"))
+    assert shim.run() == 0
+    assert job(store)["status"] == "failed"  # spawn_failed
+    assert f"{JOB}:post-fail:1" in [r["event_id"] for r in pending(store)]
+
+
+def test_the_post_hooks_run_after_the_final_commit(store: Store, tmp_path: Path) -> None:
+    """A `post-finish` hook sees the job already `done` (the event follows the commit)."""
+    seen = tmp_path / "seen"
+    db = store.paths.root / "state.db"
+    probe = (
+        f"import sqlite3; c=sqlite3.connect({str(db)!r}); "
+        f"open({str(seen)!r},'a').write(c.execute('SELECT status FROM jobs').fetchone()[0]+'\\n')"
+    )
+    seed_claimed(store, ["true"])
+    cfg = Config.model_validate(
+        {"hooks": {"post-finish": [{"name": "w", "cmd": f'python3 -c "{probe}"'}]}}
+    )
+    assert make_shim(store, cfg).run() == 0
+    assert seen.read_text().split() == ["done"]
+
+
+def test_an_unexpected_delivery_error_never_stops_the_shim(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl.delivery import Deliverer
+
+    def boom(self: Deliverer, *args: Any, **kw: Any) -> bool:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(Deliverer, "deliver_sync", boom)
+    seed_claimed(store, ["true"])
+    assert make_shim(store).run() == 0
+    assert job(store)["status"] == "done"

@@ -8,9 +8,11 @@ the holder of the job's ``job:<id>`` lease for synchronous events (``deliver_syn
 Delivery is at least once and in order per job:
 
 - an event is marked delivered only after every hook it selects ran to its end (exit or timeout)
-  and, in a command, after ``InterruptGuard.check()`` passed. A hook stopped by a signal, a lost
-  lease or a stop request leaves the event undelivered, and a crash between a hook and the mark
-  runs the hook again (the same ``event_id``);
+  and, in a command, after ``InterruptGuard.check()`` passed. A hook stopped by a signal or a
+  stop request leaves the event undelivered, and a crash between a hook and the mark runs the
+  hook again (the same ``event_id``). A lease lost while hooks run does not undo them: the
+  event whose hooks all ran is still marked delivered (a duplicate run by the new holder is
+  allowed, delivery being at least once) and nothing further is started once the loss is seen;
 - the hooks of an event are selected **at delivery** from ``payload.labels`` and
   ``payload.job.queue`` with the delivering process's config; the outbox ``async`` column is a
   hint only: an event delivered as synchronous runs the entries that are not ``async`` now, an
@@ -190,7 +192,8 @@ class Deliverer:
             if bool(getattr(chosen.entry, "async_", False)) != bool(row["async"]):
                 continue
             body = dict(payload)
-            if hook in OUTPUT_HOOKS:
+            body.pop("output_tail", None)  # whatever a stored payload carries is dropped
+            if hook in OUTPUT_HOOKS:  # the field exists only on these hooks
                 tail = None
                 if getattr(chosen.entry, "include_output", False) and (
                     payload.get("output_available") is True
@@ -309,7 +312,10 @@ class Deliverer:
 
     def record(self, plan: EventPlan, result: HookResult) -> None:
         """Append the ``hook_ran`` record of a finished hook (and one ``invalid_decision_id`` per
-        warning). A record that cannot be written never fails the delivery."""
+        warning). A hook that was stopped before it started did not run: it has no record. A
+        record that cannot be written never fails the delivery."""
+        if not result.started:
+            return
         fields = {k: v for k, v in result.log_fields(plan.job_id).items() if k != "event"}
         if plan.queue is not None:
             fields["queue"] = plan.queue

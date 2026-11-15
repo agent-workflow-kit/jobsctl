@@ -222,7 +222,7 @@ class Killer:
                 request_delivery_quietly(
                     self.store, self.config, self.config_path, host=self.host, warn=False
                 )
-        except (JobsctlError, sqlite3.Error, OSError) as exc:
+        except Exception as exc:  # never blocks the final transition (SIGINT etc. still propagate)
             self._diag(f"hook delivery failed ({type(exc).__name__})")
 
     # -- reading the attempt -------------------------------------------------------------------
@@ -284,6 +284,7 @@ class Killer:
             return 0
         except GaveUp as why:
             self._diag(f"{why}; nothing finalized")
+            self._deliver_events()  # the lease may still be held: pending events are delivered
             return 1
         finally:
             self._release_lease()

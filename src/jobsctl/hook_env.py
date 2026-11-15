@@ -9,17 +9,15 @@ dict and handed to the child as is; nothing is inherited implicitly.
 from __future__ import annotations
 
 import fnmatch
-import os
 import re
 from collections.abc import Collection, Mapping
 
-from .config import ENV_NAME_PATTERN, Config
+from .config import ENV_NAME_PATTERN
 
 __all__ = [
     "ENV_FILE_IGNORED",
     "build_hook_env",
     "env_file_name_ignored",
-    "provisional_canonical_environment",
 ]
 
 # `env_file` lines naming these are not added to hook environments (interface.md, Canonical
@@ -41,14 +39,6 @@ ENV_FILE_IGNORED = (
 )
 
 _NAME = re.compile(ENV_NAME_PATTERN)
-_ALWAYS_INHERITED = (
-    "XDG_CONFIG_HOME",
-    "XDG_STATE_HOME",
-    "XDG_DATA_HOME",
-    "XDG_CACHE_HOME",
-    "XDG_RUNTIME_DIR",
-    "TMPDIR",
-)
 
 
 def env_file_name_ignored(name: str) -> bool:
@@ -91,23 +81,3 @@ def build_hook_env(
     env["JOBSCTL_ID"] = job_id
     env["JOBSCTL_OBJECT_TYPE"] = "job"
     return env
-
-
-def provisional_canonical_environment(
-    config: Config, environ: Mapping[str, str] | None = None
-) -> dict[str, str]:
-    """Steps 1 and 2 of the canonical environment only: the `env.inherit` names (patterns end
-    in `*`) plus the always-inherited names, without `JOBSCTL_*`.
-
-    TODO(#8): replace by the canonical environment builder (steps 3 and 4: `env.set.PATH`,
-    `env.path_prepend`, PATH cleaning) and the `env_file` reader; callers pass its result to
-    `build_hook_env` and do not change.
-    """
-    source = os.environ if environ is None else environ
-    patterns = [*config.env.inherit, *_ALWAYS_INHERITED]
-    picked = {
-        name: value
-        for name, value in source.items()
-        if any((name.startswith(p[:-1]) if p.endswith("*") else name == p) for p in patterns)
-    }
-    return _clean(picked)

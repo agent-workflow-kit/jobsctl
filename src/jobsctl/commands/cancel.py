@@ -33,19 +33,32 @@ from jobsctl.triggers import request_pass_from_command
 
 
 def _force_running(
-    ctx: Context, op: Op, row: sqlite3.Row, targets: list[cancel_force.ForceTarget]
+    ctx: Context,
+    op: Op,
+    row: sqlite3.Row,
+    targets: list[cancel_force.ForceTarget],
+    reconciled: list[str],
 ) -> Applied:
     """`cancel --force` of a running job: state checks passed, so the human check comes next
-    (before anything is written), then the Reconcile rules, then the request."""
+    (before anything is written), then the Reconcile rules, then the request. A job the rules
+    changed is added to `reconciled` after the commit: they may have written post events."""
     ctx.require_human("cancel --force")
+    before = row
     row = cancel_force.apply_reconcile(op, row)
+    if row is not before and op.write and op.tx is not None:
+        job_id = str(row["id"])
+        op.tx.after_commit(lambda: reconciled.append(job_id))
     if row["status"] != "running":  # reconcile ended it: nothing to request
         return unchanged(op, row)
     return cancel_force.request_force(op, row, targets)
 
 
 def _cancel_one(
-    ctx: Context, op: Op, row: sqlite3.Row, targets: list[cancel_force.ForceTarget]
+    ctx: Context,
+    op: Op,
+    row: sqlite3.Row,
+    targets: list[cancel_force.ForceTarget],
+    reconciled: list[str],
 ) -> Applied:
     status = row["status"]
     if status in TERMINAL:
@@ -53,12 +66,12 @@ def _cancel_one(
     if status == "running":
         if not ctx.args.force:
             raise refused("live", f"{row['id']} is running; cancel --force stops it")
-        return _force_running(ctx, op, row, targets)
+        return _force_running(ctx, op, row, targets, reconciled)
     return cancel_held_or_queued_or_starting(op, row)  # --force has no effect on these
 
 
 def _by_selectors(
-    ctx: Context, op: Op, targets: list[cancel_force.ForceTarget]
+    ctx: Context, op: Op, targets: list[cancel_force.ForceTarget], reconciled: list[str]
 ) -> tuple[list[Applied], list[dict[str, str]]]:
     args = ctx.args
     rows = select_live_jobs(
@@ -78,7 +91,7 @@ def _by_selectors(
                 raise refused("live", f"{row['id']} is running; cancel --force stops it")
             refusals.append({"job_id": str(row["id"]), "reason": "live"})
             continue
-        done.append(_cancel_one(ctx, op, row, targets))
+        done.append(_cancel_one(ctx, op, row, targets, reconciled))
     return done, refusals
 
 
@@ -110,14 +123,14 @@ def _print(ctx: Context, done: list[Applied], refusals: list[dict[str, str]]) ->
 
 
 def _run(
-    ctx: Context, targets: list[cancel_force.ForceTarget]
+    ctx: Context, targets: list[cancel_force.ForceTarget], reconciled: list[str]
 ) -> tuple[list[Applied], list[dict[str, str]]]:
     args = ctx.args
 
     def body(op: Op) -> tuple[list[Applied], list[dict[str, str]]]:
         if args.id is not None:
-            return [_cancel_one(ctx, op, find_job(op.tx, args.id), targets)], []
-        return _by_selectors(ctx, op, targets)
+            return [_cancel_one(ctx, op, find_job(op.tx, args.id), targets, reconciled)], []
+        return _by_selectors(ctx, op, targets, reconciled)
 
     return run_manual(ctx, body, load_env=lambda: load_env_file(ctx.config.env_file))
 
@@ -194,17 +207,25 @@ def cancel_command(ctx: Context) -> int:
     already = (
         cancel_force.committed_requests(ctx, args.id) if args.force and not args.dry_run else []
     )
+    reconciled: list[str] = []
+    to_deliver: list[str] = []
     try:
-        with interrupts_as_keyboard_interrupt() if args.force else nullcontext():
-            done, refusals = _run(ctx, targets)
-            if targets and not args.dry_run:
-                done = _deliver_and_wait(ctx, done, targets)
-    except KeyboardInterrupt:
-        done = _interrupted(ctx, done, targets, already)
-    # a forced cancel's `post-cancel` is written by the shim or `_kill`, which deliver it
-    deliver_after_commit(
-        ctx, [d.job["id"] for d in done if d.changed and d.previous_status != "running"]
-    )
+        try:
+            with interrupts_as_keyboard_interrupt() if args.force else nullcontext():
+                done, refusals = _run(ctx, targets, reconciled)
+                to_deliver = [
+                    d.job["id"] for d in done if d.changed and d.previous_status != "running"
+                ]
+                if targets and not args.dry_run:
+                    done = _deliver_and_wait(ctx, done, targets)
+        except KeyboardInterrupt:
+            done = _interrupted(ctx, done, targets, already)
+    finally:
+        # The committed plain cancels (and jobs the forced cancel's reconcile ended) have their
+        # `post-*` events delivered here whatever became of the wait: a wait timeout, Ctrl-C or
+        # `version_skew` must not leave them to `_deliver` only. A forced cancel's own
+        # `post-cancel` is written by the shim or `_kill`, which deliver it.
+        deliver_after_commit(ctx, [*to_deliver, *reconciled])
     if not args.dry_run and any(d.changed and d.previous_status == "starting" for d in done):
         request_pass_from_command(ctx.config, ctx.config_path, quiet=ctx.quiet)  # a slot is free
     _print(ctx, done, refusals)
