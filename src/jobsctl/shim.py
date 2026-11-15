@@ -490,7 +490,11 @@ class Shim:
             busy_seconds=FINAL_COMMIT_SECONDS,
             diag=self._diag,
         )
-        verdict = pre.run(view)
+        try:
+            verdict = pre.run(view)
+        except Exception as exc:  # fail closed: nothing is written, the job is not started
+            self._diag(f"the pre-start hooks failed unexpectedly ({type(exc).__name__}: {exc})")
+            return Verdict.INTERNAL
         self._emit(pre.records)
         return verdict
 

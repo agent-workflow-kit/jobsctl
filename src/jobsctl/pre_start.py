@@ -11,7 +11,8 @@ the shim holding the `job:<id>` lease. Fail-closed rules:
   transaction as the verdict) and kept when the loop is cut short;
 - before each hook, and at least every 0.25 s while one runs, the job row is re-read: a job that
   is no longer `starting` under this claim stops the hook's process group (only the hook's own
-  group, through :func:`jobsctl.hook_run.run_hook`) and runs no more hooks;
+  group, through :func:`jobsctl.hook_run.run_hook`) and runs no more hooks; reads that fail for
+  a second in a row stop the hook the same way but end the loop without a verdict (internal);
 - a hook whose leader outlived SIGKILL is an internal error: nothing is written and the job is
   not started (reconcile deals with the dead shim).
 """
@@ -21,6 +22,7 @@ from __future__ import annotations
 import enum
 import json
 import sqlite3
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -41,6 +43,7 @@ from jobsctl.store_ops import transition_job_by_claim, update_attempt_by_claim
 __all__ = ["PreStart", "Verdict"]
 
 HOOK = "pre-start"
+READ_FAILURE_SECONDS = 1.0  # continuous failed reads of the job row that end the loop
 
 
 class Verdict(enum.Enum):
@@ -91,20 +94,27 @@ class PreStart:
         self.retrying = retrying
         self.busy_seconds = busy_seconds
         self.diag = diag
+        self._read_failing_since: float | None = None
         self.records: list[LogRecord] = []  # transition records to emit after the commit
 
     # -- the loop ------------------------------------------------------------------------------
 
     def _stop_reason(self) -> str | None:
         """Polled by `run_hook`: renews the lease, then looks at the job row and at SIGTERM. A
-        failed read is no verdict (the next poll looks again)."""
+        failed read is no verdict, unless reads keep failing for `READ_FAILURE_SECONDS`: then the
+        cancel cannot be watched, so the loop ends without writing (`internal`)."""
         self.tick()
         try:
             view = read_claim(self.store, self.job_id, self.claim_id)
+            self._read_failing_since = None
             if view is None or view.status != "starting":
                 return "canceled"
         except (JobsctlError, sqlite3.Error):
-            pass
+            now = time.monotonic()
+            if self._read_failing_since is None:
+                self._read_failing_since = now
+            elif now - self._read_failing_since >= READ_FAILURE_SECONDS:
+                return "internal"
         return "SIGTERM" if self.terminated() else None
 
     def _payload_parts(self, view: ClaimView) -> tuple[dict[str, Any], dict[str, Any]] | None:
@@ -130,8 +140,11 @@ class PreStart:
         override = set(json.loads(view.row["override_hooks"]))
         tally = _Tally()
         for chosen in selected:
-            if self._stop_reason() == "canceled":
-                return self._cut_short(tally, Verdict.GONE)
+            early = self._stop_reason()
+            if early in ("canceled", "internal"):
+                return self._cut_short(
+                    tally, Verdict.GONE if early == "canceled" else Verdict.INTERNAL
+                )
             event_id = pre_start_event_id(self.claim_id, chosen.index)
             payload = build_payload(
                 HOOK,
@@ -161,7 +174,9 @@ class PreStart:
                 )
                 return Verdict.INTERNAL
             if result.stopped is not None:
-                verdict = Verdict.GONE if result.stopped == "canceled" else Verdict.TERMINATED
+                verdict = {"canceled": Verdict.GONE, "internal": Verdict.INTERNAL}.get(
+                    result.stopped, Verdict.TERMINATED
+                )
                 return self._cut_short(tally, verdict)
             self._tally(tally, result, override)
             if tally.vetoed_by is not None:
@@ -182,7 +197,7 @@ class PreStart:
     def _cut_short(self, tally: _Tally, verdict: Verdict) -> Verdict:
         """Hooks were stopped: keep what the ones that ran decided (their ids), write no verdict.
         The attempt row is written even if the job was canceled meanwhile."""
-        if tally.decision_ids:
+        if tally.decision_ids and verdict is not Verdict.INTERNAL:  # internal: write nothing
             try:
                 self.retrying(self._write_ids(tally), self.busy_seconds)
             except Exception as exc:  # the ids are a nicety; the stop is what matters
@@ -211,8 +226,8 @@ class PreStart:
 
         won, records = self.retrying(write, self.busy_seconds)
         self.records = records
-        if not won:
-            return Verdict.GONE
+        if not won:  # canceled after the last hook: keep what the hooks decided, as `_cut_short`
+            return self._cut_short(tally, Verdict.GONE)
         return Verdict.ENDED if tally.vetoed_by or tally.escalated else Verdict.PROCEED
 
     def _commit(self, tx: Tx, view: ClaimView, tally: _Tally) -> tuple[bool, list[LogRecord]]:

@@ -15,6 +15,7 @@ import pytest
 from jobsctl import triggers
 from jobsctl.config import Config
 from jobsctl.hook_run import HookResult, HookTuning
+from jobsctl.pre_start import PreStart
 from jobsctl.store_db import OpenMode, Store
 from tests.conftest import validate_against
 from tests.delivery_helpers import fake_result, pending
@@ -71,6 +72,17 @@ def test_no_pre_start_hook_starts_the_job(store: Store, tmp_path: Path) -> None:
     assert marker.exists() and job(store)["status"] == "done"
 
 
+def test_decision_ids_are_deduplicated_across_hooks_in_order(store: Store, tmp_path: Path) -> None:
+    argv, _ = marker_job(tmp_path)
+    seed_claimed(store, argv)
+    cfg = config(
+        sh("a", 'echo \'{"decision_id": ["d1", "d2"]}\''),
+        sh("b", 'echo \'{"decision_id": ["d2", "d3", "d1"]}\''),
+    )
+    assert make_shim(store, cfg, hook_tuning=FAST).run() == 0
+    assert json.loads(attempt(store)["decision_ids"]) == ["d1", "d2", "d3"]
+
+
 def test_allowing_hooks_run_in_order_record_decision_ids_and_the_job_starts(
     store: Store, tmp_path: Path
 ) -> None:
@@ -116,6 +128,101 @@ def test_a_veto_cancels_the_job_with_vetoed_by_and_messages_and_stops_the_loop(
     assert pending(store) == []
     (record,) = [r for r in log_records("transition") if r["to"] == "canceled"]
     assert (record["from"], record["reason"]) == ("starting", "vetoed")
+
+
+def test_a_veto_after_an_escalation_validates_against_the_attempt_schema(
+    store: Store, tmp_path: Path
+) -> None:
+    argv, _ = marker_job(tmp_path)
+    out = tmp_path / "post-cancel.json"
+    seed_claimed(store, argv)
+    cfg = config(
+        sh("ask", "echo 'need a human' >&2; exit 13"),
+        sh("gate", "echo no >&2; exit 1"),
+        **{"post-cancel": [sh("pc", f"cat > {out}")]},
+    )
+    assert make_shim(store, cfg, hook_tuning=FAST).run() == 0
+    att = attempt(store)
+    assert (att["status"], att["vetoed_by"]) == ("canceled", "gate")
+    assert json.loads(att["escalated_hooks"]) == ["ask"]
+    assert [(m["hook_id"], m["outcome"]) for m in messages(store)] == [
+        ("ask", "escalate"),
+        ("gate", "veto"),
+    ]
+    payload = json.loads(out.read_text())
+    validate_against("hooks/post-cancel.json", payload)
+    assert payload["attempt"]["vetoed_by"] == "gate"
+    assert payload["attempt"]["escalated_hooks"] == ["ask"]
+
+
+def test_a_cancel_racing_the_verdict_still_records_the_decision_ids(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cancel lands after the last hook finished but before the verdict commit."""
+    argv, marker = marker_job(tmp_path)
+    seed_claimed(store, argv)
+    real = PreStart._finish  # pyright: ignore[reportPrivateUsage]
+
+    def cancel_then_finish(self: PreStart, view: Any, tally: Any) -> Any:
+        with Store.open(mode=OpenMode.CLI) as other, other.write() as tx:
+            tx.execute("UPDATE jobs SET status='canceled', reason='canceled' WHERE id = ?", [JOB])
+            tx.execute("UPDATE attempts SET status='canceled' WHERE job_id = ?", [JOB])
+        return real(self, view, tally)
+
+    monkeypatch.setattr(PreStart, "_finish", cancel_then_finish)
+    cfg = config(sh("a", 'echo \'{"decision_id": "d9"}\''))
+    assert make_shim(store, cfg, hook_tuning=FAST).run() == 0
+    assert job(store)["status"] == "canceled" and not marker.exists()
+    assert json.loads(attempt(store)["decision_ids"]) == ["d9"]
+
+
+def test_an_unreadable_job_row_stops_the_hook_without_writing(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reads that keep failing for about a second end the loop: the hook's group is stopped,
+    nothing is written, the shim exits 1 and the job stays `starting`."""
+    import sqlite3
+
+    from jobsctl import pre_start
+
+    started = tmp_path / "started"
+    argv, marker = marker_job(tmp_path)
+    seed_claimed(store, argv)
+
+    def broken(*args: object, **kwargs: object) -> object:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(pre_start, "read_claim", broken)
+    cfg = config(sh("slow", f"echo $$ > {started}; sleep 30", timeout="1h"))
+    began = time.monotonic()
+    assert make_shim(store, cfg, hook_tuning=FAST).run() == 1
+    assert time.monotonic() - began < 15
+    assert job(store)["status"] == "starting" and not marker.exists()
+    assert attempt(store)["decision_ids"] in (None, "[]")
+    pid = int(started.read_text())
+    for _ in range(100):
+        if not _alive(pid):
+            break
+        time.sleep(0.05)
+    assert not _alive(pid)
+
+
+def test_an_unexpected_error_in_the_hooks_is_logged_and_exits_1_writing_nothing(
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    argv, marker = marker_job(tmp_path)
+    seed_claimed(store, argv)
+
+    def boom(self: PreStart, view: Any) -> Any:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(PreStart, "run", boom)
+    assert make_shim(store, config(sh("a", "true")), hook_tuning=FAST).run() == 1
+    assert job(store)["status"] == "starting" and not marker.exists()
+    assert "RuntimeError" in capsys.readouterr().err
 
 
 def test_an_escalation_holds_the_job_runs_the_other_hooks_and_records_who(
@@ -289,11 +396,17 @@ def test_override_hooks_survive_a_start_that_did_not_run_the_hooks(
     assert attempt(store)["reason"] == "terminated" and not marker.exists()
 
 
-def test_a_terminal_failure_clears_the_override(store: Store, tmp_path: Path) -> None:
-    seed_claimed(store, ["/nonexistent/binary"])
+def test_a_terminal_end_during_the_hooks_clears_the_override(store: Store, tmp_path: Path) -> None:
+    """SIGTERM mid-first-hook with no retries left: the attempt fails `terminated` for good, and
+    the terminal end clears the override the job was seeded with."""
+    started = tmp_path / "started"
+    argv, _ = marker_job(tmp_path)
+    seed_claimed(store, argv, overrides={"max_retries": 0})
     set_override(store, "ask")
-    assert make_shim(store, config(sh("ask", "true")), hook_tuning=FAST).run() == 0
-    assert (job(store)["status"], job(store)["reason"]) == ("failed", "spawn_failed")
+    shim = make_shim(store, config(sh("ask", f"touch {started}; sleep 30")), hook_tuning=FAST)
+    threading.Thread(target=lambda: (_wait_for(started), shim.request_stop())).start()
+    assert shim.run() == 0
+    assert (job(store)["status"], job(store)["reason"]) == ("failed", "terminated")
     assert job(store)["override_hooks"] == "[]"
 
 
