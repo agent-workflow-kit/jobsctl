@@ -143,3 +143,11 @@ def test_remove_escapes_keeps_the_text_before_a_carriage_return_unlike_strip_esc
     assert remove_escapes("\x1b[31mold\rnew\x1b[0m") == "old\rnew"
     assert strip_escapes("\x1b[31mold\rnew\x1b[0m") == "new"
     assert remove_escapes("a\x1b]0;title\x07b") == "ab"
+
+
+def test_mask_runs_after_escape_removal_and_before_control_escaping() -> None:
+    secret = "s3cr3t-value"
+    # an escape sequence inside the secret is removed first, so the masked text is still found
+    text = f"a {secret[:4]}\x1b[31m{secret[4:]} b\x07\x1b[0m"
+    out = sanitize(text, mask=lambda t: t.replace(secret, "***"))
+    assert out == "a *** b\\u0007"
