@@ -148,3 +148,20 @@ def utc_now() -> dt.datetime:
 def monotonic() -> float:
     """A monotonic clock in seconds, for budgets (tests replace this or pass their own)."""
     return time.monotonic()
+
+
+def exec_replace(argv: list[str], env: Mapping[str, str]) -> None:
+    """Replace this process image with ``argv`` (no shell; ``argv[0]`` is an executable path) and
+    exactly the environment ``env``. The PID, the process start time and the children stay; it
+    returns only by raising ``OSError`` (the process is unchanged then). Tests replace this."""
+    os.execve(argv[0], argv, dict(env))
+
+
+def reap_child(pid: int) -> tuple[bool, int | None]:
+    """Poll the child with exactly this PID (never "any child"): ``(True, None)`` while it runs,
+    ``(True, status)`` once reaped, ``(False, None)`` when it is not a child of this process."""
+    try:
+        done, status = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        return False, None
+    return True, (None if done == 0 else status)
