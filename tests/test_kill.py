@@ -1,0 +1,465 @@
+"""`_kill` over a fake host: who is signaled, and when (docs/interface.md, Shim loss).
+
+The host is scripted, so every PID, start time and exit is chosen by the test and nothing real is
+signaled. The invariants: a signal is sent only while the recorded leader's identity holds, never
+once it is gone, never to a process outside the job's group, and the job is finalized `canceled`
+(`forced`, exit kind `unknown`) in one compare-and-set on the claim.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+import signal
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
+from typing import Any
+
+import pytest
+
+from jobsctl.config import Config
+from jobsctl.kill import Killer
+from jobsctl.leases import expiry
+from jobsctl.proc_host import ProcInfo
+from jobsctl.result_file import ResultRecord, ResultTail, write_result
+from jobsctl.shim import StopSignal
+from jobsctl.shim_exit import ExitRecord
+from jobsctl.store_db import OpenMode, Store
+from jobsctl.store_ops import take_lease
+from tests.proc_fakes import FakeHost, proc
+from tests.shim_helpers import CLAIM, JOB, attempt, job, log_records, seed_claimed, shims_dir
+
+ME = os.getpid()
+SHIM = 900
+LEADER = 500
+MEMBER = 501  # in the job's group
+STRANGER = 777  # not in the job's group
+START = 1000
+BOOT = "boot-1"
+
+
+def ident(pid: int, start: int = START) -> str:
+    return f"{BOOT}:{pid}:{start}"
+
+
+class Host(FakeHost):
+    """A fake host whose signals have effects: `reactions` maps (call, pid, sig) to a callback."""
+
+    def __init__(self, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.reactions: dict[tuple[str, int, int], Callable[[], None]] = {}
+
+    def kill(self, pid: int, sig: int) -> None:
+        super().kill(pid, sig)
+        self.reactions.get(("kill", pid, sig), lambda: None)()
+
+    def killpg(self, pgid: int, sig: int) -> None:
+        super().killpg(pgid, sig)
+        self.reactions.get(("killpg", pgid, sig), lambda: None)()
+
+
+@dataclass
+class Rig:
+    store: Store
+    host: Host
+    now: float = 0.0
+    stop: StopSignal = field(default_factory=StopSignal)
+    on_sleep: Callable[[], None] = lambda: None
+
+    def killer(self, config: Config | None = None) -> Killer:
+        def sleep(seconds: float) -> None:
+            self.now += seconds
+            self.on_sleep()
+
+        return Killer(
+            self.store,
+            config or Config(auto_run=False),
+            None,
+            JOB,
+            host=self.host,
+            stop=self.stop,
+            monotonic=lambda: self.now,
+            sleep=sleep,
+        )
+
+    def die(self, pid: int) -> Callable[[], None]:
+        return lambda: self.host.procs.pop(pid, None) and None
+
+    def signals(self) -> list[tuple]:
+        return self.host.sent()
+
+
+@pytest.fixture
+def rig() -> Iterator[Rig]:
+    host = Host(
+        procs={
+            ME: proc(ME),
+            LEADER: proc(LEADER),
+            MEMBER: proc(MEMBER, pgid=LEADER),
+            STRANGER: proc(STRANGER, pgid=STRANGER),
+        },
+        pidfd_ok=False,
+    )
+    with Store.open(mode=OpenMode.CLI) as store:
+        seed_claimed(store, ["sleep", "600"], overrides={"kill_grace": 10})
+        set_running(store)
+        yield Rig(store, host)
+
+
+def set_running(
+    store: Store,
+    *,
+    shim: str | None = ident(SHIM),
+    leader: str | None = ident(LEADER),
+    pgid: int | None = LEADER,
+    force: str | None = "human:t",
+    effective: dict[str, Any] | None = None,
+) -> None:
+    with store.write() as tx:
+        tx.execute("UPDATE jobs SET status = 'running' WHERE id = ?", [JOB])
+        tx.execute(
+            "UPDATE attempts SET status = 'running', shim_identity = ?, job_identity = ?, "
+            "pgid = ?, force_requested_by = ?, effective = ? WHERE job_id = ?",
+            [shim, leader, pgid, force, json.dumps(effective or {"kill_grace": 10}), JOB],
+        )
+
+
+def ended(rig: Rig) -> tuple[str, str | None, str | None]:
+    row = job(rig.store)
+    return row["status"], row["reason"], attempt(rig.store)["status"]
+
+
+def exit_kind(rig: Rig) -> str:
+    return json.loads(attempt(rig.store)["exit"])["kind"]
+
+
+def untouched(rig: Rig) -> None:
+    assert job(rig.store)["status"] == "running"
+    assert rig.signals() == []
+
+
+def lease(rig: Rig) -> Any:
+    return rig.store.query_one("SELECT * FROM leases WHERE name = ?", [f"job:{JOB}"])
+
+
+# -- nothing to signal -------------------------------------------------------------------------
+
+
+def test_a_gone_leader_is_not_signaled_and_the_job_is_finalized_forced(rig: Rig) -> None:
+    del rig.host.procs[LEADER]
+    assert rig.killer().run() == 0
+    assert rig.signals() == []
+    assert ended(rig) == ("canceled", "forced", "canceled")
+    assert exit_kind(rig) == "unknown"
+    assert attempt(rig.store)["leftovers"] is None  # the group could not be probed
+    assert lease(rig) is None
+
+
+def test_a_reused_leader_pid_is_not_signaled(rig: Rig) -> None:
+    rig.host.procs[LEADER] = proc(LEADER, start=START + 5)  # another process holds the PID now
+    assert rig.killer().run() == 0
+    assert rig.signals() == []
+    assert ended(rig)[:2] == ("canceled", "forced")
+
+
+def test_a_zombie_leader_counts_as_gone_and_nothing_is_signaled(rig: Rig) -> None:
+    rig.host.procs[LEADER] = proc(LEADER, zombie=True)
+    assert rig.killer().run() == 0
+    assert rig.signals() == []
+    assert ended(rig)[:2] == ("canceled", "forced")
+
+
+def test_a_leader_from_another_boot_is_not_signaled(rig: Rig) -> None:
+    with rig.store.write() as tx:
+        tx.execute("UPDATE attempts SET job_identity = ?", ["boot-0:500:1000"])
+    assert rig.killer().run() == 0
+    assert rig.signals() == []
+    assert ended(rig)[:2] == ("canceled", "forced")
+
+
+def test_an_unreadable_leader_identity_signals_nothing_and_finalizes_nothing(rig: Rig) -> None:
+    rig.host.info_errors[LEADER] = PermissionError("hidepid")
+    assert rig.killer().run() == 1
+    untouched(rig)
+    assert lease(rig) is None
+
+
+def test_a_recorded_group_that_is_not_the_leaders_is_never_signaled(rig: Rig) -> None:
+    with rig.store.write() as tx:
+        tx.execute("UPDATE attempts SET pgid = ?", [STRANGER])
+    assert rig.killer().run() == 0
+    assert rig.signals() == []
+    assert ended(rig)[:2] == ("canceled", "forced")
+
+
+# -- re-checks: eligibility --------------------------------------------------------------------
+
+
+def test_a_live_shim_means_nothing_to_do(rig: Rig) -> None:
+    rig.host.procs[SHIM] = proc(SHIM)
+    assert rig.killer().run() == 0
+    untouched(rig)
+    assert lease(rig) is None
+
+
+def test_an_unreadable_shim_identity_is_not_proof_of_loss(rig: Rig) -> None:
+    rig.host.procs[SHIM] = proc(SHIM)
+    rig.host.info_errors[SHIM] = PermissionError("hidepid")
+    assert rig.killer().run() == 0
+    untouched(rig)
+
+
+def test_an_attempt_without_a_usable_shim_identity_is_left_alone(rig: Rig) -> None:
+    with rig.store.write() as tx:
+        tx.execute("UPDATE attempts SET shim_identity = 'garbage'")
+    assert rig.killer().run() == 0
+    untouched(rig)
+
+
+def test_no_committed_force_request_means_nothing_is_signaled(rig: Rig) -> None:
+    with rig.store.write() as tx:
+        tx.execute("UPDATE attempts SET force_requested_by = NULL")
+    assert rig.killer().run() == 0
+    untouched(rig)
+
+
+def test_a_job_that_is_not_running_is_left_alone(rig: Rig) -> None:
+    with rig.store.write() as tx:
+        tx.execute("UPDATE jobs SET status = 'done', reason = 'exit'")
+    assert rig.killer().run() == 0
+    assert rig.signals() == []
+    assert job(rig.store)["status"] == "done"
+
+
+def test_an_unknown_job_is_a_clean_exit() -> None:
+    with Store.open(mode=OpenMode.CLI) as store:
+        host = Host(procs={ME: proc(ME)})
+        assert Killer(store, Config(auto_run=False), None, "jb-zzzzzzzz", host=host).run() == 0
+        assert host.sent() == []
+
+
+def test_a_live_lease_holder_means_a_duplicate_kill_exits_untouched(rig: Rig) -> None:
+    rig.host.procs[700] = proc(700)
+    assert take_lease(
+        rig.store,
+        f"job:{JOB}",
+        ident(700),
+        now="2026-01-01T00:00:00.000Z",
+        expires_at=expiry(dt.datetime.now(dt.UTC)),
+        is_alive=lambda holder: True,
+    )
+    assert rig.killer().run() == 0
+    untouched(rig)
+    assert lease(rig)["holder_identity"] == ident(700)  # not released by the loser
+
+
+def test_a_dead_lease_holder_is_replaced(rig: Rig) -> None:
+    assert take_lease(
+        rig.store,
+        f"job:{JOB}",
+        ident(701),  # not in procs: dead
+        now="2026-01-01T00:00:00.000Z",
+        expires_at="2999-01-01T00:00:00.000Z",
+        is_alive=lambda holder: True,
+    )
+    del rig.host.procs[LEADER]
+    assert rig.killer().run() == 0
+    assert ended(rig)[:2] == ("canceled", "forced")
+
+
+# -- the sequence ------------------------------------------------------------------------------
+
+
+def test_a_leader_that_obeys_sigterm_gets_one_signal_to_its_pid(rig: Rig) -> None:
+    rig.host.reactions[("kill", LEADER, signal.SIGTERM)] = rig.die(LEADER)
+    assert rig.killer().run() == 0
+    assert rig.signals() == [("kill", LEADER, signal.SIGTERM)]
+    assert ended(rig) == ("canceled", "forced", "canceled")
+    assert exit_kind(rig) == "unknown"
+
+
+def test_a_stubborn_leader_gets_sigterm_then_the_group_then_sigkill_after_each_grace(
+    rig: Rig,
+) -> None:
+    rig.host.reactions[("killpg", LEADER, signal.SIGKILL)] = lambda: (
+        rig.host.procs.pop(LEADER),
+        rig.host.procs.pop(MEMBER),
+    )
+    assert rig.killer().run() == 0
+    assert rig.signals() == [
+        ("kill", LEADER, signal.SIGTERM),
+        ("killpg", LEADER, signal.SIGTERM),
+        ("killpg", LEADER, signal.SIGKILL),  # the leader is gone after it: no PID signal follows
+    ]
+    assert rig.now >= 20  # two graces of 10 seconds
+    assert ended(rig)[:2] == ("canceled", "forced")
+    assert attempt(rig.store)["leftovers"] == 0
+
+
+def test_only_the_leader_and_its_group_are_ever_signaled(rig: Rig) -> None:
+    rig.host.reactions[("killpg", LEADER, signal.SIGKILL)] = lambda: (
+        rig.host.procs.pop(LEADER),
+        rig.host.procs.pop(MEMBER),
+    )
+    rig.killer().run()
+    targets = {call[1] for call in rig.signals()}
+    assert targets == {LEADER}  # not the member by PID, not the stranger, not the shim
+    assert STRANGER in rig.host.procs
+
+
+def test_no_signal_is_sent_once_the_leader_is_gone_and_members_become_leftovers(
+    rig: Rig,
+) -> None:
+    rig.host.reactions[("kill", LEADER, signal.SIGTERM)] = rig.die(LEADER)
+    assert rig.killer().run() == 0
+    assert rig.signals() == [("kill", LEADER, signal.SIGTERM)]  # the member was not signaled
+    assert attempt(rig.store)["leftovers"] == 1
+    warn = log_records("leftovers")
+    assert warn and warn[0]["level"] == "warn"
+
+
+def test_a_pid_reused_after_the_first_signal_receives_nothing_more(rig: Rig) -> None:
+    def reuse() -> None:
+        rig.host.procs[LEADER] = proc(LEADER, start=START + 9, pgid=LEADER)
+
+    rig.host.reactions[("kill", LEADER, signal.SIGTERM)] = reuse
+    assert rig.killer().run() == 0
+    assert rig.signals() == [("kill", LEADER, signal.SIGTERM)]
+    assert ended(rig)[:2] == ("canceled", "forced")
+
+
+def test_sigkill_failing_to_end_a_stuck_leader_is_resent_until_it_goes(rig: Rig) -> None:
+    gone_at = 45.0
+    rig.on_sleep = lambda: rig.host.procs.pop(LEADER, None) if rig.now >= gone_at else None
+    assert rig.killer().run() == 0
+    kills = [c for c in rig.signals() if c[2] == signal.SIGKILL]
+    assert len(kills) > 2  # resent about every second
+    assert ended(rig)[:2] == ("canceled", "forced")
+
+
+def test_without_a_pidfd_the_identity_is_rechecked_before_every_signal(rig: Rig) -> None:
+    rig.host.reactions[("kill", LEADER, signal.SIGTERM)] = rig.die(LEADER)
+    rig.killer().run()
+    checks = [c for c in rig.host.calls if c == ("process_info", LEADER)]
+    assert len(checks) >= 2  # at the entry and before the signal
+
+
+def test_an_unreadable_leader_mid_sequence_is_never_signaled_unchecked() -> None:
+    """`UNKNOWN` is not "gone": nothing is sent, and `_kill` gives up after a minute."""
+    with Store.open(mode=OpenMode.CLI) as store:
+        seed_claimed(store, ["sleep", "600"])
+        set_running(store)
+        host = Host(procs={ME: proc(ME), LEADER: proc(LEADER)}, pidfd_ok=False)
+        r = Rig(store, host)
+
+        def hide() -> None:
+            host.info_errors[LEADER] = PermissionError("hidepid")
+
+        r.on_sleep = hide
+        assert r.killer().run() == 1
+        assert [c for c in host.sent() if c[2] != signal.SIGTERM] == []
+        assert job(store)["status"] == "running"
+
+
+# -- stopping and finalizing -------------------------------------------------------------------
+
+
+def test_sigterm_to_kill_itself_stops_it_without_finalizing_and_frees_the_lease(rig: Rig) -> None:
+    rig.on_sleep = rig.stop.set
+    assert rig.killer().run() == 1
+    assert job(rig.store)["status"] == "running"
+    assert lease(rig) is None  # another `_kill` can take over
+
+
+def test_an_attempt_finalized_meanwhile_ends_this_kill_without_a_second_finalization(
+    rig: Rig,
+) -> None:
+    def finish_elsewhere() -> None:
+        with rig.store.write() as tx:
+            tx.execute("UPDATE jobs SET status = 'failed', reason = 'lost'")
+
+    rig.on_sleep = finish_elsewhere
+    assert rig.killer().run() == 1
+    assert job(rig.store)["reason"] == "lost"  # untouched by this `_kill`
+
+
+def test_a_forced_end_is_not_retried_even_with_a_retry_budget(rig: Rig) -> None:
+    del rig.host.procs[LEADER]
+    with rig.store.write() as tx:
+        tx.execute("UPDATE jobs SET overrides = ?", [json.dumps({"max_retries": 3})])
+        tx.execute("UPDATE attempts SET effective = ?", [json.dumps({"max_retries": 3})])
+    assert rig.killer().run() == 0
+    assert ended(rig)[:2] == ("canceled", "forced")
+    assert job(rig.store)["not_before"] is None
+
+
+def test_a_stale_claim_finalizes_nothing(rig: Rig) -> None:
+    del rig.host.procs[LEADER]
+    killer = rig.killer()
+
+    def swap() -> None:
+        with rig.store.write() as tx:
+            tx.execute("UPDATE attempts SET claim_id = 'claim-other'")
+
+    real_finish = killer._finish
+
+    def finish(*a: Any, **k: Any) -> None:
+        swap()
+        real_finish(*a, **k)
+
+    killer._finish = finish  # type: ignore[method-assign]
+    assert killer.run() == 0
+    assert job(rig.store)["status"] == "running"
+    assert CLAIM != "claim-other"
+
+
+def test_the_transition_is_logged_once(rig: Rig) -> None:
+    del rig.host.procs[LEADER]
+    rig.killer().run()
+    moves = [r for r in log_records("transition") if r.get("to") == "canceled"]
+    assert len(moves) == 1
+
+
+# -- a result file the dead shim left ----------------------------------------------------------
+
+
+def put_result(claim: str, *, code: int = 3) -> None:
+    write_result(
+        shims_dir(),
+        ResultRecord(
+            job_id=JOB,
+            attempt=1,
+            claim_id=claim,
+            status="failed",
+            reason="exit",
+            hold_reason=None,
+            exit=ExitRecord("exited", code=code),
+            leftovers=2,
+            tail=ResultTail("last words\n", 11, False),
+            ended_at="2026-01-01T00:00:00.000Z",
+        ),
+    )
+
+
+def test_a_result_file_gives_the_exit_record_leftovers_and_tail_and_nothing_is_signaled(
+    rig: Rig,
+) -> None:
+    shims_dir().mkdir(parents=True, exist_ok=True)
+    put_result(CLAIM)
+    assert rig.killer().run() == 0
+    assert rig.signals() == []
+    assert ended(rig)[:2] == ("canceled", "forced")
+    assert json.loads(attempt(rig.store)["exit"])["code"] == 3
+    assert attempt(rig.store)["leftovers"] == 2
+    assert list(shims_dir().glob("*.result")) == []
+    tail = rig.store.query_one("SELECT tail FROM outputs WHERE job_id = ?", [JOB])
+    assert bytes(tail["tail"]) == b"last words\n"
+
+
+def test_a_result_file_of_another_claim_is_ignored(rig: Rig) -> None:
+    shims_dir().mkdir(parents=True, exist_ok=True)
+    put_result("claim-someone-else")
+    del rig.host.procs[LEADER]
+    assert rig.killer().run() == 0
+    assert exit_kind(rig) == "unknown"

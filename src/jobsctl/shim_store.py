@@ -248,7 +248,7 @@ def finish_running(
     outcome: Outcome,
     exit_record: ExitRecord,
     leftovers: int | None,
-    tail: TailSnapshot,
+    tail: TailSnapshot | None,
     clock: Callable[[], str],
 ) -> FinalResult:
     """Start sequence step 9, the final transaction: the transition, the final tail and the hook
@@ -300,7 +300,8 @@ def finish_running(
                 "leftovers": leftovers,
             },
         )
-        save_tail(tx, job_id, view.attempt, tail, now)
+        if tail is not None:  # `_kill` keeps the last flushed tail when it has no other
+            save_tail(tx, job_id, view.attempt, tail, now)
         _post_event(tx, config, post_hook(outcome), job_id, view.attempt, "running", now)
         record = transition_record(
             job_id,
