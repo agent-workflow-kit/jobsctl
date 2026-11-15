@@ -52,25 +52,28 @@ class UpgradeWatch:
         env = os.environ if environ is None else environ
         previous = env.pop(REEXEC_ENV, None)  # never inherited by anything this process spawns
         self.previous = previous[:_MAX_REASON] if previous else None
-        self.started_version = installed_version()
+        self.started_version: str | None = installed_version()
         self._failed: set[str] = set()
 
     def check(self, store: Store) -> str | None:
         """The reason to re-exec now, or `None`. A reason that already started this image, or
-        whose re-exec failed, is not reported again."""
-        reason = self._reason(store)
-        if reason is None or reason == self.previous or reason in self._failed:
-            return None
-        return reason
+        whose re-exec failed, is not reported again (and does not hide another reason)."""
+        for reason in self._reasons(store):
+            if reason != self.previous and reason not in self._failed:
+                return reason
+        return None
 
-    def _reason(self, store: Store) -> str | None:
+    def _reasons(self, store: Store) -> list[str]:
+        reasons: list[str] = []
         found = store.current_version()
         if found > store.known_version:
-            return f"schema v{found} is newer than v{store.known_version}"
+            reasons.append(f"schema v{found} is newer than v{store.known_version}")
         now = installed_version()
-        if now is not None and self.started_version is not None and now != self.started_version:
-            return f"installed version {self.started_version} -> {now}"
-        return None
+        if now is not None and self.started_version is None:
+            self.started_version = now  # unreadable at start: the first readable value is the base
+        elif now is not None and now != self.started_version:
+            reasons.append(f"installed version {self.started_version} -> {now}")
+        return reasons
 
     def failed(self, reason: str) -> None:
         self._failed.add(reason)

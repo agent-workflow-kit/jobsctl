@@ -473,7 +473,13 @@ class Runner:
     def adopt_shims(self) -> None:
         """After a re-exec: the shims of attempts in `starting` or `running` that the previous
         image spawned are this process's children; reap them by the PIDs recorded on the attempts
-        (their recorded identity must still match, so a reused PID is never touched)."""
+        (their recorded identity must still match, so a reused PID is never touched). A shim that
+        already exited is a zombie child: it is adopted too (only the exact pid is waited on, never
+        signaled), so the next `reap` collects it and its attempt follows the normal exit
+        handling. A recorded pid that is not our child is dropped by `reap` without a conclusion.
+
+        todo(#28): on macOS the identity read of a zombie (libproc / sysctl start time) is
+        unverified; if it fails the shim is simply not adopted and stays a zombie until exit."""
         known = {child.popen.pid for child in self.children}
         rows = self.store.query_all(
             "SELECT job_id, claim_id, shim_identity FROM attempts "
@@ -483,7 +489,7 @@ class Runner:
             ident = parse_identity(str(row["shim_identity"]))
             if ident is None or ident.pid in known or ident.pid == os.getpid():
                 continue
-            if check_identity(self.host, ident).state is not Liveness.ALIVE:
+            if check_identity(self.host, ident, allow_zombie=True).state is not Liveness.ALIVE:
                 continue
             known.add(ident.pid)
             self.children.append(

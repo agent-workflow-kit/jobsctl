@@ -26,7 +26,7 @@ WAIT = 60.0
 
 
 class Loop:
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(self, tmp_path: Path, extra_env: dict[str, str] | None = None) -> None:
         self.version_file = tmp_path / "version"
         self.version_file.write_text("1.0.0", encoding="utf-8")
         self.log = tmp_path / "starts.log"
@@ -35,6 +35,7 @@ class Loop:
         self.err = tmp_path / "loop.err"
         cfg = config_file(tmp_path, run_interval="1s", auto_run=False)
         env = dict(os.environ, LOOP_VERSION_FILE=str(self.version_file), LOOP_LOG=str(self.log))
+        env.update(extra_env or {})
         with open(self.out, "wb") as out, open(self.err, "wb") as err:
             self.proc = subprocess.Popen(
                 [sys.executable, "-I", str(WORKER), "--config", cfg, "--json", "run", "--loop"],
@@ -129,3 +130,30 @@ def test_sigterm_still_stops_the_re_exec_d_image(loop: Loop) -> None:
     loop.wait_starts(2)
     loop.wait_passes(2)
     assert loop.stop() == 0
+
+
+def test_a_signal_pending_in_the_exec_window_is_delivered_once_by_the_new_image(
+    tmp_path: Path,
+) -> None:
+    # starts as a re-exec'd image would: SIGTERM blocked and pending, the reason variable set
+    started = Loop(tmp_path, {"LOOP_PENDING_TERM": "1", "JOBSCTL_LOOP_REEXEC": "schema v9"})
+    try:
+        assert started.proc.wait(timeout=WAIT) == 0  # delivered after the handlers: a clean stop
+        assert len(started.starts()) == 1
+        assert started.passes() == 0  # the stop was seen before any pass
+    finally:
+        if started.proc.poll() is None:
+            started.proc.kill()  # exactly this handle
+            started.proc.wait(timeout=WAIT)
+
+
+def test_a_first_start_does_not_unblock_inherited_signals(tmp_path: Path) -> None:
+    # without the reason variable this is not a re-exec: the mask is left alone, so the blocked
+    # SIGTERM stays pending and the loop keeps running until killed
+    started = Loop(tmp_path, {"LOOP_PENDING_TERM": "1"})
+    try:
+        started.wait_passes(2)
+        assert started.proc.poll() is None
+    finally:
+        started.proc.kill()  # exactly this handle (SIGTERM is blocked in it)
+        started.proc.wait(timeout=WAIT)

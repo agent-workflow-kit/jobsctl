@@ -91,16 +91,18 @@ def _loop(ctx: Context, runner: Runner) -> int:
         nonlocal stop
         stop = True
 
-    old = {s: signal.signal(s, on_signal) for s in _STOP_SIGNALS}
-    # a re-exec leaves SIGTERM/SIGINT blocked when one arrived in its window: deliver it now
-    signal.pthread_sigmask(signal.SIG_UNBLOCK, _STOP_SIGNALS)
     watch = UpgradeWatch()
-    if watch.previous is not None:
+    old = {s: signal.signal(s, on_signal) for s in _STOP_SIGNALS}
+    if watch.previous is not None:  # started by a re-exec of ours
+        # the previous image may have left SIGTERM/SIGINT blocked with one pending: deliver it
+        # now that the handlers are installed
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, _STOP_SIGNALS)
         _adopt(runner)
     interval = ctx.args.interval if ctx.args.interval is not None else ctx.config.run_interval
     try:
         while not stop:
-            _reexec_if_upgraded(watch, runner, lambda: stop)
+            if not _reexec_if_upgraded(watch, runner, lambda: stop):
+                break  # a stop arrived around the exec: no further pass
             try:
                 result = runner.run_pass(max_starts=ctx.args.max_starts)
             except LeaseLost as err:
@@ -132,32 +134,33 @@ def _adopt(runner: Runner) -> None:
         _warn(f"could not adopt the shims of the previous image ({err})")
 
 
-def _reexec_if_upgraded(watch: UpgradeWatch, runner: Runner, stopped: Callable[[], bool]) -> None:
+def _reexec_if_upgraded(watch: UpgradeWatch, runner: Runner, stopped: Callable[[], bool]) -> bool:
     """Between passes (never inside one): replace this process after an upgrade (interface.md,
-    Upgrades). Returns when nothing needs doing, when a stop was requested or when the exec
-    failed (the same reason is then not tried again)."""
+    Upgrades). Returns `True` to go on with the next pass (nothing to do, or the exec failed and
+    the same reason is not tried again) and `False` when a stop was requested."""
     if stopped():
-        return
+        return False
     try:
         reason = watch.check(runner.store)
     except (JobsctlError, sqlite3.Error):
-        return  # a busy database now: the next iteration checks again
+        return True  # a busy database now: the next iteration checks again
     if reason is None:
-        return
+        return True
     _warn(f"re-executing after an upgrade ({reason})")
     # a stop request must not be lost with this image: block the signals, and if one is already
     # pending (or was handled meanwhile) stay; a later one is delivered by the new image
     signal.pthread_sigmask(signal.SIG_BLOCK, _STOP_SIGNALS)
     try:
         if stopped() or _STOP_SIGNALS & signal.sigpending():
-            return
+            return False
         try:
             watch.reexec(reason)
         except OSError as err:
             watch.failed(reason)
             _warn(f"re-exec failed ({err.strerror or err}); continuing with this image")
     finally:
-        signal.pthread_sigmask(signal.SIG_UNBLOCK, _STOP_SIGNALS)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, _STOP_SIGNALS)  # delivers a pending signal
+    return not stopped()
 
 
 def _warn(message: str) -> None:

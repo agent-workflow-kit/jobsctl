@@ -118,6 +118,48 @@ def test_the_reason_that_started_this_image_does_not_repeat(store: Store) -> Non
     assert again.check(store) is not None
 
 
+def test_a_suppressed_schema_reason_does_not_mask_a_later_version_change(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(upgrade, "installed_version", lambda: "1.0.0")
+    _bump_schema(store)
+    first = UpgradeWatch({}).check(store)
+    assert first is not None and "newer" in first
+    watch = UpgradeWatch({REEXEC_ENV: first})  # this image was started by the schema reason
+    assert watch.check(store) is None  # still older than the schema: no flapping
+    monkeypatch.setattr(upgrade, "installed_version", lambda: "1.1.0")
+    reason = watch.check(store)
+    assert reason is not None and "1.0.0 -> 1.1.0" in reason
+
+
+def test_a_failed_schema_reexec_does_not_mask_a_later_version_change(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(upgrade, "installed_version", lambda: "1.0.0")
+    watch = UpgradeWatch({})
+    _bump_schema(store)
+    schema = watch.check(store)
+    assert schema is not None
+    watch.failed(schema)
+    monkeypatch.setattr(upgrade, "installed_version", lambda: "1.1.0")
+    reason = watch.check(store)
+    assert reason is not None and "1.1.0" in reason
+
+
+def test_the_start_version_is_captured_on_the_first_readable_check(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    current: dict[str, str | None] = {"v": None}
+    monkeypatch.setattr(upgrade, "installed_version", lambda: current["v"])
+    watch = UpgradeWatch({})  # unreadable at start
+    assert watch.check(store) is None
+    current["v"] = "1.0.0"
+    assert watch.check(store) is None  # first readable value becomes the baseline
+    current["v"] = "1.1.0"
+    reason = watch.check(store)
+    assert reason is not None and "1.0.0 -> 1.1.0" in reason
+
+
 def test_a_failed_reexec_is_not_retried_for_the_same_reason(store: Store) -> None:
     watch = UpgradeWatch({})
     _bump_schema(store)
@@ -209,6 +251,69 @@ def test_loop_does_not_reexec_once_a_stop_was_requested(
     monkeypatch.setattr(gateway, "exec_replace", lambda a, e: pytest.fail("re-exec after stop"))
     res = run_cli(capsys, "--config", cfg, "--json", "run", "--loop")
     assert res.code == 0
+
+
+def test_loop_runs_no_pass_when_a_stop_arrives_in_the_exec_window(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg = config_file(tmp_path, run_interval="1s", auto_run=False)
+    reads = iter(["1.0.0"])
+    monkeypatch.setattr(upgrade, "installed_version", lambda: next(reads, "2.0.0"))
+    passes: list[int] = []
+    real = Runner.run_pass
+    monkeypatch.setattr(
+        Runner, "run_pass", lambda self, **kw: (passes.append(1), real(self, **kw))[1]
+    )
+
+    def exec_with_stop(argv: list[str], env: Any) -> None:
+        os.kill(os.getpid(), signal.SIGTERM)  # blocked: pending until the unblock
+        raise OSError(2, "No such file or directory")
+
+    monkeypatch.setattr(gateway, "exec_replace", exec_with_stop)
+    monkeypatch.setattr(gateway, "sleep", lambda s: None)
+    res = run_cli(capsys, "--config", cfg, "--json", "run", "--loop")
+    assert res.code == 0
+    assert passes == []  # the stop is honored before any further pass
+
+
+def _record_mask_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, ...]]:
+    events: list[tuple[Any, ...]] = []
+    real_signal, real_mask = signal.signal, signal.pthread_sigmask
+
+    def signal_(num: Any, handler: Any) -> Any:
+        events.append(("signal", num))
+        return real_signal(num, handler)
+
+    def mask(how: Any, sigs: Any) -> Any:
+        events.append(("mask", how))
+        return real_mask(how, sigs)
+
+    monkeypatch.setattr(signal, "signal", signal_)
+    monkeypatch.setattr(signal, "pthread_sigmask", mask)
+    return events
+
+
+def test_loop_leaves_the_signal_mask_alone_on_a_first_start(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg = config_file(tmp_path, run_interval="1s", auto_run=False)
+    events = _record_mask_calls(monkeypatch)
+    _stop_after(monkeypatch, 1)
+    assert run_cli(capsys, "--config", cfg, "--json", "run", "--loop").code == 0
+    assert ("mask", signal.SIG_UNBLOCK) not in events
+
+
+def test_loop_unblocks_after_the_handlers_are_installed_when_started_by_a_re_exec(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg = config_file(tmp_path, run_interval="1s", auto_run=False)
+    monkeypatch.setenv(REEXEC_ENV, "schema v9 is newer than v1")
+    events = _record_mask_calls(monkeypatch)
+    _stop_after(monkeypatch, 1)
+    assert run_cli(capsys, "--config", cfg, "--json", "run", "--loop").code == 0
+    first_unblock = events.index(("mask", signal.SIG_UNBLOCK))
+    handlers = [i for i, e in enumerate(events) if e == ("signal", signal.SIGTERM)]
+    assert handlers and handlers[0] < first_unblock  # removing the unblock or moving it fails
 
 
 def test_loop_keeps_running_when_the_exec_fails_and_does_not_retry_it(
@@ -313,6 +418,36 @@ def test_an_adopted_unconfirmed_shim_that_exits_is_requeued_by_its_pid(
         result = PassResult()
         _wait_for(lambda: (runner.reap(result), not runner.children)[1], "the adopted shim")
         assert child.returncode is None  # reaped by the runner's waitpid, not by Popen
+        assert result.reconciled == [
+            {"job_id": "jb-aaaaaaaa", "finding": "claim_orphaned", "action": "requeued"}
+        ]
+        assert job_row(store, "jb-aaaaaaaa")["status"] == "queued"
+    finally:
+        try:
+            child.wait(timeout=20)
+        except Exception:
+            pass
+
+
+def test_a_shim_that_exited_before_adoption_is_reaped_and_its_attempt_requeued(
+    store: Store, tmp_path: Path
+) -> None:
+    child = _child(tmp_path, "pass")  # exits at once; stays a zombie until waited on
+    try:
+        host = default_host()
+        _wait_for(
+            lambda: (info := host.process_info(child.pid)) is not None and info.zombie,
+            "the child to exit",
+        )
+        _starting_job(store, "jb-aaaaaaaa", identity_text(host, child.pid))
+        runner = _adopting_runner(store)
+        runner.adopt_shims()
+        (adopted,) = runner.children
+        assert isinstance(adopted.popen, AdoptedShim) and adopted.popen.pid == child.pid
+        result = PassResult()
+        runner.reap(result)
+        assert runner.children == []
+        assert host.process_info(child.pid) is None  # collected, no zombie left
         assert result.reconciled == [
             {"job_id": "jb-aaaaaaaa", "finding": "claim_orphaned", "action": "requeued"}
         ]

@@ -49,7 +49,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 **Tests**:
 
 - argparse: every command and flag of interface.md "Commands" and "Global flags"; flag-combination usage errors (`--wait-timeout` without `--wait`/`--force`, `cancel --all` without a selector, id plus selectors, `--dry-run` with `--wait`, `--actor auto:jobsctl`).
-- config: defaults equal `config.example.yaml`; drop-in merge; hook entries (duration timeouts, duplicate `name` or identity (`name`, else `cmd`) → `config_invalid`); no `JOBSCTL_<KEY>` variables read.
+- config: defaults equal `config.example.yaml`; drop-in merge; hook entries (duration timeouts, duplicate `name` or identity (`name`, else `cmd`) → `config_invalid`); no `JOBSCTL_<KEY>` variables read (the internal `JOBSCTL_LOOP_REEXEC` handoff of a `run --loop` re-exec is removed at start).
 - grammars, durations (`none` where allowed), timestamps; ids and prefixes (short → 2, ambiguous → 21, unknown or pruned → 10).
 - store: connection setup per spike B1 pitfalls; `BEGIN IMMEDIATE`; a migration adds a column with a default; long-lived processes see `version_skew`.
 - audit/log: 10 concurrent writers × 300 lines give strictly increasing, gap-free `seq` in file order (spike C6); no append inside a write transaction.
