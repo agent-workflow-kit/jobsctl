@@ -112,7 +112,7 @@ def test_env_name_never_echoes_a_value() -> None:
 def test_cwd_rejects_a_newline() -> None:
     with pytest.raises(argparse.ArgumentTypeError):
         cwd("/a\nb")
-    assert cwd("/a/../b") == "/b"
+    assert cwd("/a/../b") == "/a/../b"  # normalized later, by add
 
 
 def test_timestamp_format_has_millis_and_z() -> None:
