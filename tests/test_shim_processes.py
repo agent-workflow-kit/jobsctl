@@ -12,11 +12,13 @@ import pytest
 
 from jobsctl.config import Config
 from jobsctl.config_files import load_config
+from jobsctl.leases import own_identity
 from jobsctl.proc_host import default_host
 from jobsctl.proc_identity import Liveness, check_identity
 from jobsctl.runner import PassResult, Runner
 from jobsctl.store_db import Store
 from jobsctl.store_dir import resolve_state_dir
+from jobsctl.store_ops import take_lease
 from tests.runner_helpers import add_queued, job_ids, make_runner
 from tests.shim_helpers import JOB, shims_dir
 from tests.shim_real import RealShims
@@ -194,6 +196,14 @@ def test_an_unreadable_config_ends_the_job_spawn_failed_in_a_real_shim(
     bad = tmp_path / "config.yaml"
     bad.write_text("auto_run: [unclosed\n")
     real_shims.config_path = bad
+    # The unreadable config makes the shim fall back to the default Config (auto_run true), so
+    # its final request_pass would spawn a real detached pass. This test (a live process) holds
+    # the `runner` lease, which makes request_pass return without spawning.
+    with Store.open() as store:
+        assert take_lease(
+            store, "runner", own_identity(default_host()), now="2026-01-01T00:00:00.000Z",
+            expires_at="2099-01-01T00:00:00.000Z", is_alive=lambda h: None,
+        )  # fmt: skip
     popen = real_shims.seed_and_spawn(["true"])
     real_shims.wait_status("failed")
     row = real_shims.row("SELECT reason FROM jobs WHERE id = ?", JOB)

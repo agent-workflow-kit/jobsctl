@@ -237,7 +237,11 @@ class Shim:
                 self._lease_held = True
                 self._last_renew = gateway.monotonic()
                 return True
-            if self._still_starting() is None:
+            try:
+                gone = self._still_starting() is None
+            except (JobsctlError, sqlite3.Error):
+                gone = False  # a failed read is not a verdict: keep waiting, look again
+            if gone:
                 self._diag("the job is no longer starting under this claim; not waiting longer")
                 return False
             gateway.sleep(POLL_SECONDS * 2)

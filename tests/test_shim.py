@@ -450,6 +450,42 @@ def test_the_job_lease_wait_writes_nothing_and_ends_on_sigterm(store: Store, sle
     assert lease["holder_identity"] == sleeper  # not stolen, not released
 
 
+def test_a_failing_read_while_waiting_for_the_lease_is_retried(
+    store: Store, sleeper: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl.errors import JobsctlError
+    from jobsctl.store_ops import lease_release, take_lease
+
+    seed_claimed(store, ["true"])
+    take_lease(
+        store, f"job:{JOB}", sleeper, now="2026-01-01T00:00:00.000Z",
+        expires_at="2099-01-01T00:00:00.000Z", is_alive=lambda h: None,
+    )  # fmt: skip
+    shim = make_shim(store)
+    real = shim._still_starting  # pyright: ignore[reportPrivateUsage]
+    raised: list[int] = []
+
+    def flaky() -> object:
+        if not raised:
+            raised.append(1)
+            raise JobsctlError("busy", "injected read failure")
+        return real()
+
+    monkeypatch.setattr(shim, "_still_starting", flaky)
+
+    def release() -> None:
+        time.sleep(0.6)
+        with Store.open() as other, other.write() as tx:
+            lease_release(tx, f"job:{JOB}", sleeper)
+
+    t = threading.Thread(target=release)
+    t.start()
+    shim.run()
+    t.join()
+    assert raised == [1]
+    assert job(store)["status"] == "done"
+
+
 def test_the_shim_waits_for_a_live_lease_holder_then_proceeds(store: Store, sleeper: str) -> None:
     from jobsctl.store_ops import lease_release, take_lease
 
