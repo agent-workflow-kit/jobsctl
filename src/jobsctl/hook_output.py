@@ -12,8 +12,8 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .cli_values import DECISION_ID_RE
 from .textsafe import sanitize
+from .validate import DECISION_ID_RE
 
 __all__ = [
     "CAPTURE_LIMIT",
@@ -135,7 +135,7 @@ def parse_decision_ids(capture: Capture, mask: Mask) -> tuple[list[str], list[st
     ids: list[str] = []
     invalid: list[str] = []
     for value in candidates:
-        if not isinstance(value, str) or DECISION_ID_RE.match(value) is None:
+        if not isinstance(value, str) or DECISION_ID_RE.fullmatch(value) is None:
             invalid.append(_clean_for_warning(value, mask))
         elif value in ids:
             continue
