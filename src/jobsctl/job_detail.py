@@ -17,6 +17,7 @@ from jobsctl.errors import JobsctlError
 from jobsctl.job_view import current_attempt, job_object
 from jobsctl.output_store import load_tail
 from jobsctl.store_db import Tx
+from jobsctl.textsafe import sanitize
 
 
 def attempt_object(row: sqlite3.Row) -> dict[str, Any]:
@@ -46,20 +47,21 @@ def attempt_object(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def output_object(tx: Tx, job_id: str, n: int) -> dict[str, Any] | None:
+def output_object(tx: Tx, job_id: str, n: int, *, quiet: bool = False) -> dict[str, Any] | None:
     """The stored tail of attempt `n`, or `None` when there is none or it cannot be read.
 
-    A corrupt stored row degrades to no output with a warning on stderr: a caller that waits
-    on exit codes must still get the job's real outcome (interface.md does not say; this is the
-    most conservative reading that keeps exit 12/13/20 meaningful).
+    A tail that cannot be read is `output: null` with a warning on stderr (not under `--quiet`),
+    so the exit code of `wait` still reports the job's status (interface.md, `wait`).
     """
     try:
         stored = load_tail(tx, job_id, n)
     except JobsctlError as err:
-        sys.stderr.write(
-            f"jobsctl: warning: the output of {job_id} cannot be read ({err.message})\n"
-        )
-        sys.stderr.flush()
+        if not quiet:
+            message = sanitize(err.message, inline=True)
+            sys.stderr.write(
+                f"jobsctl: warning: the output of {job_id} cannot be read ({message})\n"
+            )
+            sys.stderr.flush()
         return None
     if stored is None:
         return None
@@ -72,11 +74,19 @@ def output_object(tx: Tx, job_id: str, n: int) -> dict[str, Any] | None:
 
 
 def job_detail(
-    tx: Tx, row: sqlite3.Row, config: Config, *, env_file_unavailable: bool, now: str
+    tx: Tx,
+    row: sqlite3.Row,
+    config: Config,
+    *,
+    env_file_unavailable: bool,
+    now: str,
+    quiet: bool = False,
 ) -> dict[str, Any]:
     job = job_object(tx, row, config, env_file_unavailable=env_file_unavailable, now=now)
     attempts = tx.all("SELECT * FROM attempts WHERE job_id = ? ORDER BY n", [row["id"]])
     current = current_attempt(tx, row)
     job["attempts"] = [attempt_object(a) for a in attempts]
-    job["output"] = None if current is None else output_object(tx, row["id"], current["n"])
+    job["output"] = (
+        None if current is None else output_object(tx, row["id"], current["n"], quiet=quiet)
+    )
     return job

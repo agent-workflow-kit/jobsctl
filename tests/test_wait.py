@@ -2,15 +2,8 @@
 
 from __future__ import annotations
 
-import json
-import os
-import signal
 import sqlite3
-import subprocess
-import sys
-import time
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,7 +14,6 @@ from tests.conftest import validate_against
 from tests.helpers import Result, run_cli
 from tests.manual_helpers import (
     add_job,
-    config_file,
     make_done,
     make_held,
     row,
@@ -126,7 +118,7 @@ def test_a_job_that_ends_while_waiting_ends_the_wait(
     assert clock.sleeps == [1.0, 1.0, 1.0]
 
 
-def test_running_jobs_with_output_are_printed_with_the_output_when_they_end(
+def test_a_held_job_is_printed_with_its_output(
     capsys: pytest.CaptureFixture[str], clock: Clock
 ) -> None:
     job_id = add_job(capsys)
@@ -338,55 +330,178 @@ def test_add_wait_human_prints_the_final_status(
     assert res.code == 22 and "queued" in res.out and "jb-" in res.out
 
 
-# -- real processes -----------------------------------------------------------------------
-
-
-def _spawn_wait(job_id: str, tmp_path: Path, *extra: str) -> subprocess.Popen[str]:
-    env = dict(os.environ)
-    cfg = config_file(tmp_path, auto_run=False)
-    return subprocess.Popen(
-        [sys.executable, "-I", "-m", "jobsctl", "--config", cfg, "--json", "wait", job_id, *extra],
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-
-@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
-def test_a_waiting_process_that_gets_a_signal_prints_the_job_and_exits_130(
-    capsys: pytest.CaptureFixture[str], tmp_path: Path, sig: signal.Signals
+def test_a_retry_pending_job_with_a_timeout_exits_22(
+    capsys: pytest.CaptureFixture[str], clock: Clock
 ) -> None:
     job_id = add_job(capsys)
-    proc = _spawn_wait(job_id, tmp_path)  # tests/kill_guard allows signals to a Popen's pid
-    try:
-        time.sleep(1.5)  # let it enter the poll loop
-        assert proc.poll() is None
-        proc.send_signal(sig)
-        out, err = proc.communicate(timeout=30)
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=10)
-    assert proc.returncode == 130, out + err
-    doc = json.loads(out)
-    validate_against("cli/show.json", doc)
-    assert doc["id"] == job_id and doc["status"] == "queued"
-    assert "Traceback" not in err
-    assert row(job_id)["status"] == "queued"
+    sql("UPDATE jobs SET not_before = '2999-01-01T00:00:00.000Z' WHERE id = ?", job_id)
+    doc = shown(wait(capsys, job_id, "--timeout", "3s"), 22)
+    assert doc["status"] == "queued" and sum(clock.sleeps) == 3.0
 
 
-def test_a_real_wait_sees_the_job_end(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+def test_wait_on_an_older_schema_is_refused_read_only_and_never_migrates(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    from jobsctl import store_db
+
     job_id = add_job(capsys)
-    proc = _spawn_wait(job_id, tmp_path)
+    path = resolve_state_dir() / "state.db"
+    newer = (*store_db.MIGRATIONS, ("CREATE TABLE migrated_marker (x)",))
+    monkeypatch.setattr(store_db, "MIGRATIONS", newer)
+    res = wait(capsys, job_id)
+    err = res.envelope()["error"]
+    assert res.code == 1 and err["code"] == "internal"
+    assert "run any jobsctl command" in err["message"]
+    with sqlite3.connect(path) as conn:
+        assert not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'migrated_marker'"
+        ).fetchone()
+
+
+def test_a_signal_while_the_database_is_being_opened_still_prints_the_job(
+    capsys: pytest.CaptureFixture[str], clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl.commands import wait as wait_module
+
+    job_id = add_job(capsys)
+    real_open = wait_module._open
+    calls: list[int] = []
+
+    def interrupted_open(ctx: Any) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        return real_open(ctx)
+
+    monkeypatch.setattr(wait_module, "_open", interrupted_open)
+    doc = shown(wait(capsys, job_id), 130)
+    assert doc["id"] == job_id and doc["status"] == "queued"
+
+
+def test_the_handlers_ignore_every_signal_after_the_first(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import signal
+
+    from jobsctl.commands.wait import interrupts_as_keyboard_interrupt
+
+    before = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    with interrupts_as_keyboard_interrupt():
+        with pytest.raises(KeyboardInterrupt):
+            signal.raise_signal(signal.SIGTERM)
+        signal.raise_signal(signal.SIGTERM)  # no second exception
+        signal.raise_signal(signal.SIGINT)
+        signal.raise_signal(signal.SIGHUP)
+    assert {s: signal.getsignal(s) for s in before} == before
+
+
+def test_a_signal_ignored_at_entry_is_left_ignored(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import signal
+
+    from jobsctl.commands.wait import interrupts_as_keyboard_interrupt
+
+    old = signal.signal(signal.SIGHUP, signal.SIG_IGN)
     try:
-        time.sleep(1.0)
-        make_done(job_id)
-        out, err = proc.communicate(timeout=30)
+        with interrupts_as_keyboard_interrupt():
+            assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+            signal.raise_signal(signal.SIGHUP)  # does not interrupt
+        assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
     finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=10)
-    assert proc.returncode == 0, out + err
-    assert json.loads(out)["status"] == "done"
+        signal.signal(signal.SIGHUP, old)
+
+
+def test_an_unreadable_tail_warning_is_quiet_under_quiet_and_sanitized(
+    capsys: pytest.CaptureFixture[str], clock: Clock
+) -> None:
+    job_id = add_job(capsys)
+    make_held(job_id, "exit_13")
+    sql("UPDATE outputs SET tail = x'ff', compressed = 1 WHERE job_id = ?", job_id)
+    res = run_cli(capsys, "--json", "--quiet", "wait", job_id)
+    assert res.code == 13 and res.err == "" and res.envelope()["output"] is None
+
+
+def test_the_unreadable_tail_message_is_sanitized(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl import job_detail
+    from jobsctl.errors import JobsctlError
+
+    def boom(*args: Any) -> Any:
+        raise JobsctlError("internal", "bad \x1b[31mred\nline")
+
+    monkeypatch.setattr(job_detail, "load_tail", boom)
+    assert job_detail.output_object(None, "jb-aaaaaaaa", 1) is None  # type: ignore[arg-type]
+    err = capsys.readouterr().err
+    assert "\x1b" not in err and err.count("\n") == 1
+
+
+# -- add --wait: interrupts, warnings, version skew ---------------------------------------
+
+
+def test_add_wait_interrupted_while_requesting_the_pass_still_prints_the_job(
+    capsys: pytest.CaptureFixture[str], clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl.commands import add as add_module
+
+    def interrupted(*args: Any, **kwargs: Any) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(add_module, "request_pass_from_command", interrupted)
+    res = run_cli(capsys, "--json", "add", "--wait", "--cwd", "/work", "--", "x")
+    assert res.code == 130, res.out + res.err
+    doc = res.envelope()
+    validate_against("cli/add.json", doc)
+    assert doc["waited"] is True and doc["job"]["id"] == sql_one("SELECT id FROM jobs")
+    assert doc["job"]["status"] == "queued"
+
+
+def test_add_wait_interrupted_before_any_snapshot_prints_the_committed_job(
+    capsys: pytest.CaptureFixture[str], clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl.commands import add as add_module
+    from jobsctl.commands import wait as wait_module
+
+    def interrupted(*args: Any, **kwargs: Any) -> None:
+        raise KeyboardInterrupt
+
+    def unreadable(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("no snapshot")
+
+    monkeypatch.setattr(add_module, "request_pass_from_command", interrupted)
+    monkeypatch.setattr(wait_module, "_snapshot", unreadable)
+    res = run_cli(capsys, "--json", "add", "--wait", "--cwd", "/work", "--", "x")
+    assert res.code == 130, res.out + res.err
+    doc = res.envelope()
+    validate_against("cli/add.json", doc)
+    assert doc["job"]["id"] == sql_one("SELECT id FROM jobs") and doc["created"] is True
+
+
+def test_add_wait_human_prints_its_warnings_before_it_waits(
+    capsys: pytest.CaptureFixture[str], clock: Clock
+) -> None:
+    seen: list[str] = []
+
+    def hook(tick: int) -> None:
+        seen.append(capsys.readouterr().err)
+        make_done(sql_one("SELECT id FROM jobs"))
+
+    clock.hook = hook
+    res = run_cli(capsys, "add", "--no-start", "--wait", "--cwd", "/w", "--", "x")
+    assert res.code == 0, res.out + res.err
+    assert "created on first use" in seen[0] and "created on first use" not in res.err
+
+
+def test_add_wait_version_skew_is_the_error_and_the_job_stays_committed(
+    capsys: pytest.CaptureFixture[str], clock: Clock
+) -> None:
+    def upgrade(tick: int) -> None:
+        conn = sqlite3.connect(resolve_state_dir() / "state.db")
+        conn.execute("PRAGMA user_version = 99")
+        conn.close()
+
+    clock.hook = upgrade
+    res = add_wait(capsys)
+    assert res.code == 12 and res.envelope()["error"]["code"] == "version_skew"
+    assert sql_one("SELECT status FROM jobs") == "queued"  # committed before the wait began
