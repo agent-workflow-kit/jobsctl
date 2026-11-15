@@ -151,3 +151,86 @@ def test_sigkill_is_repeated_while_members_remain_and_given_up_after_the_grace()
     r.now = 7
     seq.advance()
     assert seq.done and any("not waiting longer" in n for n in r.notes)
+
+
+def test_a_leader_that_survives_sigkill_is_resent_to_with_bounded_records() -> None:
+    r = rig(pidfd_ok=False)
+    seq = r.seq(grace=2)
+    seq.start("timeout")
+    r.now = 2
+    seq.advance()
+    r.now = 4
+    seq.advance()
+    for second in range(5, 605):  # ten minutes of a leader stuck in the kernel
+        r.now = second
+        seq.advance()
+    assert seq.phase is Phase.KILL  # it waits: the give-up applies only once the leader exited
+    assert len(seq.sent) <= 4  # term:pid, term:group, kill:group, kill:pid; no growth
+    assert len(r.notes) == 1 and "survives SIGKILL" in r.notes[0]
+    resent = [c for c in r.sent() if c[0] == "killpg" and c[2] == signal.SIGKILL]
+    assert len(resent) > 100  # but SIGKILL does keep being sent
+
+
+def test_a_hiding_proc_alone_does_not_make_an_empty_group_unprovable() -> None:
+    r = rig(pidfd_ok=False, hidden=True)
+    del r.host.procs[501]
+    seq = r.seq()
+    seq.start("timeout")
+    r.exited = True
+    seq.advance()
+    assert seq.done and len(r.sent()) == 1  # no wait for 2 x kill_grace
+
+
+def test_a_really_unreadable_entry_still_keeps_the_sequence_waiting() -> None:
+    r = rig(pidfd_ok=False, hidden=True)
+    del r.host.procs[501]
+    r.host.info_errors[777] = PermissionError("unreadable entry")
+    seq = r.seq()
+    seq.start("timeout")
+    r.exited = True
+    seq.advance()
+    assert not seq.done  # the group may have a member that could not be read
+
+
+def test_members_that_sigkill_cannot_remove_are_abandoned_after_one_more_grace() -> None:
+    r = rig(pidfd_ok=False)  # the leader exited; member 501 stays (the fake kills nothing)
+    r.exited = True
+    seq = r.seq(grace=2)
+    seq.start("timeout")
+    seq.advance()  # group SIGTERM at once
+    r.now = 2
+    seq.advance()  # group SIGKILL
+    r.now = 3
+    seq.advance()  # resent after one second
+    assert not seq.done
+    r.now = 4  # one more grace after the first SIGKILL
+    seq.advance()
+    assert seq.done and any("not waiting longer" in n for n in r.notes)
+    kills = [c for c in r.sent() if c[0] == "killpg" and c[2] == signal.SIGKILL]
+    assert len(kills) == 2
+
+
+def test_a_child_reaped_elsewhere_is_not_our_unreaped_child() -> None:
+    import os
+    import subprocess
+
+    from jobsctl.shim import _own_unreaped_child
+
+    live = subprocess.Popen(["sleep", "600"])
+    try:
+        assert _own_unreaped_child(live)
+    finally:
+        live.kill()  # the exact child this test started
+        live.wait()
+    gone = subprocess.Popen(["true"])
+    os.waitpid(gone.pid, 0)  # reaped behind Popen's back: returncode stays None
+    assert gone.returncode is None
+    assert not _own_unreaped_child(gone)
+
+
+def test_no_fallback_signal_is_sent_for_a_child_reaped_elsewhere() -> None:
+    r = rig(pidfd_ok=False, boot=None)  # identity inconclusive
+    r.own = False  # what `_own_unreaped_child` answers for a child reaped elsewhere
+    seq = r.seq()
+    seq.start("timeout")
+    assert r.sent() == []

@@ -11,6 +11,8 @@ import pytest
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
+from tests.kill_guard import kill_guard as kill_guard  # noqa: F401  (autouse fixture)
+
 pytest_plugins = ["tests.runner_fixtures", "tests.shim_real"]
 
 SCHEMAS = Path(__file__).resolve().parent.parent / "schemas"

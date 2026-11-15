@@ -25,6 +25,7 @@ from jobsctl.proc_host import default_host
 from jobsctl.proc_signal import signal_process
 from jobsctl.runner import Runner
 from jobsctl.store_db import OpenMode, Store
+from tests.kill_guard import allow
 from tests.store_helpers import NOW, attempt_values, insert_row, job_values
 
 FAKE_SHIM = textwrap.dedent(
@@ -96,6 +97,7 @@ def kill_recorded_shims() -> None:
         ):
             ident = parse_identity(row["shim_identity"])
             if ident is not None:
+                allow(ident.pid)  # recorded on the attempt; signaled only while the identity holds
                 signal_process(host, ident, signal.SIGKILL)
 
 

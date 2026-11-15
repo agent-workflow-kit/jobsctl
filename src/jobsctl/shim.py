@@ -652,7 +652,7 @@ class Shim:
             job.identity,
             kill_grace=float(self._effective.get("kill_grace", self.config.kill_grace)),
             leader_exited=lambda: _leader_exited(job.pid),
-            own_child=lambda: popen.returncode is None,
+            own_child=lambda: _own_unreaped_child(popen),
             now=gateway.monotonic,
             diag=self._diag,
         )
@@ -773,14 +773,22 @@ class Shim:
         if seq is None or seq.done:
             return
         if seq.started:
-            seq.advance()
+            self._step(seq.advance)
             return
         cause = self._due(job)
         if cause is None or _leader_exited(job.pid):
             return  # a leader that already exited ended on its own: nothing to signal
         self._diag(f"{cause}: running the signal sequence")
-        seq.start(cause)
-        seq.advance()
+        self._step(lambda: seq.start(cause))
+        self._step(seq.advance)
+
+    def _step(self, action: Callable[[], None]) -> None:
+        """Run one step of the sequence. An error is logged and the step is retried at the next
+        tick: it must not end the pump (the job would then be left running unobserved)."""
+        try:
+            action()
+        except Exception as exc:
+            self._diag(f"a signal sequence step failed ({type(exc).__name__}); retrying")
 
     def _finish_sequence(self, job: _Job, pump: Pump) -> None:
         """The leader exited while a sequence is under way: its group may still have members.
@@ -793,7 +801,7 @@ class Shim:
         while not seq.done:
             pump.pump_once()
             self._tick()
-            seq.advance()
+            self._step(seq.advance)
 
     def _sequence_outcome(self, job: _Job) -> Outcome | None:
         seq = job.seq
@@ -897,6 +905,19 @@ def _leader_exited(pid: int) -> bool:
         return True  # reaped elsewhere: nothing is left to signal by this PID
     except OSError:
         return False
+
+
+def _own_unreaped_child(popen: Any) -> bool:
+    """Whether `popen` is still our unreaped child, so that its PID (and the group id equal to
+    it) cannot belong to anyone else. `returncode` alone is not proof: a child reaped elsewhere
+    leaves it `None`. The check does not consume the exit status (`WNOWAIT`)."""
+    if popen.returncode is not None:
+        return False
+    try:
+        gateway_proc.waitid_nowait(popen.pid, nohang=True)
+    except OSError:  # ChildProcessError: reaped, or not our child; anything else: not proven
+        return False
+    return True
 
 
 def _parsed(text: str) -> Identity:

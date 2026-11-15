@@ -18,11 +18,18 @@ __all__ = ["GroupProbe", "probe_group"]
 class GroupProbe:
     live: tuple[ProcInfo, ...]
     unreadable: int
+    hidden: bool = False  # `unreadable` includes the one bump for a `/proc` that hides processes
 
     @property
     def complete(self) -> bool:
         """False if some entries could not be read; a count of 0 is then not proof of empty."""
         return self.unreadable == 0
+
+    @property
+    def complete_but_hidden(self) -> bool:
+        """True if the only incompleteness is that `/proc` hides other users' processes: no entry
+        that was seen failed to read. A single real unreadable entry makes this False."""
+        return self.unreadable - (1 if self.hidden else 0) == 0
 
     @property
     def count(self) -> int:
@@ -40,4 +47,4 @@ def probe_group(host: Host, pgid: int, *, exclude: Iterable[int] = ()) -> GroupP
     skip = frozenset(exclude)
     scan = host.scan_group(pgid)
     live = tuple(m for m in scan.members if not m.zombie and m.pid not in skip)
-    return GroupProbe(live, scan.unreadable)
+    return GroupProbe(live, scan.unreadable, scan.hidden)

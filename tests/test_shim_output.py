@@ -17,6 +17,7 @@ from jobsctl.config import Config
 from jobsctl.errors import JobsctlError
 from jobsctl.result_file import read_result
 from jobsctl.store_db import OpenMode, Store
+from tests.kill_guard import allow
 from tests.shim_helpers import (
     JOB,
     attempt,
@@ -145,6 +146,7 @@ def test_leftovers_are_counted_logged_and_never_signaled(store: Store, tmp_path:
     started = time.monotonic()
     make_shim(store).run()
     pid = int(pidfile.read_text())
+    allow(pid)  # reparented away from us; the PID this test's job printed
     try:
         # the background sleep held the output pipe open: the 2 s drain ended, not end of file
         assert time.monotonic() - started < 15

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from jobsctl import gateway_proc
+from tests.kill_guard import allow
 
 # A child that ignores SIGTERM, optionally renames itself (prctl PR_SET_NAME) and optionally
 # starts N grandchildren that also ignore SIGTERM. Prints "kid <pid>" per grandchild, then "ready".
@@ -82,6 +83,7 @@ class Spawner:
             # we hold the leader
             gpid = int(line[1])
             child.grandchildren.append(gpid)
+            allow(gpid)  # opened by pidfd right away: signaled through that handle only
             child.grand_fds.append(_open_pidfd(gpid))
 
     def track(self, popen: subprocess.Popen[bytes], *, group: bool = False) -> Child:

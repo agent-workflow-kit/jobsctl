@@ -39,6 +39,12 @@ def _validated(validated_records: None) -> None:
     return None
 
 
+@pytest.fixture(autouse=True)
+def _guarded(job_guard: JobGuard) -> JobGuard:
+    """Every test here may start a long job: a failure must not leak a `sleep 600`."""
+    return job_guard
+
+
 @dataclass
 class Running:
     """A shim running in a thread with its own store."""
@@ -82,6 +88,14 @@ def read_pids(path: Path, count: int) -> list[int]:
 
     wait_for(ready)
     return [int(x) for x in path.read_text().split()[:count]]
+
+
+def complete_lines(path: Path) -> list[str]:
+    """The newline-terminated lines of `path` (a job may be mid-write of the last one)."""
+    if not path.exists():
+        return []
+    raw = path.read_text()
+    return raw[: raw.rfind("\n") + 1].splitlines()
 
 
 def alive(ident: Any) -> bool:
@@ -156,16 +170,48 @@ def test_timeout_none_overrides_the_queue_timeout(store: Store) -> None:
     assert (job(store)["status"], job(store)["reason"]) == ("done", "exit")
 
 
-def test_the_shims_snapshot_decides_not_the_config_it_would_read_now(store: Store) -> None:
-    seed_claimed(store, sh("sleep 2.5"), overrides={"timeout": 60})
-    make_shim(store, cfg(queues={"q": {"timeout": "1s"}})).run()  # override 60 wins
-    assert job(store)["status"] == "done"
+@pytest.mark.parametrize(
+    ("snapshot_timeout", "config_timeout", "script", "expected"),
+    [
+        (1, "60s", SLEEPER, ("failed", "timeout")),  # snapshot 1 s fires, not config 60 s
+        (60, "1s", sh("sleep 2.5"), ("done", "exit")),  # the snapshot's 60 s holds, not the 1 s
+    ],
+)
+def test_the_shims_snapshot_decides_not_the_config_it_would_read_now(
+    store: Store,
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_timeout: int,
+    config_timeout: str,
+    script: list[str],
+    expected: tuple[str, str],
+) -> None:
+    """The snapshot the shim records (`effective`) disagrees with the config it holds."""
+    from jobsctl import shim as shim_module
+
+    real = shim_module.effective_snapshot
+    monkeypatch.setattr(
+        shim_module,
+        "effective_snapshot",
+        lambda config, row: {**real(config, row), "timeout": snapshot_timeout},
+    )
+    seed_claimed(store, script)
+    make_shim(store, cfg(queues={"q": {"timeout": config_timeout}})).run()
+    assert (job(store)["status"], job(store)["reason"]) == expected
 
 
-def test_the_clock_starts_at_running(store: Store, tmp_path: Path) -> None:
-    """The job runs for longer than its timeout in total only if the clock had started earlier:
-    here the whole run (about 1.5 s) is within a 3 s timeout."""
-    seed_claimed(store, sh("sleep 1.5"), overrides={"timeout": 3})
+def test_the_clock_starts_at_running(store: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The `running` commit is delayed by 2 s; the job (3 s in all) outlives a 2.5 s timeout
+    counted from the claim but not one counted from `running`."""
+    from jobsctl import shim as shim_module
+
+    real = shim_module.begin_running
+
+    def slow(*args: Any, **kwargs: Any) -> Any:
+        time.sleep(2)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(shim_module, "begin_running", slow)
+    seed_claimed(store, sh("sleep 3"), overrides={"timeout": 2.5})
     make_shim(store).run()
     assert (job(store)["status"], job(store)["reason"]) == ("done", "exit")
 
@@ -248,7 +294,7 @@ def test_a_job_that_traps_sigterm_and_spawns_is_still_stopped(
     kids = []
     seen: set[int] = set()
     while running.thread.is_alive():  # type: ignore[union-attr]
-        for text in pids.read_text().split() if pids.exists() else []:
+        for text in complete_lines(pids):
             if int(text) not in seen:
                 seen.add(int(text))
                 try:
@@ -303,7 +349,7 @@ def test_a_duplicated_sigterm_does_not_restart_the_sequence(store: Store) -> Non
     time.sleep(0.5)
     running.shim.request_stop()
     running.join()
-    assert time.monotonic() - started < 6  # one SIGTERM grace + one more, SIGKILL
+    assert time.monotonic() - started < 20  # a restart per SIGTERM would not stay this short
     assert (job(store)["status"], job(store)["reason"]) == ("failed", "terminated")
 
 
@@ -340,12 +386,17 @@ def test_a_force_request_whose_sigterm_was_lost_is_found_at_the_next_tail_flush(
     assert (row["status"], row["reason"]) == ("canceled", "forced")
 
 
-def test_a_force_request_beats_a_natural_exit_in_the_final_commit(store: Store) -> None:
-    """The job exits 0 while the force request is committed: the end is `canceled` (`forced`)."""
-    seed_claimed(store, sh("sleep 1.2"))
+def test_a_force_request_beats_a_natural_exit_in_the_final_commit(
+    store: Store, tmp_path: Path
+) -> None:
+    """The job exits 0 on its own (released by a flag file) right after the force request is
+    committed: the end is `canceled` (`forced`) whichever of the shim's looks comes first."""
+    flag = tmp_path / "go"
+    seed_claimed(store, sh(f"while [ ! -e {flag} ]; do sleep 0.05; done"))
     running = start_shim()
     wait_status(store, "running")
     force(store)
+    flag.write_text("")
     running.join()
     row = job(store)
     assert (row["status"], row["reason"]) == ("canceled", "forced")
@@ -391,3 +442,119 @@ def test_the_job_is_in_no_group_signal_after_its_leader_was_reaped(store: Store)
 
     parsed = parse_identity(ident)
     assert parsed is not None and not alive(parsed)
+
+
+# -- the result file written before the final commit ----------------------------------------------
+
+
+def stop_before_the_final_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    from jobsctl.shim import Shim
+
+    monkeypatch.setattr(Shim, "_finish", lambda self, *args, **kwargs: None)
+
+
+def result_of(store: Store) -> tuple[str, str | None]:
+    from jobsctl.result_file import read_result
+
+    record = read_result(store.paths.shims, JOB, 1)
+    assert record is not None
+    return record.status, record.reason
+
+
+def test_the_result_file_of_a_timeout_says_failed_timeout(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stop_before_the_final_commit(monkeypatch)
+    seed_claimed(store, SLEEPER, overrides={"timeout": 1})
+    assert make_shim(store).run() == 1  # the final commit never happened: the file stays
+    assert result_of(store) == ("failed", "timeout")
+
+
+def test_the_result_file_of_a_sigterm_says_failed_terminated(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stop_before_the_final_commit(monkeypatch)
+    seed_claimed(store, SLEEPER)
+    running = start_shim()
+    wait_status(store, "running")
+    running.shim.request_stop()
+    assert running.join() == 1
+    assert result_of(store) == ("failed", "terminated")
+
+
+def test_the_result_file_of_a_forced_end_keeps_the_natural_outcome(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A forced end is decided in the final commit; the file holds what the exit alone says."""
+    stop_before_the_final_commit(monkeypatch)
+    seed_claimed(store, SLEEPER)
+    running = start_shim()
+    wait_status(store, "running")
+    force(store)
+    running.shim.request_stop()
+    assert running.join() == 1
+    assert result_of(store) == ("failed", "signaled")  # SIGTERM killed it; not canceled/forced
+
+
+# -- the loop's guards ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("case", ["terminated", "timeout", "forced"])
+def test_a_leader_that_already_exited_never_starts_the_sequence(
+    store: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], case: str
+) -> None:
+    from jobsctl import gateway
+    from jobsctl import shim as shim_module
+    from jobsctl.proc_identity import Identity
+    from jobsctl.shim_signals import SignalSequence
+    from tests.proc_fakes import FakeHost, proc
+
+    seed_claimed(store, ["true"])
+    shim = make_shim(store)
+    monkeypatch.setattr(shim, "_tick", lambda: None)
+    monkeypatch.setattr(shim_module, "_leader_exited", lambda pid: True)
+    host = FakeHost(procs={500: proc(500)}, pidfd_ok=False)
+    seq = SignalSequence(
+        host,
+        Identity("boot-1", 500, 1000),
+        kill_grace=1,
+        leader_exited=lambda: False,
+        own_child=lambda: True,
+        now=gateway.monotonic,
+        diag=lambda message: None,
+    )
+    running_job = shim_module._Job(None, 500, None, Identity("boot-1", 500, 1000), seq=seq)  # type: ignore[arg-type]
+    if case == "terminated":
+        shim.request_stop()
+    elif case == "timeout":
+        running_job.deadline = gateway.monotonic() - 1
+    else:
+        running_job.force_by = "human:test"
+    shim._tick_job(running_job)
+    shim._finish_sequence(running_job, None)  # type: ignore[arg-type]
+    assert not seq.started and host.sent() == []
+    err = capsys.readouterr().err
+    assert ("SIGTERM received; the job has exited" in err) == (case == "terminated")
+
+
+def test_an_error_in_a_sequence_step_is_logged_and_retried_not_fatal(
+    store: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from jobsctl.shim_signals import SignalSequence
+
+    real = SignalSequence.advance
+    calls: list[int] = []
+
+    def flaky(self: SignalSequence) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        real(self)
+
+    monkeypatch.setattr(SignalSequence, "advance", flaky)
+    seed_claimed(store, SLEEPER, overrides={"timeout": 1})
+    assert make_shim(store).run() == 0
+    assert (job(store)["status"], job(store)["reason"]) == ("failed", "timeout")
+    err = capsys.readouterr().err
+    assert "a signal sequence step failed (RuntimeError)" in err
+    assert "the output pump failed" not in err

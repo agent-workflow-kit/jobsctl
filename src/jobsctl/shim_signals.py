@@ -67,6 +67,8 @@ class SignalSequence:
         self.sent: list[str] = []  # for logs and tests: "term:pid", "term:group", "kill:group", ...
         self._deadline = 0.0
         self._last_kill = 0.0
+        self._seen: set[tuple[str, str]] = set()  # (what, result) pairs already noted
+        self._overdue_noted = False
 
     @property
     def started(self) -> bool:
@@ -81,13 +83,17 @@ class SignalSequence:
     def _fallback_ok(self, outcome: SignalOutcome) -> bool:
         return outcome.result in (Result.UNKNOWN, Result.ERROR) and self._own_child()
 
-    def _note(self, what: str, outcome: SignalOutcome) -> None:
+    def _note(self, what: str, outcome: SignalOutcome, *, repeat: bool = False) -> None:
+        key = (what, outcome.result.value)
+        if repeat and key in self._seen:  # the SIGKILL resend keeps the first of each pair only
+            return
+        self._seen.add(key)
         if outcome.result is Result.SENT:
             self.sent.append(what)
         elif outcome.result is not Result.NOT_ALIVE:
             self._diag(f"{what}: {outcome.result.value} ({outcome.detail or outcome.method})")
 
-    def _signal_pid(self, sig: int, what: str) -> None:
+    def _signal_pid(self, sig: int, what: str, *, repeat: bool = False) -> None:
         out = signal_process(self._host, self._leader, sig)
         if self._fallback_ok(out):
             self._diag(
@@ -98,9 +104,9 @@ class SignalSequence:
                 out = SignalOutcome(Result.SENT, "kill", "fallback")
             except OSError as exc:
                 out = SignalOutcome(Result.ERROR, "kill", exc.strerror or "")
-        self._note(what, out)
+        self._note(what, out, repeat=repeat)
 
-    def _signal_group(self, sig: int, what: str) -> None:
+    def _signal_group(self, sig: int, what: str, *, repeat: bool = False) -> None:
         out = signal_group(self._host, self._leader, sig, allow_zombie=True)
         if self._fallback_ok(out):
             self._diag(f"{what}: identity not confirmed ({out.detail}); the group id is reserved")
@@ -111,11 +117,13 @@ class SignalSequence:
                 out = SignalOutcome(Result.NOT_ALIVE, "killpg", "gone")
             except OSError as exc:
                 out = SignalOutcome(Result.ERROR, "killpg", exc.strerror or "")
-        self._note(what, out)
+        self._note(what, out, repeat=repeat)
 
     def _group_empty(self) -> bool:
         probe = probe_group(self._host, self._leader.pid, exclude=(self._leader.pid,))
-        return probe.count == 0 and probe.complete
+        # A `/proc` that hides other users' processes always bumps `unreadable` once; with no
+        # entry that was seen failing to read, the members shown are all there are to wait for.
+        return probe.count == 0 and probe.complete_but_hidden
 
     # -- the steps --------------------------------------------------------------------------
 
@@ -162,6 +170,11 @@ class SignalSequence:
             elif now >= self._deadline:
                 self._to_kill()
         elif self.phase is Phase.KILL:
+            if now >= self._deadline and not exited and not self._overdue_noted:
+                # A leader that survives SIGKILL is stuck in the kernel. The shim keeps resending
+                # and waits: the give-up applies only once the leader has exited.
+                self._overdue_noted = True
+                self._diag("the job leader survives SIGKILL; resending every second and waiting")
             if exited and self._group_empty():
                 self.phase = Phase.DONE
             elif now >= self._deadline and exited:
@@ -171,6 +184,6 @@ class SignalSequence:
                 self.phase = Phase.DONE
             elif now - self._last_kill >= RESEND_SECONDS:
                 self._last_kill = now
-                self._signal_group(signal.SIGKILL, "kill:group")
+                self._signal_group(signal.SIGKILL, "kill:group", repeat=True)
                 if not exited:
-                    self._signal_pid(signal.SIGKILL, "kill:pid")
+                    self._signal_pid(signal.SIGKILL, "kill:pid", repeat=True)

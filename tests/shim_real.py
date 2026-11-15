@@ -31,6 +31,7 @@ from jobsctl.proc_signal import signal_group, signal_process
 from jobsctl.spawn import spawn_internal
 from jobsctl.store_db import OpenMode, Store
 from jobsctl.store_dir import resolve_state_dir
+from tests.kill_guard import allow
 from tests.shim_helpers import CLAIM, JOB, seed_claimed
 
 WAIT = 60
@@ -114,6 +115,7 @@ class RealShims:
         """Record a process a job announced, with its identity now."""
         ident = identify(default_host(), pid)
         self.extras.append(ident)
+        allow(pid)
         return ident
 
     def stop_all(self) -> None:
@@ -128,6 +130,7 @@ class RealShims:
                 ident = parse_identity(row[key]) if row[key] else None
                 if ident is None:
                     continue
+                allow(ident.pid)  # recorded on the attempt; signaled only while the identity holds
                 if key == "job_identity":
                     signal_group(host, ident, signal.SIGKILL, allow_zombie=True)
                 signal_process(host, ident, signal.SIGKILL, allow_zombie=True)
@@ -164,6 +167,7 @@ class JobGuard:
     def track(self, pid: int) -> Identity:
         ident = identify(default_host(), pid)
         self.extras.append(ident)
+        allow(pid)
         return ident
 
     def stop_all(self) -> None:
@@ -176,6 +180,7 @@ class JobGuard:
         for row in rows:
             ident = parse_identity(row["job_identity"]) if row["job_identity"] else None
             if ident is not None:
+                allow(ident.pid)  # recorded on the attempt; signaled only while the identity holds
                 signal_group(host, ident, signal.SIGKILL, allow_zombie=True)
                 signal_process(host, ident, signal.SIGKILL, allow_zombie=True)
         for ident in self.extras:
