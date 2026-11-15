@@ -252,19 +252,19 @@ def test_label_limit_is_usage_with_limit_detail(capsys: pytest.CaptureFixture[st
 
 def test_duplicate_labels_count_once(capsys: pytest.CaptureFixture[str]) -> None:
     labels = [x for _ in range(40) for x in ("--label", "a=b")]
-    res = run_cli(capsys, "--json", "add", *labels, "--", "x")
-    assert res.code == 1  # parses and passes the usage checks; the handler is not implemented
+    res = run_cli(capsys, "--json", "add", "--dry-run", *labels, "--", "x")
+    assert res.code == 0  # parses and passes the usage checks
 
 
 def test_argv_limits(capsys: pytest.CaptureFixture[str]) -> None:
     res = run_cli(capsys, "--json", "add", "--", *(["a"] * 4097))
     assert res.code == 2
-    res = run_cli(capsys, "--json", "add", "--", *(["a"] * 4096))
-    assert res.code == 1
+    res = run_cli(capsys, "--json", "add", "--dry-run", "--", *(["a"] * 4096))
+    assert res.code == 0
     res = run_cli(capsys, "--json", "add", "--", "x" * (1024 * 1024 + 1))
     assert res.code == 2
-    res = run_cli(capsys, "--json", "add", "--", "x" * (1024 * 1024))
-    assert res.code == 1
+    res = run_cli(capsys, "--json", "add", "--dry-run", "--", "x" * (1024 * 1024))
+    assert res.code == 0
 
 
 def test_env_entry_limits(capsys: pytest.CaptureFixture[str]) -> None:
@@ -275,7 +275,7 @@ def test_env_entry_limits(capsys: pytest.CaptureFixture[str]) -> None:
     big = "A=" + "x" * (128 * 1024 + 1)
     assert run_cli(capsys, "add", "--env", big, "--", "x").code == 2
     ok = "A=" + "x" * (128 * 1024)
-    assert run_cli(capsys, "add", "--env", ok, "--", "x").code == 1
+    assert run_cli(capsys, "add", "--dry-run", "--env", ok, "--", "x").code == 0
 
 
 def test_cancel_wait_timeout_zero_allowed_with_force(capsys: pytest.CaptureFixture[str]) -> None:
@@ -507,7 +507,7 @@ def test_cwd_with_a_newline_is_a_usage_error(capsys: pytest.CaptureFixture[str])
 
 def test_leading_zero_duration_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
     assert run_cli(capsys, "add", "--timeout", "05m", "--", "x").code == 2
-    assert run_cli(capsys, "add", "--timeout", "5m", "--", "x").code == 1
+    assert run_cli(capsys, "add", "--dry-run", "--timeout", "5m", "--", "x").code == 0
 
 
 @pytest.mark.parametrize(

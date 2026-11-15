@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from jobsctl import gateway
-from jobsctl.log_export import export_lines, read_records, since_cutoff
+from jobsctl.log_export import export_lines, read_records
 from jobsctl.log_writer import RecordWriter
 from jobsctl.store_db import Store
 from jobsctl.store_dir import resolve_state_dir
@@ -168,12 +168,6 @@ def test_export_while_a_writer_is_appending_never_sees_a_torn_record(store: Stor
     finally:
         stop.set()
         thread.join(timeout=30)
-
-
-def test_since_cutoff_goes_back_from_now() -> None:
-    assert since_cutoff(3600, T0) == T0 - dt.timedelta(hours=1)
-    with pytest.raises(OverflowError):
-        since_cutoff(10**9 * 86400, T0)
 
 
 # -- the command -------------------------------------------------------------------------------

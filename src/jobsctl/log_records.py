@@ -20,6 +20,7 @@ import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Final
 
+from jobsctl.ids import is_job_id
 from jobsctl.textsafe import echo, is_invisible, remove_escape_sequences, sanitize
 
 LEVELS: Final = frozenset({"info", "warn", "error"})
@@ -50,7 +51,6 @@ FORBIDDEN_DETAIL_KEYS: Final = frozenset(
     }
 )  # fmt: skip
 
-MIN_MASKED_LENGTH: Final = 8  # shorter values are not masked (interface.md, Masking)
 MASK: Final = "***"
 MAX_RECORD_BYTES: Final = 256 * 1024
 _SEQ_TS_OVERHEAD: Final = 96  # `"seq":<20 digits>,"ts":"...",` and the newline, rounded up
@@ -67,19 +67,9 @@ class RecordTooLarge(ValueError):
     """The serialized record exceeds :data:`MAX_RECORD_BYTES`."""
 
 
-def format_ts(when: dt.datetime) -> str:
-    """UTC with ``Z`` and millisecond precision. TODO(#4): ``timestamps.format_timestamp``."""
-    if when.tzinfo is None:
-        raise ValueError("timestamps must be timezone-aware")
-    utc = when.astimezone(dt.UTC)
-    return (
-        f"{utc.year:04d}-{utc.month:02d}-{utc.day:02d}T"
-        f"{utc.hour:02d}:{utc.minute:02d}:{utc.second:02d}.{utc.microsecond // 1000:03d}Z"
-    )
-
-
 def parse_ts(text: object) -> dt.datetime | None:
-    """A record's fixed-width ``ts``, or ``None`` when it is not one. TODO(#4)."""
+    """A record's fixed-width ``ts`` (the form ``timestamps.format_timestamp`` writes), or ``None``
+    when it is not one; stricter than ``timestamps.parse_timestamp``, which accepts any offset."""
     if not isinstance(text, str):
         return None
     match = _TS_RE.match(text)
@@ -128,15 +118,9 @@ def clean_text(text: str, masked: Sequence[str] = ()) -> str:
     """Mask, make control and escape characters visible, then mask again.
 
     Masking runs on both sides of the sanitizer so a value is caught as given and as
-    sanitized. ``masked`` is longest first (see :func:`masking_set`).
+    sanitized. ``masked`` is longest first (``MaskingSet.values`` of :mod:`jobsctl.env_mask`).
     """
     return _mask_text(sanitize(_mask_text(text, masked), inline=True), masked)
-
-
-def masking_set(values: Iterable[str]) -> tuple[str, ...]:
-    """The values to mask: at least 8 characters, longest first, without duplicates."""
-    unique = {v for v in values if len(v) >= MIN_MASKED_LENGTH}
-    return tuple(sorted(unique, key=lambda v: (-len(v), v)))
 
 
 def _unused_key(key: str, taken: Mapping[str, Any]) -> str:
@@ -242,7 +226,7 @@ _REASON_NAMES = (
 )  # fmt: skip
 _STATUS_NAMES = ("queued", "starting", "running", "held", "done", "failed", "canceled")
 
-_is_job_id = _pattern(r"jb-[a-z2-7]{8}")  # TODO(#4): the shared job-id grammar
+_is_job_id = lambda v: isinstance(v, str) and is_job_id(v)  # noqa: E731
 _is_queue = _pattern(r"[a-z0-9][a-z0-9_-]{0,63}")
 _is_actor = _pattern(r"(human|auto):[A-Za-z0-9._@-]{1,64}")
 _is_decision_ids = _array_of(_pattern(r"[A-Za-z0-9._:@/-]{1,128}"))

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -161,6 +161,10 @@ def masking_values(
             continue
         chosen.update(c for c in _candidates(value) if len(c) >= MIN_MASKED_LENGTH)
 
+    return _build(chosen, tuple(warnings))
+
+
+def _build(chosen: set[str], warnings: tuple[EnvWarning, ...] = ()) -> MaskingSet:
     ordered = tuple(sorted(chosen, key=lambda v: (-len(v), v)))
     trie = _trie_pattern(sorted(chosen), 0)
     # TODO(#8): the walk costs a few microseconds per position when many values share a long
@@ -168,7 +172,16 @@ def masking_values(
     # automaton would be linear.
     pattern = re.compile(trie) if ordered else None
     overlap = re.compile("(?=(" + trie + "))") if ordered else None
-    return MaskingSet(ordered, tuple(warnings), pattern, overlap)
+    return MaskingSet(ordered, warnings, pattern, overlap)
+
+
+def masking_set_of(values: Iterable[str]) -> MaskingSet:
+    """A masking set of plain values (those of at least 8 characters, and each line of a
+    multi-line one); for callers that hold values rather than variables."""
+    chosen: set[str] = set()
+    for value in values:
+        chosen.update(c for c in _candidates(value) if len(c) >= MIN_MASKED_LENGTH)
+    return _build(chosen)
 
 
 def _trie_pattern(strings: list[str], depth: int) -> str:

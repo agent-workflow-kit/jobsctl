@@ -9,9 +9,10 @@ import sys
 from jobsctl import gateway
 from jobsctl.cli_registry import Context, command
 from jobsctl.errors import usage_error
-from jobsctl.log_export import export_lines, since_cutoff
+from jobsctl.log_export import export_lines
 from jobsctl.log_writer import AUDIT_FILE, LOG_FILE
 from jobsctl.store_dir import prepare_state_dir, resolve_state_dir
+from jobsctl.timestamps import TimestampError, since_cutoff
 
 
 @command("export")
@@ -23,7 +24,7 @@ def export(ctx: Context) -> int:
         if kind == "duration":
             try:
                 since = since_cutoff(int(value), gateway.utc_now())
-            except (OverflowError, ValueError):  # TODO(#4): TimestampError
+            except TimestampError:
                 raise usage_error("--since reaches back past the supported dates") from None
         else:
             since = value  # type: ignore[assignment]
