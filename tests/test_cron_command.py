@@ -341,6 +341,14 @@ def test_concurrent_installs_serialize_and_leave_one_block(
     assert data.count(b"# jobsctl managed\n") == 1 and data.startswith(b"keep\n")
 
 
+def _is_waiting_on_flock(pid: int) -> bool:
+    for line in Path("/proc/locks").read_text().splitlines():
+        fields = line.split()
+        if "->" in fields and "FLOCK" in fields and str(pid) in fields:
+            return True
+    return False
+
+
 def test_a_second_install_blocks_while_the_cron_lock_is_held(
     fake: FakeCrontab, tmp_path: Path
 ) -> None:
@@ -362,7 +370,13 @@ def test_a_second_install_blocks_while_the_cron_lock_is_held(
     proc = subprocess.Popen([sys.executable, "-I", "-c", code], env=env, stderr=subprocess.PIPE)
     try:
         try:
-            time.sleep(2.0)
+            # Wait until the child is demonstrably queued on the lock: /proc/locks lists a
+            # blocked waiter as "<n>: -> FLOCK ... <pid> ...".
+            deadline = time.monotonic() + 30
+            while not _is_waiting_on_flock(proc.pid):
+                assert proc.poll() is None, "install exited instead of waiting for cron.lock"
+                assert time.monotonic() < deadline, "install never queued on cron.lock"
+                time.sleep(0.05)
             assert proc.poll() is None, "install did not wait for cron.lock"
             assert fake.calls() == [] and fake.get() == b"keep\n"
         finally:

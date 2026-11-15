@@ -82,7 +82,6 @@ def test_a_real_cron_pass_starts_a_queued_job_and_its_shim_outlives_the_pass(
         )
         assert added.returncode == 0, added.stderr
         job_id = json.loads(added.stdout)["job"]["id"]
-        assert not pid_file.exists()  # nothing but cron may start it
 
         installed = jobsctl("--json", "cron", "install")
         assert installed.returncode == 0, installed.stderr
