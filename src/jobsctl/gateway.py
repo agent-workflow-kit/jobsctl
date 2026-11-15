@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import datetime as dt
 import fcntl
+import os
 import subprocess
 import time
+from collections.abc import Mapping
 
 
 def run(
@@ -25,6 +27,30 @@ def run(
         text=True,
         timeout=timeout,
         check=False,
+    )
+
+
+def spawn(
+    argv: list[str],
+    *,
+    cwd: str | os.PathLike[str],
+    env: Mapping[str, str],
+    new_process_group: bool = False,
+) -> subprocess.Popen[bytes]:
+    """Start ``argv`` without a shell, with pipes for stdin, stdout and stderr and exactly the
+    environment ``env`` (never the caller's). With ``new_process_group`` the child leads a new
+    process group whose id is its PID. The caller owns the child: it must wait for it and reap
+    it by its exact PID.
+    """
+    return subprocess.Popen(
+        argv,
+        cwd=cwd,
+        env=dict(env),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        close_fds=True,
+        process_group=0 if new_process_group else None,
     )
 
 

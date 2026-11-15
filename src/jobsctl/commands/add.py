@@ -50,12 +50,21 @@ class Request:
     top: bool
     pin: bool
     cwd: str
+    cwd_given: str  # the text before normalization (secret check only)
     env: dict[str, str] = field(repr=False)
     pass_env: list[str]
     labels: list[tuple[str, str]]
     overrides: dict[str, Any]
     actor: str
     decision_ids: list[str]
+    # `me.name` or the OS user name as given, when it became the default actor (the actor holds
+    # only its sanitized form); secret check only.
+    default_user_name: str | None = field(default=None, repr=False)
+    # True when --actor was given (changes only the wording of the secret_in_actor refusal).
+    actor_explicit: bool = False
+    # The `--env`/`--pass-env` duplicate or conflict error, raised only after the name checks
+    # (it would echo a variable name that may itself be a secret).
+    name_conflict: str | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -117,19 +126,21 @@ def _overrides(args: Any) -> dict[str, Any]:
 def build_request(ctx: Context) -> Request:
     args = ctx.args
     env: dict[str, str] = {}
+    name_conflict: str | None = None
     for name, value in args.env:
-        if name in env:
-            raise usage_error(f"--env {name} is given more than once")
+        if name in env and name_conflict is None:
+            name_conflict = "an --env name is given more than once"
         env[name] = value
     pass_env = list(dict.fromkeys(args.pass_env))  # a repeated name is the same name
     for name in pass_env:
-        if name in env:
-            raise usage_error(f"{name} is given with both --env and --pass-env")
-    cwd = (
-        normalize_cwd(args.cwd)
-        if args.cwd is not None
-        else normalize_cwd(caller_cwd(), default=True)
-    )
+        if name in env and name_conflict is None:
+            name_conflict = "a name is given with both --env and --pass-env"
+    if args.cwd is not None:
+        cwd_given = args.cwd
+        cwd = normalize_cwd(cwd_given)
+    else:
+        cwd_given = caller_cwd()
+        cwd = normalize_cwd(cwd_given, default=True)
     return Request(
         argv=list(args.argv),
         queue=args.queue if args.queue is not None else "default",
@@ -138,12 +149,18 @@ def build_request(ctx: Context) -> Request:
         top=args.top,
         pin=args.pin,
         cwd=cwd,
+        cwd_given=cwd_given,
         env=env,
         pass_env=pass_env,
         labels=sorted(set(args.label)),
         overrides=_overrides(args),
         actor=ctx.actor,
         decision_ids=list(args.decision_id),
+        default_user_name=(
+            ctx.me_name if ctx.explicit_actor is None and ctx.stdin_isatty else None
+        ),
+        actor_explicit=ctx.explicit_actor is not None,
+        name_conflict=name_conflict,
     )
 
 
@@ -153,8 +170,13 @@ def build_request(ctx: Context) -> Request:
 def check_secrets(
     req: Request, masking: MaskingSet, config_mask_env: Sequence[str], env_file: EnvFile
 ) -> None:
-    """Refuse (exit 2, naming an index or a variable, never a value) any argv element or `--env`
-    value holding a masked value, and any `--env` name that is in `mask_env` or `env_file`."""
+    """Refuse (exit 2, naming an index, a variable or a field, never a value) any argv element,
+    `--env` value, queue, unique key, label key or value or cwd holding a masked value, and any
+    `--env` name that is in `mask_env` or `env_file`. The names come first: no later message may
+    echo a variable name that itself holds a secret."""
+    _check_names(req, masking)
+    if req.name_conflict is not None:
+        raise usage_error(req.name_conflict)
     for index, element in enumerate(req.argv):
         if masking.contains_secret(element):
             raise usage_error(
@@ -176,6 +198,61 @@ def check_secrets(
                 code="secret_in_env",
                 variable=name,
             )
+    _check_fields(req, masking)
+
+
+def _check_names(req: Request, masking: MaskingSet) -> None:
+    """The actor, the decision ids and the variable names are logged, audited or printed as
+    given, and their grammars admit a secret. The refusals name the field, never the value or
+    the position (the name is the secret)."""
+    if masking.contains_secret(req.actor) or (
+        req.default_user_name is not None and masking.contains_secret(req.default_user_name)
+    ):
+        if req.actor_explicit:
+            raise usage_error("--actor contains a secret value", code="secret_in_actor")
+        raise usage_error(
+            "the default actor contains a secret value; pass a different --actor",
+            code="secret_in_actor",
+        )
+    for decision_id in req.decision_ids:
+        if masking.contains_secret(decision_id):
+            raise usage_error(
+                "a --decision-id contains a secret value", code="secret_in_decision_id"
+            )
+    for name in req.env:
+        if masking.contains_secret(name):
+            raise usage_error("an --env name contains a secret value", code="secret_in_env_name")
+    for name in req.pass_env:
+        if masking.contains_secret(name):
+            raise usage_error(
+                "a --pass-env name contains a secret value", code="secret_in_pass_env_name"
+            )
+
+
+def _check_fields(req: Request, masking: MaskingSet) -> None:
+    """The stored fields that are not argv or env: each is logged or printed as given, so a
+    masked value in one is refused. The messages and details name the field (and a label's key),
+    never the value; a label key that itself holds a secret is not named."""
+    if masking.contains_secret(req.queue):
+        raise usage_error("--queue contains a secret value", code="secret_in_queue")
+    if req.unique_key is not None and masking.contains_secret(req.unique_key):
+        raise usage_error("--unique-key contains a secret value", code="secret_in_unique_key")
+    for key, value in req.labels:
+        if masking.contains_secret(key):
+            raise usage_error("a --label key contains a secret value", code="secret_in_label")
+        if masking.contains_secret(value):
+            raise usage_error(
+                f"the value of --label {key} contains a secret value",
+                code="secret_in_label",
+                label=key,
+            )
+    # As given (`//`, `/./` or a trailing `/` are normalized away but leave the secret readable)
+    # and as stored (`..` that drops a secret never reaches the log or the store).
+    if masking.contains_secret(req.cwd_given) or masking.contains_secret(req.cwd):
+        raise usage_error(
+            "the working directory contains a secret value; pass a different --cwd",
+            code="secret_in_cwd",
+        )
 
 
 # -- the decision ----------------------------------------------------------------------------
