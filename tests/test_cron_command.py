@@ -349,6 +349,7 @@ def _is_waiting_on_flock(pid: int) -> bool:
     return False
 
 
+@pytest.mark.skipif(not Path("/proc/locks").exists(), reason="needs /proc/locks (Linux)")
 def test_a_second_install_blocks_while_the_cron_lock_is_held(
     fake: FakeCrontab, tmp_path: Path
 ) -> None:
