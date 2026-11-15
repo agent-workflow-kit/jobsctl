@@ -158,7 +158,7 @@ def _attempt_row(tx: Tx, row: sqlite3.Row | dict[str, Any]) -> sqlite3.Row | Non
     return tx.one("SELECT * FROM attempts WHERE job_id = ? AND n = ?", [row["id"], row["attempt"]])
 
 
-def _audit_inputs(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+def job_audit_inputs(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return {
         "argv_sha256": argv_sha256(json.loads(row["argv"])),
         "attempt": row["attempt"],
@@ -251,7 +251,7 @@ def _transition(
                     "action": audit,
                     "actor": op.actor,
                     "target": row["id"],
-                    "inputs": {**_audit_inputs(row), **(audit_inputs or {})},
+                    "inputs": {**job_audit_inputs(row), **(audit_inputs or {})},
                     "result": to,
                     "decision_id": op.decision_ids,
                 }
