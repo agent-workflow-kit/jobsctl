@@ -51,7 +51,9 @@ def test_a_failed_exit_requeues_with_not_before_at_the_bottom(store: Store) -> N
     row = job(store)
     assert row["status"] == "queued" and row["reason"] is None and row["ended_at"] is None
     assert row["auto_retries"] == 1 and row["attempt"] == 1
-    assert row["position"] > integer_key(10**6)  # a key from order.py, after the newer job: never a tie
+    assert row["position"] > integer_key(
+        10**6
+    )  # a key from order.py, after the newer job: never a tie
     assert row["not_before"] > row["enqueued_at"]
     seconds = _seconds_between(row["enqueued_at"], row["not_before"])
     assert seconds == 90
@@ -123,9 +125,7 @@ def test_a_timeout_is_retried(store: Store) -> None:
     assert attempt(store)["reason"] == "timeout"
 
 
-def test_sigterm_while_starting_is_retried(
-    store: Store, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_sigterm_while_starting_is_retried(store: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     seed_claimed(store, ["true"])
     shim = make_shim(store, config())
     real = shim._still_starting  # pyright: ignore[reportPrivateUsage]

@@ -1,6 +1,6 @@
 """The transitions a human or a script makes by hand on jobs that are not running:
-`hold`, `release` and `cancel` of a queued, held or starting job (interface.md, Status
-transitions).
+`hold`, `release`, `cancel` of a queued, held or starting job, `resolve` of a held job and
+`retry` of a terminal or `exit_13`-held job (interface.md, Status transitions).
 
 Each is one compare-and-set on `(id, status, attempt)` inside the command's single
 `BEGIN IMMEDIATE` transaction, with the post-hook outbox event written in the same transaction.
@@ -36,6 +36,7 @@ from jobsctl.job_view import job_object, job_row
 from jobsctl.log_files import check_appendable
 from jobsctl.log_records import argv_sha256
 from jobsctl.log_writer import AUDIT_FILE, RecordWriter
+from jobsctl.order import head_position, projected_rank, tail_position
 from jobsctl.store_db import OpenMode, Store, Tx
 from jobsctl.store_dir import resolve_state_dir
 from jobsctl.store_ops import transition_job, update_attempt_by_claim
@@ -175,6 +176,7 @@ def _transition(
     attempt_updates: dict[str, Any] | None = None,
     hook: str | None = None,
     audit: str | None = None,
+    audit_inputs: dict[str, Any] | None = None,
 ) -> Applied:
     """Move `row` to `to`. `attempt_updates` is set when the transition changes the job's
     current attempt; `hook` names the post hook whose event is written with it; `audit` the
@@ -249,12 +251,20 @@ def _transition(
                     "action": audit,
                     "actor": op.actor,
                     "target": row["id"],
-                    "inputs": _audit_inputs(row),
+                    "inputs": {**_audit_inputs(row), **(audit_inputs or {})},
                     "result": to,
                     "decision_id": op.decision_ids,
                 }
             )
     return Applied(True, job, row["status"])
+
+
+def _ends_held_attempt(tx: Tx, row: sqlite3.Row) -> bool:
+    """Whether the job's last attempt still reads `held`: an `escalated` or `exit_13` hold, or a
+    job released with --override-escalation or retried after exit 13 and since held or queued
+    again. Ending the job ends that attempt with it."""
+    attempt = _attempt_row(tx, row)
+    return attempt is not None and attempt["status"] == "held"
 
 
 def unchanged(op: Op, row: sqlite3.Row) -> Applied:
@@ -340,14 +350,8 @@ def cancel_held_or_queued_or_starting(op: Op, row: sqlite3.Row) -> Applied:
             "hold_reason": None,
             "ended_at": op.now,
         }
-    elif status == "held" and row["hold_reason"] != "manual":
+    elif op.tx is not None and _ends_held_attempt(op.tx, row):
         attempt_updates = {"status": "canceled", "reason": "canceled", "hold_reason": None}
-    elif status == "queued" and op.tx is not None:
-        # released with --override-escalation (or retried after exit 13): the attempt still reads
-        # `held`; it ends with the job
-        attempt = _attempt_row(op.tx, row)
-        if attempt is not None and attempt["status"] == "held":
-            attempt_updates = {"status": "canceled", "reason": "canceled", "hold_reason": None}
     return _transition(
         op,
         row,
@@ -357,3 +361,119 @@ def cancel_held_or_queued_or_starting(op: Op, row: sqlite3.Row) -> Applied:
         hook="post-cancel",
         audit="cancel_held" if status == "held" else None,
     )
+
+
+# -- resolve and retry ---------------------------------------------------------------------------
+
+_RESOLVE_HOOK = {"done": "post-finish", "failed": "post-fail", "canceled": "post-cancel"}
+
+
+def resolve(op: Op, row: sqlite3.Row, *, as_: str, note: str | None) -> Applied:
+    """A held job (any hold reason) ends for good in `as_` with reason `resolved`; the actor and
+    the note go on the job and on its current attempt, if any. A job already resolved into the
+    same status is a no-op; any other job is refused (`not_held`, with its status)."""
+    status = row["status"]
+    if status in TERMINAL and row["reason"] == "resolved" and status == as_:
+        return unchanged(op, row)
+    if status != "held":
+        raise refused("not_held", f"{row['id']} is {status}, not held", details={"status": status})
+    updates: dict[str, Any] = {
+        "reason": "resolved",
+        "hold_reason": None,
+        "not_before": None,
+        "ended_at": op.now,
+        "override_hooks": "[]",
+        "resolved_by": op.actor,
+        "note": note,
+    }
+    attempt_updates: dict[str, Any] | None = None
+    if op.tx is not None and _ends_held_attempt(op.tx, row):
+        attempt_updates = {
+            "status": as_,
+            "reason": "resolved",
+            "hold_reason": None,
+            "resolved_by": op.actor,
+            "note": note,
+        }
+    return _transition(
+        op,
+        row,
+        to=as_,
+        updates=updates,
+        attempt_updates=attempt_updates,
+        hook=_RESOLVE_HOOK[as_],
+        audit="resolve",
+    )
+
+
+def retry(
+    op: Op, row: sqlite3.Row, *, top: bool, attempt: int | None, flags: dict[str, Any]
+) -> Applied:
+    """A terminal job, or a job held for `exit_13`, returns to `queued` in one transaction at the
+    bottom of its priority band (the top with `top`), `enqueued_at` reset, the automatic retry
+    count restarted and `override_hooks` cleared. `flags` (`timeout`, `max_retries`,
+    `kill_grace`) replace the corresponding overrides. `attempt` makes the command idempotent."""
+    tx = op.tx
+    assert tx is not None
+    last = int(row["attempt"])
+    if attempt is not None:
+        if last > attempt or row["retried_from_attempt"] == last == attempt:
+            return unchanged(op, row)  # that retry already happened, or a later attempt exists
+        if attempt > last:
+            raise refused(
+                "attempt_mismatch", f"{row['id']} has no attempt {attempt}; its last is {last}"
+            )
+    status = row["status"]
+    if status not in TERMINAL and not (status == "held" and row["hold_reason"] == "exit_13"):
+        raise refused(
+            "not_terminal",
+            f"{row['id']} is {status}; only a finished job or an exit-13 hold is retried",
+        )
+    holder = (
+        None
+        if row["unique_key"] is None
+        else tx.one(
+            "SELECT id FROM jobs WHERE unique_key = ? AND id != ? "
+            "AND status IN ('queued', 'starting', 'running', 'held')",
+            [row["unique_key"], row["id"]],
+        )
+    )
+    if holder is not None:
+        raise refused(
+            "duplicate_key",
+            f"another non-terminal job ({holder['id']}) holds the unique key of {row['id']}",
+            details={"job_id": holder["id"]},
+        )
+    before: dict[str, Any] = json.loads(row["overrides"])
+    after = {**before, **flags}
+    overlay: dict[str, str] | None = None if op.write else {}
+    place = head_position if top else tail_position
+    position = place(tx, row["queue"], exclude=row["id"], overlay=overlay)
+    updates: dict[str, Any] = {
+        "reason": None,
+        "hold_reason": None,
+        "not_before": None,
+        "ended_at": None,
+        "enqueued_at": op.now,
+        "position": position,
+        "auto_retries": 0,
+        "spawn_failures": 0,
+        "override_hooks": "[]",
+        "retried_from_attempt": last,
+        "overrides": json.dumps(after),
+        "resolved_by": None,
+        "note": None,
+        "shim_lost": 0,
+    }
+    done = _transition(
+        op,
+        row,
+        to="queued",
+        updates=updates,
+        audit="retry",
+        audit_inputs={"overrides": after} if after != before else None,
+    )
+    if overlay:  # a dry run that would have renumbered the queue first
+        projected = {**dict(row), **updates, "status": "queued"}
+        done.job["rank"] = projected_rank(tx, projected, overlay)
+    return done
