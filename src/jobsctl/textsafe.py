@@ -75,7 +75,7 @@ def _escape_char(ch: str) -> str:
     return ch
 
 
-def strip_escapes(text: str) -> str:
+def remove_escapes(text: str) -> str:
     """``text`` without terminal escape sequences (the first step of :func:`sanitize`)."""
     return _ESCAPES.sub("", text)
 
