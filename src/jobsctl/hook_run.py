@@ -13,7 +13,7 @@ to the group this call created. Nothing is ever signaled by name or pattern.
 The caller (``pre-start`` in the shim, the delivery of post hooks) selects hooks, builds the
 payload and the environment, and logs the result; this module knows nothing of jobs or state.
 Outbox delivery and ``async`` hooks (``delivery.py``, ``deliver.py``) call ``run_hook`` per entry.
-TODO(#25): the shim's ``pre-start`` loop applies veto and escalation from ``HookResult``.
+The shim's ``pre-start`` loop (``pre_start.py``) applies veto and escalation from ``HookResult``.
 TODO(#28): ``wait_exited_keep`` (``waitid`` with ``WNOWAIT``) is ENOSYS on macOS: ``run_hook`` is
 Linux-only until the macOS port.
 """
@@ -99,11 +99,11 @@ class HookResult:
         """A `pre-start` hook that vetoes: any non-zero exit other than 13, a timeout, or a hook
         that could not run. A stopped hook decides nothing.
 
-        TODO(#25): the `pre-start` loop records a vetoing result in `hook_messages` with outcome
-        `veto` (also for a timeout, a kill by signal and a hook that could not start), while its
-        `hook_ran` outcome stays veto, timeout or failed. A result with ``unkillable`` set (the
-        leader outlived SIGKILL and was left unreaped) must be treated as an internal error by
-        the callers (``delivery.py`` raises; #25), not as a veto."""
+        The `pre-start` loop (``pre_start.py``) records a vetoing result in `hook_messages` with
+        outcome `veto` (also for a timeout, a kill by signal and a hook that could not start),
+        while its `hook_ran` outcome stays veto, timeout or failed. A result with ``unkillable``
+        set (the leader outlived SIGKILL and was left unreaped) is an internal error for the
+        callers, not a veto."""
         return (
             self.hook == PRE_START
             and self.stopped is None

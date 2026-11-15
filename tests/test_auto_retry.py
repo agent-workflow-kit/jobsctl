@@ -189,7 +189,9 @@ def test_a_forced_cancel_is_never_retried(store: Store) -> None:
     assert (job(store)["status"], job(store)["reason"]) == ("canceled", "forced")
 
 
-def test_the_job_keeps_its_unique_key_and_override_hooks(store: Store) -> None:
+def test_the_job_keeps_its_unique_key_and_the_hooks_that_ran_clear_override_hooks(
+    store: Store,
+) -> None:
     seed_claimed(store, ["false"])
     with store.write() as tx:
         tx.execute(
@@ -198,7 +200,9 @@ def test_the_job_keeps_its_unique_key_and_override_hooks(store: Store) -> None:
     make_shim(store, config()).run()
     row = job(store)
     assert row["status"] == "queued" and row["unique_key"] == "k"
-    assert row["override_hooks"] == '["h"]'
+    # the start ran its pre-start hooks (none here), so the override is spent; one kept across a
+    # retry is covered by tests/test_pre_start.py (a start cut short before its hooks ran)
+    assert row["override_hooks"] == "[]"
 
 
 def test_a_failure_after_a_retried_start_keeps_no_not_before(store: Store) -> None:

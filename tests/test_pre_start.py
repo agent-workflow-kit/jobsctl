@@ -431,8 +431,9 @@ def test_release_with_override_escalation_lets_the_next_start_through(
     assert json.loads(job(store)["override_hooks"]) == ["ask"]
     with store.write() as tx:  # the next pass claims it
         tx.execute("UPDATE jobs SET status='starting', attempt=2 WHERE id = ?", [JOB])
-        insert_row(tx, "attempts", attempt_values(JOB, 2, "claim-bbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                   claimed_by=attempt(store)["shim_identity"], shim_identity=attempt(store)["shim_identity"]))  # fmt: skip
+        ident = attempt(store)["shim_identity"]
+        values = attempt_values(JOB, 2, "claim-bbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        insert_row(tx, "attempts", {**values, "claimed_by": ident, "shim_identity": ident})
     shim = make_shim(store, cfg, claim_id="claim-bbbbbbbbbbbbbbbbbbbbbbbbbbbb", hook_tuning=FAST)
     assert shim.run() == 0
     assert runs.read_text().split() == ["x", "x"]

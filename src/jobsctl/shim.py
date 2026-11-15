@@ -42,6 +42,7 @@ from jobsctl.env_job import MissingEnvError, build_job_env
 from jobsctl.env_logging import log_env_file_state, log_path_state
 from jobsctl.env_mask import masking_values
 from jobsctl.errors import JobsctlError
+from jobsctl.hook_run import HookTuning, run_hook
 from jobsctl.leases import (
     RENEW_SECONDS,
     expiry,
@@ -53,7 +54,6 @@ from jobsctl.leases import (
 from jobsctl.leftovers import Leftovers, count_leftovers
 from jobsctl.log_writer import RecordWriter
 from jobsctl.output_capture import OutputCapture, TailSnapshot
-from jobsctl.hook_run import HookTuning, run_hook
 from jobsctl.pre_start import PreStart, Verdict
 from jobsctl.proc_host import Host, default_host
 from jobsctl.proc_identity import Identity, Liveness, check_identity

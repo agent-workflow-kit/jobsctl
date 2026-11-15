@@ -88,7 +88,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 
 **Status**: In Progress (runner pass, start triggers, the shim spawn contract, the shim's start sequence with atomic job spawn, exit mapping, leftovers, result file and final commit, output capture, the signal sequence with timeout enforcement, `retry`, `resolve` and automatic retry, `wait` and `add --wait` done)
 
-Interim behavior until the dependent issues land: `_kill` ends a forced cancel and never retries; the shim does not yet run `pre-start` hooks (`TODO(#25)`).
+Interim behavior until the dependent issues land: `_kill` ends a forced cancel and never retries.
 
 ## Stage 3: Cancellation and recovery (0.3)
 
@@ -116,7 +116,7 @@ Interim behavior until the dependent issues land: `_kill` ends a forced cancel a
 - override: `override_hooks` kept across automatic retries until the hooks ran, cleared by `retry` and terminal ends; vetoes still veto.
 - `pre-start` `event_id` = `<claim_id>:pre-start:<hook index>`.
 
-**Status**: Not Started
+**Status**: In Progress (hook execution, delivery, `pre-start` veto and escalation with `override_hooks` done)
 
 ## Stage 5: Cron, upgrades and platform readiness (0.5)
 
