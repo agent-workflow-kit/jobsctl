@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -13,7 +14,9 @@ from jobsctl.cli_registry import Context, lookup, os_user_name
 from jobsctl.cli_surface import build_parser, check_usage
 from jobsctl.config import Config
 from jobsctl.config_files import absolute, load_config
+from jobsctl.diag import install
 from jobsctl.errors import ExitCode, JobsctlError, usage_error
+from jobsctl.store_dir import resolve_state_dir
 
 __all__ = ["build_parser", "main", "parse_args"]
 
@@ -98,6 +101,10 @@ def _dispatch(argv: list[str]) -> tuple[int, bool]:
         return err.exit_code, _wants_json(argv)
     try:
         check_usage(args)
+        if args.command_key == "run" and args.triggered is not None:
+            # diagnostics of a triggered pass: diag/run-<pid>.log, created on the first write; set
+            # up before the config is read so that a broken config leaves a trace
+            install(resolve_state_dir() / "diag" / f"run-{os.getpid()}.log")
         config = load_config(_config_path(args))
         commands.load_all()
         handler = lookup(args.command_key)

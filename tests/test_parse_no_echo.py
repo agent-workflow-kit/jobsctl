@@ -62,6 +62,7 @@ CASES: dict[str, tuple[list[str], str]] = {
     "retry_attempt": (["retry", JID, "--attempt", SECRET], "--attempt"),
     "max_starts": (["run", "--max-starts", SECRET], "--max-starts"),
     "interval": (["run", "--loop", "--interval", SECRET], "--interval"),
+    "triggered": (["run", "--triggered", SECRET], "--triggered"),
     "older_than": (["prune", "--older-than", SECRET], "--older-than"),
     "move_after": (["move", JID, "--after", SECRET], "job id"),
     "focus": (["browse", "--focus", SECRET], "job id"),

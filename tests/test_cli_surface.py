@@ -50,7 +50,7 @@ EXPECTED_FLAGS: dict[str, set[str]] = {
     "label remove": MUTATING,
     "capacity": {"--queue"},
     "queues": set(),
-    "run": {"--loop", "--interval", "--max-starts"},
+    "run": {"--loop", "--interval", "--max-starts", "--triggered"},  # --triggered: hidden
     "reconcile": {"--dry-run"},
     "prune": MUTATING | {"--older-than"},
     "export": {"--audit", "--log", "--since", "--after-seq"},

@@ -22,16 +22,18 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 | `config.py` | 0 | YAML + `config.d` merge, Pydantic models, defaults equal to `config.example.yaml`, unknown-queue-selector warnings, absolute `--config` propagation |
 | `validate.py`, `durations.py`, `timestamps.py` | 0 | grammars (queues, labels and the 32-label set, unique keys, env names, decision ids; actors stay in `actors.py`, hook names come with the hooks issue), durations, UTC millisecond timestamps |
 | `ids.py` | 0 | `jb-` id generation with a pluggable `taken` predicate (jobs and `pruned_ids`, supplied by the store), prefix resolution (2/10/21) with a pluggable lookup |
-| `gateway.py` | 0 | the single boundary for subprocess calls (`run`, `spawn`, `Popen`) |
+| `gateway.py` | 0 | the single boundary for subprocess calls (`run`, `spawn`, `spawn_detached`) and the `sleep`, `monotonic`, `utc_now` and `flock` seams |
 | `gateway_proc.py` | 0 | raw process syscalls through `os` and `ctypes`: `kill`/`killpg` with argument validation, pidfds and the allow-listed `syscall()` fallback, `prctl`, `waitid`/`waitpid`, libproc, `sysctl` |
 | `proc_host.py`, `proc_identity.py`, `proc_signal.py`, `proc_group.py`, `proc_linux.py` | 0 | the `Host` seam (`/proc` reads, libproc); process identity (Linux `/proc` field 22, boot id; macOS `libproc`, `kern.bootsessionuuid`), liveness, pidfd with the allow-listed ctypes `syscall()` fallback and the re-check before `kill` without pidfds, dumpability, group probing |
 | `store.py` | 0 | connection setup, additive migrations at open for CLI commands, `user_version` checks for long-lived and internal processes, compare-and-set helpers, outbox writes |
 | `log_records.py`, `log_files.py`, `log_writer.py`, `log_export.py` | 0 | `log.jsonl`/`audit.jsonl` with `flock` + `state.db` `seq` counters, once-per-change-of-state warnings, `export` |
-| `diag.py` | 2 (planned) | diagnostics files of triggered passes and internal processes (`diag/<kind>-<pid>.log`, 0600, created on first write, capped at 1 MiB, deleted after 7 days; D43) |
+| `diag.py` | 2 | diagnostics files of triggered passes and internal processes (`diag/<kind>-<pid>.log`, 0600, created on first write by the process itself, capped at 1 MiB, deleted after 7 days; D43) |
 | `order.py` | 1 | position keys, `rank`, `move`/`pin`/`priority`, selection across queues, `blocked_by`, capacity |
 | `env_file.py`, `env_canonical.py`, `env_job.py`, `env_mask.py` | 1 | `env_file` loading and checks (ancestors, `O_NOFOLLOW`/`O_NONBLOCK`, format, `PR_SET_DUMPABLE`); canonical environment; job environment; masking set |
-| `commands/` | 1–4 | one module per command group |
-| `runner.py` | 2 | the pass: lease, reconcile, claim loop with the `pass_requested` counter, shim spawn and identity record, delivery hand-off, retention, checkpoint; `run --loop` |
+| `commands/` | 1–4 | one module per command or small group (`add`, `capacity`, `queues`, `reorder`, `hold_release`, `cancel`, `prune`, `export`, `run`, `internal`; later issues add the rest) |
+| `retention.py` | 2 | retention and `prune` batches, file removal anchored by descriptors, orphan sweep, forgetting empty unconfigured queues |
+| `hook_events.py`, `job_lookup.py`, `transitions_manual.py` | 1–4 | the post-hook outbox events written with a transition; finding jobs by id, prefix and selector; `hold`/`release`/`cancel` of non-running jobs |
+| `runner.py`, `claims.py`, `triggers.py`, `spawn.py`, `leases.py` | 2 | the pass: lease, reconcile hook point, claim loop with the `pass_requested` counter, shim spawn and identity record, delivery hand-off, retention, checkpoint; start triggers; `run --loop` (`commands/run.py`) |
 | `shim.py` | 2–4 | start sequence, output pump, tail flush, final commit and result file, timeout, signal sequence |
 | `output_capture.py`, `output_tail.py`, `output_store.py`, `textsafe.py` | 2 | ring buffer; tail rendering (window rules, masking, sanitizing, live flush); compression and the `outputs` table; the shared sanitizer |
 | `kill.py` | 3 | `_kill` for force-cancel after a shim loss |
@@ -84,7 +86,9 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 - timeouts and `overrides` (`none`); automatic retry (`not_before`, budget from the attempt's `effective` snapshot, the 3rd spawn failure final); `retry --attempt N` replay after a cancel or hold; `wait` exits 0/12/13/20/22/130.
 - result file written before the final commit; final-commit retry under contention.
 
-**Status**: Not Started
+**Status**: In Progress (runner pass, start triggers and the shim spawn contract done; the shim, output capture, `wait`, `retry` and automatic retry remain)
+
+Interim behavior until the dependent issues land: the `_shim` stub (`TODO(#15)`) exits at once unconfirmed, so every pass requeues its claimed job as `claim_orphaned` and claims it again; a shim that confirmed and then died is left `starting` until reconcile (`TODO(#22)`). `_deliver` has no handler (`TODO(#24)`), so a spawned `_deliver` exits at once and the next pass requests it again while events stay undelivered.
 
 ## Stage 3: Cancellation and recovery (0.3)
 

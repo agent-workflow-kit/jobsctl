@@ -54,6 +54,29 @@ def spawn(
     )
 
 
+def spawn_detached(argv: list[str], *, env: dict[str, str], cwd: str) -> subprocess.Popen[bytes]:
+    """Start an internal process: no shell, a new session (so it survives its parent's exit and a
+    hangup), `cwd`, exactly `env`, stdin and stdout/stderr on ``/dev/null`` and every other file
+    descriptor closed. The child opens its own diagnostics file (``diag.py``). The caller keeps
+    the handle: it reaps the child by this exact PID and never by "any child"."""
+    return subprocess.Popen(
+        argv,
+        env=env,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        start_new_session=True,
+        shell=False,
+    )
+
+
+def sleep(seconds: float) -> None:
+    """Sleep (tests replace this to run back-offs and loop intervals instantly)."""
+    time.sleep(seconds)
+
+
 def flock_exclusive(fd: int) -> None:
     """Block until this process holds an exclusive advisory lock on ``fd`` (released by
     :func:`funlock` or by closing ``fd``; the kernel drops it when the process dies)."""

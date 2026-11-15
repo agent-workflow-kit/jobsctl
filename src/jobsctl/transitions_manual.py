@@ -8,7 +8,8 @@ Log and audit records are appended only after the commit (`run_manual`). With `-
 same decisions run in a read transaction on a read-only connection and the projected job is
 built from the row with the changes merged in; nothing is written.
 
-TODO(#14): `release` and `cancel` of a `starting` job request a pass once the runner exists.
+A changed `release` and a `cancel` that ended a `starting` job free a start: the commands
+request a pass after the commit (`Applied.previous_status`, `triggers.request_pass_from_command`).
 TODO(#15): the shim reacts to a `starting` job canceled under it (stops its hook, delivers).
 TODO(#24): hook delivery (the synchronous hooks of `hold` and `cancel` run after the commit).
 """
@@ -82,6 +83,7 @@ class Op:
 class Applied:
     changed: bool
     job: dict[str, Any]
+    previous_status: str | None = None  # the status the job had before a change
 
 
 # -- running a command -----------------------------------------------------------------------
@@ -251,7 +253,7 @@ def _transition(
                     "decision_id": op.decision_ids,
                 }
             )
-    return Applied(True, job)
+    return Applied(True, job, row["status"])
 
 
 def unchanged(op: Op, row: sqlite3.Row) -> Applied:

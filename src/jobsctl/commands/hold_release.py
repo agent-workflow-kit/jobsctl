@@ -15,6 +15,7 @@ from jobsctl.env_file import load_env_file
 from jobsctl.job_lookup import find_job
 from jobsctl.textsafe import sanitize
 from jobsctl.transitions_manual import Applied, Op, hold, release, run_manual
+from jobsctl.triggers import request_pass_from_command
 
 
 def _report(ctx: Context, done: Applied, verb: str) -> int:
@@ -49,5 +50,6 @@ def release_command(ctx: Context) -> int:
         )
 
     done = run_manual(ctx, body, load_env=lambda: load_env_file(ctx.config.env_file))
-    # TODO(#14): when `done.changed` and auto_run, request a pass (start trigger).
+    if done.changed and not ctx.args.dry_run:
+        request_pass_from_command(ctx.config, ctx.config_path, quiet=ctx.quiet)
     return _report(ctx, done, "released")
