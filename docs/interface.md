@@ -216,7 +216,7 @@ The `queued` jobs of one queue are ordered by:
 
 Held jobs keep their place in the same position space. `rank` is the computed 1-based place of a queued job in its queue (pinned group first); it is `null` for jobs in any other status.
 
-**`move <id> --before <id2>` / `--after <id2>`** places the job directly before or after `id2`, which must be a queued or held job in the same queue (else exit 20, `other_queue` or `not_queued`). The moved job takes `id2`'s `priority` and `pinned` flag, so it lands exactly where it was put. Moving a job relative to itself exits 0 with `changed: false`. **`--top` / `--bottom`** move the job to the top or bottom of its own priority band within its own group (pinned or not), among queued and held positions. `move` of a held job changes its stored place for when it is released; `move` of a job in any other status exits 20 (`not_queued`).
+**`move <id> --before <id2>` / `--after <id2>`** places the job directly before or after `id2`, which must be a queued or held job in the same queue (else exit 20, `other_queue` or `not_queued`). The moved job takes `id2`'s `priority` and `pinned` flag, so it lands exactly where it was put. Moving a job relative to itself exits 0 with `changed: false`, and so does any `move` that leaves the job where it already is (directly before or after `id2` in `id2`'s band, or already at the top or bottom of its band); such a move writes no `reorder` record. Position keys are unique within a queue's queued and held jobs. **`--top` / `--bottom`** move the job to the top or bottom of its own priority band within its own group (pinned or not), among queued and held positions. `move` of a held job changes its stored place for when it is released; `move` of a job in any other status exits 20 (`not_queued`).
 
 ### Selection
 
@@ -579,7 +579,7 @@ A terminal job, or a job held for `exit_13`, returns to `queued` in one transact
 
 `jobsctl capacity [--queue Q]`
 
-Reports [Capacity](#capacity) for one queue (known or not) or for every known queue. Always exits 0 when it answers. Output: `schemas/cli/capacity.json`, `{"queues": [{"queue", "known", "cap", "running", "queued", "free", "effective_free"}...], "global": {"cap", "running", "queued", "free"}}`. An unknown queue is reported with `known: false` and `default_cap`.
+Reports [Capacity](#capacity) for one queue (known or not) or for every known queue. A queue is listed when it is configured, has had a job, or has jobs; a queue named with `--queue` that is none of those is reported with `known: false`, `default_cap` as its `cap` and zero counts (its `effective_free` still reflects the global cap). Counts are read in one transaction at the time of the call. Always exits 0 when it answers. Output: `schemas/cli/capacity.json`, `{"queues": [{"queue", "known", "cap", "running", "queued", "free", "effective_free"}...], "global": {"cap", "running", "queued", "free"}}`. An unknown queue is reported with `known: false` and `default_cap`.
 
 ### `queues`
 

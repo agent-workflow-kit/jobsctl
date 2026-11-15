@@ -1,7 +1,7 @@
 """The Job object (interface.md, Job object) built from a `jobs` row.
 
-Shared by the commands that print a job. `rank` and `blocked_by` are computed, never stored.
-TODO(#10): `order.py` owns the rank computation and `blocked_by`; TODO(#11): `list` and `show`
+Shared by the commands that print a job. `rank` and `blocked_by` are computed, never stored,
+by `order.py`. TODO(#11): `list` and `show`
 share the current-attempt rule below.
 """
 
@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping
 from typing import Any, Final
 
 from jobsctl.config import Config
+from jobsctl.order import blocked_by, rank
 from jobsctl.store_db import Tx
 
+JobRow = sqlite3.Row | Mapping[str, Any]  # a stored row, or a projection of one (`--dry-run`)
 _RUNNING: Final = ("starting", "running")
 
 
@@ -21,26 +24,7 @@ def job_row(tx: Tx, job_id: str) -> sqlite3.Row | None:
     return tx.one("SELECT * FROM jobs WHERE id = ?", [job_id])
 
 
-def _rank(tx: Tx, row: sqlite3.Row) -> int:
-    """1-based place among the queued jobs of the queue: pinned first, then priority (highest
-    first), then position, then id."""
-    found = tx.one(
-        "SELECT count(*) AS n FROM jobs WHERE queue = :q AND status = 'queued' AND ("
-        " pinned > :pin OR (pinned = :pin AND (priority > :pri OR (priority = :pri AND ("
-        " position < :pos OR (position = :pos AND id < :id))))))",
-        {
-            "q": row["queue"],
-            "pin": row["pinned"],
-            "pri": row["priority"],
-            "pos": row["position"],
-            "id": row["id"],
-        },
-    )
-    assert found is not None
-    return int(found["n"]) + 1
-
-
-def _current_attempt(tx: Tx, row: sqlite3.Row) -> sqlite3.Row | None:
+def _current_attempt(tx: Tx, row: JobRow) -> sqlite3.Row | None:
     """The attempt in progress, or the one whose end or hold produced the job's status."""
     status = row["status"]
     if status == "queued" or row["attempt"] < 1:
@@ -75,25 +59,8 @@ def effective_settings(
     }
 
 
-def _blocked_by(
-    config: Config, row: sqlite3.Row, pass_env: list[str], env_file_unavailable: bool, now: str
-) -> str | None:
-    """Why a queued job cannot start now: the first that applies (Job object, `blocked_by`)."""
-    if row["status"] != "queued":
-        return None
-    if row["not_before"] is not None and row["not_before"] > now:
-        return "not_before"
-    if pass_env and env_file_unavailable:
-        return "env_file_unavailable"
-    if config.queue(row["queue"]).cap == 0:
-        return "queue_paused"
-    if config.global_cap == 0:
-        return "global_paused"
-    return None
-
-
 def job_object(
-    tx: Tx, row: sqlite3.Row, config: Config, *, env_file_unavailable: bool, now: str
+    tx: Tx, row: JobRow, config: Config, *, env_file_unavailable: bool, now: str
 ) -> dict[str, Any]:
     """The Job object of `row`, read in `tx`. `now` is a formatted timestamp (for `blocked_by`)."""
     labels = tx.all("SELECT key, value FROM job_labels WHERE job_id = ?", [row["id"]])
@@ -120,13 +87,21 @@ def job_object(
         "unique_key": row["unique_key"],
         "priority": row["priority"],
         "pinned": bool(row["pinned"]),
-        "rank": _rank(tx, row) if row["status"] == "queued" else None,
+        "rank": rank(tx, row) if row["status"] == "queued" else None,
         "attempt": row["attempt"],
         "retried_from_attempt": row["retried_from_attempt"],
         "overrides": overrides,
         "effective": effective_settings(config, row["queue"], overrides, snapshot),
         "not_before": row["not_before"],
-        "blocked_by": _blocked_by(config, row, pass_env, env_file_unavailable, now),
+        "blocked_by": blocked_by(
+            config,
+            status=row["status"],
+            queue=row["queue"],
+            not_before=row["not_before"],
+            has_pass_env=bool(pass_env),
+            env_file_unavailable=env_file_unavailable,
+            now=now,
+        ),
         "force_requested_by": None if attempt is None else attempt["force_requested_by"],
         "override_hooks": json.loads(row["override_hooks"]),
         "shim_lost": bool(row["shim_lost"]),
