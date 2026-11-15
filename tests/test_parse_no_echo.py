@@ -138,8 +138,8 @@ def test_every_value_taking_option_has_a_case() -> None:
         (["list", "--limit", "5", "5"], "unrecognized argument at position 4 or 5"),
         (["add", "--queue", "a", "a", "--", "x"], "unrecognized argument at position 4 or 5"),
         (["list", "z", "q", "z", "z"], "unrecognized argument at position 3, 5 or 6"),
-        # Every token counts, `--` included; argparse hands back `--` itself as the extra.
-        (["list", "--", "z"], "unrecognized argument at position 3"),
+        # Every token counts, `--` included; the stray token after the `--` is the one reported.
+        (["list", "--", "z"], "unrecognized argument at position 4"),
     ],
 )
 def test_a_repeated_unrecognized_token_names_every_position(
@@ -153,7 +153,34 @@ def test_a_token_after_a_double_dash_counts_from_the_command_line(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     res = run_cli(capsys, "list", "--", SECRET)
+    assert res.err == "jobsctl: error: unrecognized argument at position 3\n"
+
+
+def test_the_double_dash_itself_is_skipped_when_a_stray_token_follows(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    res = run_cli(capsys, "list", "--limit", "1", "--", SECRET, SECRET)
+    assert res.err == "jobsctl: error: unrecognized argument at position 5 or 6\n"
+
+
+def test_a_lone_double_dash_is_reported_by_its_own_position(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    res = run_cli(capsys, "list", "--")
     assert res.err == "jobsctl: error: unrecognized argument at position 2\n"
+
+
+def test_a_long_position_list_is_capped_at_eight(capsys: pytest.CaptureFixture[str]) -> None:
+    res = run_cli(capsys, "list", *[SECRET] * 4000)
+    assert res.err == (
+        "jobsctl: error: unrecognized argument at position 2, 3, 4, 5, 6, 7, 8, 9,"
+        " or later (4000 occurrences in total)\n"
+    )
+
+
+def test_exactly_eight_positions_are_all_named(capsys: pytest.CaptureFixture[str]) -> None:
+    res = run_cli(capsys, "list", *[SECRET] * 8)
+    assert res.err == "jobsctl: error: unrecognized argument at position 2, 3, 4, 5, 6, 7, 8 or 9\n"
 
 
 def test_env_assign_messages_never_carry_the_value(capsys: pytest.CaptureFixture[str]) -> None:

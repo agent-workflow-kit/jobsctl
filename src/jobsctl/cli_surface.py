@@ -45,6 +45,7 @@ _SAFE = tuple(
     )
 )
 GENERIC_MESSAGE = "invalid command line"
+_MAX_POSITIONS = 8
 
 
 class Parser(argparse.ArgumentParser):
@@ -64,7 +65,9 @@ class Parser(argparse.ArgumentParser):
         tokens = list(sys.argv[1:] if args is None else args)
         parsed, extras = self.parse_known_args(tokens, namespace)
         if extras:
-            raise usage_error(self._unrecognized(extras[0], tokens))  # ours: never filtered
+            # `--` is argparse's own marker: report the stray token after it, if there is one.
+            first = next((e for e in extras if e != "--"), extras[0])
+            raise usage_error(self._unrecognized(first, tokens))  # ours: never filtered
         return parsed
 
     def _unrecognized(self, token: str, tokens: list[str]) -> str:
@@ -72,8 +75,13 @@ class Parser(argparse.ArgumentParser):
         if name in _declared_options(self):
             return "unrecognized argument: " + name
         # The same text can sit at several positions: name them all rather than guess one.
+        # Past _MAX_POSITIONS the rest is counted, not listed, so the message stays short.
         found = [str(i) for i, t in enumerate(tokens, 1) if t == token]
-        where = ", ".join(found[:-1]) + " or " + found[-1] if len(found) > 1 else found[0]
+        if len(found) > _MAX_POSITIONS:
+            shown = ", ".join(found[:_MAX_POSITIONS])
+            where = f"{shown}, or later ({len(found)} occurrences in total)"
+        else:
+            where = ", ".join(found[:-1]) + " or " + found[-1] if len(found) > 1 else found[0]
         return f"unrecognized argument at position {where}"
 
     def error(self, message: str) -> Any:
