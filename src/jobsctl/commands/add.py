@@ -448,7 +448,7 @@ def add(ctx: Context) -> int:
         out = _dry_run(ctx, req, env_file, now)
     else:
         out = _write(ctx, req, env_file, canonical, masking, now)
-        if out.created and not args.no_start:
+        if not args.no_start:  # also for a unique-key hit: the earlier request may have been lost
             request_pass_from_command(ctx.config, ctx.config_path, quiet=ctx.quiet)
     _report(ctx, req, out, dry_run=args.dry_run)
     return 0

@@ -173,17 +173,19 @@ def test_a_locked_database_only_warns(
 # -- the commands that trigger -------------------------------------------------------------------
 
 
-def test_add_triggers_unless_no_start_dry_run_or_a_repeat(
+def test_add_triggers_unless_no_start_or_dry_run_even_for_a_repeat(
     capsys: pytest.CaptureFixture[str], trigger_spawns: PassSpawns
 ) -> None:
     base = ("add", "--cwd", "/w", "--unique-key", "k1", "--", "x")
     assert run_cli(capsys, *base).code == 0
     assert len(trigger_spawns) == 1
-    assert run_cli(capsys, *base).code == 0  # the unique key hit: nothing was created
-    assert len(trigger_spawns) == 1
+    # the unique key hit creates nothing but still requests a pass (the first request may have
+    # been lost: a failed spawn, a busy database)
+    assert run_cli(capsys, *base).code == 0
+    assert len(trigger_spawns) == 2
     assert run_cli(capsys, "add", "--no-start", "--cwd", "/w", "--", "x").code == 0
     assert run_cli(capsys, "add", "--dry-run", "--cwd", "/w", "--", "x").code == 0
-    assert len(trigger_spawns) == 1
+    assert len(trigger_spawns) == 2
 
 
 def test_add_with_auto_run_false_triggers_nothing(

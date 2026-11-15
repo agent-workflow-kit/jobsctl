@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from jobsctl import cli as cli_module
 from jobsctl import gateway
 from jobsctl.commands import run as run_module
 from jobsctl.errors import JobsctlError
@@ -28,7 +29,7 @@ from tests.manual_helpers import add_job, config_file, row
 def no_diag_redirect(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     """`install` would replace this process's stdout; record the path it was given instead."""
     paths: list[Path] = []
-    monkeypatch.setattr(run_module, "install", lambda path: paths.append(path))
+    monkeypatch.setattr(cli_module, "install", lambda path: paths.append(path))
     return paths
 
 
@@ -175,6 +176,17 @@ def test_a_triggered_pass_sends_its_diagnostics_to_its_own_file(
     assert path.parent.name == "diag" and path.name == f"run-{os.getpid()}.log"
 
 
+def test_a_triggered_pass_installs_its_diagnostics_before_the_config_is_loaded(
+    capsys: pytest.CaptureFixture[str], no_diag_redirect: list[Path], tmp_path: Path
+) -> None:
+    broken = tmp_path / "broken.yaml"
+    broken.write_text("{not: [valid", encoding="utf-8")
+    res = run_cli(capsys, "--config", str(broken), "run", "--quiet", "--triggered", "0")
+    assert res.code != 0
+    (path,) = no_diag_redirect
+    assert path.parent.name == "diag" and path.name == f"run-{os.getpid()}.log"
+
+
 # -- --loop --------------------------------------------------------------------------------------
 
 
@@ -277,3 +289,46 @@ def test_loop_keeps_the_last_config_when_a_reload_fails(
     res = run_cli(capsys, "--config", str(cfg), "--json", "run", "--loop")
     assert res.code == 0 and len(lines(res.out)) == 2
     assert "config not reloaded" in res.err
+
+
+@pytest.mark.parametrize("failure", ["busy", "lease_lost"])
+def test_loop_survives_a_busy_database_or_a_lost_lease_in_one_pass(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    failure: str,
+) -> None:  # fmt: skip
+    from jobsctl.runner import LeaseLost
+
+    cfg = config_file(tmp_path, run_interval="1s")
+    real = Runner.run_pass
+    calls: list[int] = []
+
+    def flaky(self: Runner, **kwargs: Any) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            raise JobsctlError("busy", "state.db is busy") if failure == "busy" else LeaseLost()
+        return real(self, **kwargs)
+
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 7:
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    monkeypatch.setattr(Runner, "run_pass", flaky)
+    monkeypatch.setattr(gateway, "sleep", sleep)
+    res = run_cli(capsys, "--config", cfg, "--json", "run", "--loop")
+    assert res.code == 0 and len(calls) == 2  # the next interval ran another pass
+    assert len(lines(res.out)) == 1 and "pass failed" in res.err
+
+
+def test_loop_stops_on_any_other_error(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(self: Runner, **kwargs: Any) -> Any:
+        raise JobsctlError("config_invalid", "bad config")
+
+    monkeypatch.setattr(Runner, "run_pass", broken)
+    monkeypatch.setattr(gateway, "sleep", lambda s: pytest.fail("slept after a fatal error"))
+    res = run_cli(capsys, "--json", "run", "--loop")
+    assert res.code != 0 and res.envelope()["error"]["code"] == "config_invalid"

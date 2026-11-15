@@ -144,20 +144,28 @@ class Runner:
     def run_pass(self, *, max_starts: int | None = None) -> PassResult:
         self._env_file = None
         self.lease_taken = False
-        self._seen = None
         result = PassResult()
         now = self.clock()
         self._holder = own_identity(self.host)
         probe = liveness_probe(self.host)
-        if not take_lease(
-            self.store,
-            "runner",
-            self._holder,
-            now=format_timestamp(now),
-            expires_at=expiry(now),
-            is_alive=probe,
-        ):
-            return self._already_running(result)
+        # The baseline of a pass that stops before its first claim: read before the take, so a
+        # request that arrives once this process is the live holder is never missed.
+        self._seen = self._counter_now()
+        for _ in range(2):
+            if take_lease(
+                self.store,
+                "runner",
+                self._holder,
+                now=format_timestamp(now),
+                expires_at=expiry(now),
+                is_alive=probe,
+            ):
+                break
+            if self._already_running(result):
+                return result
+            # the holder vanished between the failed take and the read: take the lease once more
+        else:
+            return result
         self.lease_taken = True
         self._last_renew = gateway.monotonic()
         released = False
@@ -168,13 +176,18 @@ class Runner:
                 self._abandon()
         return result
 
-    def _already_running(self, result: PassResult) -> PassResult:
+    def _counter_now(self) -> int:
+        row = self.store.query_one("SELECT value FROM counters WHERE name = ?", [PASS_REQUESTED])
+        return 0 if row is None else int(row["value"])
+
+    def _already_running(self, result: PassResult) -> bool:
+        """Report a live holder in `result`; `False` when there is none (released or dead between
+        the failed take and this read), so the caller takes the lease again."""
         now = self.clock()
         row = self.store.query_one(LEASE_COLUMNS, ["runner"])
         holder = holder_of(row, self.host, now)
-        if holder is None:  # released or dead between the take and this read: report the row
-            result.already_running = False
-            return result
+        if holder is None:
+            return False
         result.already_running = True
         result.holder = holder
         if holder.stuck(now):
@@ -189,7 +202,7 @@ class Runner:
                     },
                 )
             )
-        return result
+        return True
 
     def _locked_pass(self, result: PassResult, max_starts: int | None) -> bool:
         self._step("reconcile")
@@ -203,7 +216,7 @@ class Runner:
             total += len(claims)
             for claim in claims:
                 self._step("spawn")
-                self._spawn_shim(claim, result)
+                self._spawn_one(claim, result)
             self._step("delivery")
             self._guarded("delivery", result, self._request_delivery)
             self._step("retention")
@@ -271,13 +284,30 @@ class Runner:
         assert env_file is not None
         log_env_file_state(self.writer, self.config.env_file, env_file)
         unsafe = next((w for w in env_file.warnings if w.code == "env_file_unsafe"), None)
-        if unsafe is not None:
+        if unsafe is not None and not any(w["code"] == "env_file_unsafe" for w in result.warnings):
             result.warnings.append(
                 {
                     "code": "env_file_unsafe",
                     "message": "env_file is not trusted and is treated as unavailable",
                 }
             )
+
+    def _spawn_one(self, claim: Claim, result: PassResult) -> None:
+        """One claim's spawn; its failure (a busy database, a database error) returns that job to
+        `queued` when it can and never stops the remaining claims."""
+        try:
+            self._spawn_shim(claim, result)
+        except LeaseLost:
+            raise
+        except (JobsctlError, sqlite3.Error) as exc:
+            try:
+                self._spawn_failed(
+                    claim, result, f"the shim could not be started ({type(exc).__name__})"
+                )
+            except LeaseLost:
+                raise
+            except (JobsctlError, sqlite3.Error):
+                pass  # the claim stays `starting`; reconcile (or the shim itself) deals with it
 
     def _spawn_shim(self, claim: Claim, result: PassResult) -> None:
         """Step 4 for one claim. The claim is committed; a failure returns the job to `queued`."""
@@ -303,7 +333,11 @@ class Runner:
             return
         with self.store.write() as tx:
             recorded = update_attempt_by_claim(
-                tx, claim.job_id, claim.claim_id, {"shim_identity": text}
+                tx,
+                claim.job_id,
+                claim.claim_id,
+                {"shim_identity": text},
+                job_status="starting",
             )
         if recorded:
             result.started.append(claim.job_id)
@@ -418,8 +452,8 @@ class Runner:
                 changed = self._seen is not None and counter_get(tx, PASS_REQUESTED) != self._seen
             if released and changed and self.config.auto_run:
                 self.children.append(Child(self.respawn_pass(0), "pass"))
-        except Exception:
-            return  # the lease expires; cron or the next trigger starts the work
+        except Exception as exc:  # the lease expires; cron or the next trigger starts the work
+            self._safely_warn(f"could not release the runner lease ({type(exc).__name__})")
 
     # -- helpers -------------------------------------------------------------------------------
 
@@ -430,6 +464,10 @@ class Runner:
                     record.event, level=record.level, fields=record.fields
                 )
             )
+
+    def _safely_warn(self, message: str) -> None:
+        sys.stderr.write(f"jobsctl: warning: {message}\n")
+        sys.stderr.flush()
 
     def _safely(self, action: Callable[[], object]) -> None:
         """Log without failing the pass: the work is committed, a log is best-effort."""

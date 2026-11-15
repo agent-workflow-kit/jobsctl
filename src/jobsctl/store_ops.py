@@ -194,16 +194,29 @@ def transition_job_by_claim(
     return True
 
 
-def update_attempt_by_claim(tx: Tx, job_id: str, claim_id: str, updates: Mapping[str, Any]) -> bool:
-    """Compare-and-set a write to the job's current attempt on ``claim_id`` (D27)."""
+def update_attempt_by_claim(
+    tx: Tx,
+    job_id: str,
+    claim_id: str,
+    updates: Mapping[str, Any],
+    *,
+    job_status: str | None = None,
+) -> bool:
+    """Compare-and-set a write to the job's current attempt on ``claim_id`` (D27); with
+    ``job_status``, only while the job is in that status (a job canceled meanwhile is not
+    written)."""
     sets, values = _assignments(tx.store, "attempts", updates, _ATTEMPT_FROZEN)
     if not sets:
         raise ValueError("no attempt columns to update")
-    cur = tx.execute(
+    sql = (
         f"UPDATE attempts SET {sets} WHERE job_id = ? AND claim_id = ? "
-        "AND n = (SELECT attempt FROM jobs WHERE id = ?)",
-        [*values, job_id, claim_id, job_id],
+        "AND n = (SELECT attempt FROM jobs WHERE id = ?)"
     )
+    params = [*values, job_id, claim_id, job_id]
+    if job_status is not None:
+        sql += " AND (SELECT status FROM jobs WHERE id = ?) = ?"
+        params += [job_id, job_status]
+    cur = tx.execute(sql, params)
     return cur.rowcount == 1
 
 

@@ -106,4 +106,5 @@ def request_delivery(
         holder = holder_of(tx.one(LEASE_COLUMNS, ["deliver"]), host, now)
     if holder is not None:
         return None
+    # TODO(#24): `_deliver` is not implemented yet; see the note in commands/internal.py.
     return spawn_internal(store.paths.root, config, config_path, "_deliver")

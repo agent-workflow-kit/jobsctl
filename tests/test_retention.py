@@ -224,6 +224,21 @@ def test_job_lease_row_is_deleted_and_other_leases_kept(store: Store) -> None:
     assert ids_in(store, "leases", "name") == {"runner", "deliver", f"job:{jid(9)}"}
 
 
+def test_the_lease_since_counter_of_a_pruned_job_is_deleted(store: Store) -> None:
+    add_job(store, jid(1))
+    with store.write() as tx:
+        for name in (
+            f"lease_since:job:{jid(1)}",
+            f"lease_since:job:{jid(9)}",
+            "lease_since:runner",
+        ):
+            tx.execute("INSERT INTO counters VALUES (?, 7)", [name])
+    run(store)
+    names = {r[0] for r in store.conn.execute("SELECT name FROM counters").fetchall()}
+    assert f"lease_since:job:{jid(1)}" not in names
+    assert {f"lease_since:job:{jid(9)}", "lease_since:runner"} <= names
+
+
 def test_counters_are_never_touched(store: Store) -> None:
     add_job(store, jid(1))
     with store.write() as tx:

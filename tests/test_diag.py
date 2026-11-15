@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from jobsctl.diag import MAX_BYTES, DiagFile, install
+from jobsctl.errors import JobsctlError
+from jobsctl.log_files import open_append
 
 
 def test_nothing_is_created_until_the_first_write(tmp_path: Path) -> None:
@@ -57,6 +59,19 @@ def test_a_symlink_is_not_followed_and_the_process_carries_on(tmp_path: Path) ->
     diag = DiagFile(link)
     assert diag.write("hello") == 5  # a refused file never fails the process
     assert target.read_text(encoding="utf-8") == "keep"
+
+
+def test_a_hard_linked_file_is_refused_before_it_is_written_or_chmodded(tmp_path: Path) -> None:
+    victim = tmp_path / "victim"
+    victim.write_text("keep", encoding="utf-8")
+    victim.chmod(0o644)
+    link = tmp_path / "d.log"
+    os.link(victim, link)
+    with pytest.raises(JobsctlError, match="unsafe"):
+        os.close(open_append(link))
+    assert DiagFile(link).write("hello") == 5  # the process carries on
+    assert victim.read_text(encoding="utf-8") == "keep"
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o644
 
 
 def test_a_missing_directory_is_survived(tmp_path: Path) -> None:

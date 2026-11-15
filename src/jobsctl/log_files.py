@@ -1,10 +1,11 @@
 """Opening and appending to ``log.jsonl`` and ``audit.jsonl`` (interface.md, Audit and log).
 
-The files are append-only, mode 0600, regular files owned by the user. A symlink, a FIFO or
-device, a directory or a foreign owner is refused (the same rules as ``state.db``); a file
-with group or other permissions is tightened. Appends happen under an exclusive ``flock`` that
-the caller holds from the sequence-number increment to the write (see ``log_writer``), so
-records are in ``seq`` order and one writer's line never interleaves with another's.
+The files are append-only, mode 0600, regular files owned by the user. A symlink, a hard-linked
+file, a FIFO or device, a directory or a foreign owner is refused (the same rules as
+``state.db``); a file with group or other permissions is tightened. Appends happen under an
+exclusive ``flock`` that the caller holds from the sequence-number increment to the write (see
+``log_writer``), so records are in ``seq`` order and one writer's line never interleaves with
+another's.
 """
 
 from __future__ import annotations
@@ -43,6 +44,8 @@ def open_append(path: Path) -> int:
             raise _unsafe(path, "not a regular file")
         if st.st_uid != os.geteuid():
             raise _unsafe(path, "owned by another user")
+        if st.st_nlink != 1:
+            raise _unsafe(path, "has more than one hard link")
         if stat.S_IMODE(st.st_mode) != 0o600:
             os.fchmod(fd, 0o600)  # also adds back owner bits a restrictive umask removed
     except OSError as exc:

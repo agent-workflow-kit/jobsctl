@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import signal
 import sys
 from collections.abc import Callable
@@ -13,10 +12,9 @@ from jobsctl.cli_output import print_json
 from jobsctl.cli_registry import Context, command
 from jobsctl.config import Config
 from jobsctl.config_files import load_config
-from jobsctl.diag import install
 from jobsctl.env_file import disable_dumpable
 from jobsctl.errors import JobsctlError
-from jobsctl.runner import PassResult, Runner
+from jobsctl.runner import LeaseLost, PassResult, Runner
 from jobsctl.store_db import OpenMode, Store
 from jobsctl.store_dir import resolve_state_dir
 from jobsctl.textsafe import sanitize
@@ -49,10 +47,7 @@ def _print(ctx: Context, result: PassResult) -> None:
 def run(ctx: Context) -> int:
     args = ctx.args
     disable_dumpable()
-    retried: int | None = args.triggered
-    if retried is not None:
-        # diagnostics of a triggered pass: diag/run-<pid>.log, created on the first write
-        install(resolve_state_dir() / "diag" / f"run-{os.getpid()}.log")
+    retried: int | None = args.triggered  # its diagnostics file is installed by the dispatcher
     store: Store | None = None
     runner: Runner | None = None
     try:
@@ -99,8 +94,16 @@ def _loop(ctx: Context, runner: Runner) -> int:
     try:
         while not stop:
             # TODO(#27): re-exec after an upgrade (a newer schema or a different installed version)
-            result = runner.run_pass(max_starts=ctx.args.max_starts)
-            _print(ctx, result)
+            try:
+                result = runner.run_pass(max_starts=ctx.args.max_starts)
+            except LeaseLost as err:
+                _pass_failed(err.message)
+            except JobsctlError as err:
+                if err.code != "busy":
+                    raise  # config_invalid and the like stay fatal
+                _pass_failed(err.message)
+            else:
+                _print(ctx, result)
             runner.reap(PassResult())
             _wait(interval, lambda: stop)
             if not stop:
@@ -109,6 +112,12 @@ def _loop(ctx: Context, runner: Runner) -> int:
         for number, handler in old.items():
             signal.signal(number, handler)
     return 0
+
+
+def _pass_failed(message: str) -> None:
+    """A pass of `--loop` that stopped on a busy database or a lost lease: the next one retries."""
+    sys.stderr.write(f"jobsctl: warning: pass failed ({message}); retrying after the interval\n")
+    sys.stderr.flush()
 
 
 def _wait(seconds: float, stopped: Callable[[], bool]) -> None:

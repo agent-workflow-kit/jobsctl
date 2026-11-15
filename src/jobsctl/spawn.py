@@ -46,5 +46,10 @@ def spawn_internal(
     python: str | None = None,
 ) -> subprocess.Popen[bytes]:
     env = dict(build_canonical_env(config, dict(os.environ)).values)
+    # The child resolves the state directory from XDG_STATE_HOME (canonical, always inherited) or
+    # HOME; pass HOME to jobsctl's own processes even when `env.inherit` omits it. Hooks and jobs
+    # do not get it from here.
+    if "HOME" in os.environ:
+        env.setdefault("HOME", os.environ["HOME"])
     argv = internal_argv(command, args, config_path, python=python)
     return gateway.spawn_detached(argv, env=env, cwd=str(state_dir))

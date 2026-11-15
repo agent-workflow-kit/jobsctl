@@ -74,7 +74,9 @@ def trigger_spawns(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureReque
         calls.append({"state_dir": state_dir, "config_path": config_path, "retried": retried})
         return _Done()
 
-    monkeypatch.setattr("jobsctl.triggers.spawn_pass", fake)
+    # every name the code reaches the spawn through: a respawn by an abandoned or busy pass too
+    for target in ("jobsctl.triggers", "jobsctl.runner", "jobsctl.commands.run"):
+        monkeypatch.setattr(f"{target}.spawn_pass", fake)
     return calls
 
 

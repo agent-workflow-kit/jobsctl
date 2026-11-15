@@ -297,6 +297,19 @@ def test_claim_based_transition_and_attempt_update(store: Store) -> None:
     assert row is not None and (row["status"], row["running_at"]) == ("running", LATER)
 
 
+def test_attempt_update_can_require_the_job_status(store: Store) -> None:
+    seed(store, status="canceled", attempt=1)
+    with store.write() as tx:
+        insert_row(tx, "attempts", attempt_values("jb-aaaaaaaa", 1, "claim-1"))
+        assert not update_attempt_by_claim(
+            tx, "jb-aaaaaaaa", "claim-1", {"note": "x"}, job_status="starting"
+        )
+        tx.execute("UPDATE jobs SET status = 'starting'")
+        assert update_attempt_by_claim(
+            tx, "jb-aaaaaaaa", "claim-1", {"note": "x"}, job_status="starting"
+        )
+
+
 def test_a_stale_shim_loses_against_a_new_claim(store: Store) -> None:
     """The attempt was requeued and claimed again: the old claim_id matches nothing."""
     seed(store, status="starting", attempt=1)

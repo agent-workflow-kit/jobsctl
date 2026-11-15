@@ -104,6 +104,7 @@ def delete_batch(tx: Tx, ids: list[str]) -> None:
     for job_id in ids:
         tx.execute("INSERT OR IGNORE INTO pruned_ids (id) VALUES (?)", [job_id])
         tx.execute("DELETE FROM leases WHERE name = ?", [f"job:{job_id}"])
+        tx.execute("DELETE FROM counters WHERE name = ?", [f"lease_since:job:{job_id}"])
         tx.execute("DELETE FROM jobs WHERE id = ?", [job_id])
 
 

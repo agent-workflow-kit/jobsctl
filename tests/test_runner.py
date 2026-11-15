@@ -24,6 +24,7 @@ from jobsctl.store_ops import counter_get, counter_incr, lease_since, take_lease
 from jobsctl.timestamps import format_timestamp
 from jobsctl.triggers import PASS_REQUESTED, request_pass
 from tests.conftest import validate_against, validate_record_file
+from tests.runner_fixtures import PassSpawns
 from tests.runner_helpers import (
     ShimKit,
     add_queued,
@@ -338,7 +339,7 @@ def test_an_error_in_a_step_releases_the_lease(store: Store, runners: list[Runne
 
 
 def test_an_abandoned_pass_passes_a_request_on(
-    store: Store, runners: list[Runner], spawned: list[dict[str, Any]]
+    store: Store, runners: list[Runner], trigger_spawns: PassSpawns
 ) -> None:
     runner = make_runner(runners, store)
 
@@ -352,8 +353,80 @@ def test_an_abandoned_pass_passes_a_request_on(
     runner.probe = probe
     with pytest.raises(RuntimeError):
         runner.run_pass()
-    (call,) = spawned
-    assert call["argv"][-4:] == ["run", "--quiet", "--triggered", "0"]
+    assert [c["retried"] for c in trigger_spawns] == [0]
+
+
+def test_a_pass_abandoned_before_its_first_claim_still_passes_a_request_on(
+    store: Store, runners: list[Runner], trigger_spawns: PassSpawns
+) -> None:
+    """The request arrives during reconcile; the step then fails with `busy`."""
+    runner = make_runner(runners, store)
+
+    def probe(step: str) -> None:
+        if step == "reconcile":
+            with Store.open(store.paths.root) as other:
+                request_pass(other, cfg(), None)
+            raise JobsctlError("busy", "state.db is busy")
+
+    runner.probe = probe
+    with pytest.raises(JobsctlError):
+        runner.run_pass()
+    assert lease_row(store) is None
+    assert [c["retried"] for c in trigger_spawns] == [0]
+
+
+def test_an_abandoned_pass_without_a_request_spawns_nothing(
+    store: Store, runners: list[Runner], trigger_spawns: PassSpawns
+) -> None:
+    runner = make_runner(runners, store)
+
+    def probe(step: str) -> None:
+        if step == "reconcile":
+            raise JobsctlError("busy", "state.db is busy")
+
+    runner.probe = probe
+    with pytest.raises(JobsctlError):
+        runner.run_pass()
+    assert trigger_spawns == []
+
+
+def test_a_release_that_fails_while_abandoning_is_warned_about(
+    store: Store, runners: list[Runner], capsys: pytest.CaptureFixture[str]
+) -> None:
+    runner = make_runner(runners, store)
+
+    def busy_write() -> Any:
+        raise JobsctlError("busy", "state.db is busy")
+
+    def probe(step: str) -> None:
+        if step == "reconcile":
+            runner.store = type("S", (), {"write": staticmethod(busy_write)})()  # type: ignore[assignment]
+            raise RuntimeError("boom")
+
+    runner.probe = probe
+    with pytest.raises(RuntimeError):
+        runner.run_pass()
+    assert "could not release the runner lease" in capsys.readouterr().err
+
+
+def test_a_lease_holder_that_vanishes_between_the_take_and_the_read_is_retaken(
+    store: Store, kit: ShimKit, runners: list[Runner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import jobsctl.runner as module
+
+    (job_id,) = job_ids(1)
+    add_queued(store, job_id)
+    real = module.take_lease
+    calls: list[int] = []
+
+    def flaky(*args: Any, **kwargs: Any) -> bool:
+        calls.append(1)
+        return False if len(calls) == 1 else real(*args, **kwargs)  # the first take loses a race
+
+    monkeypatch.setattr(module, "take_lease", flaky)
+    result = make_runner(runners, store, kit=kit).run_pass()  # no lease row exists to report
+    assert len(calls) == 2
+    assert not result.already_running and result.started == [job_id]
 
 
 # -- spawn failures and reaping ------------------------------------------------------------------
@@ -444,6 +517,76 @@ def test_a_confirmed_shim_that_exits_is_left_to_reconcile(
     result = runner.run_pass()
     assert result.reconciled == []
     assert job_row(store, job_id)["status"] == "starting"  # TODO(#22): shim_dead
+
+
+def test_a_busy_identity_write_of_one_claim_does_not_stop_the_others(
+    store: Store, kit: ShimKit, runners: list[Runner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import jobsctl.runner as module
+
+    first, second, third = job_ids(3)
+    for i, job_id in enumerate((first, second, third)):
+        add_queued(store, job_id, position=f"{i + 1:020d}")
+    real = module.update_attempt_by_claim
+
+    def flaky(tx: Any, job_id: str, *args: Any, **kwargs: Any) -> bool:
+        if job_id == first:
+            raise JobsctlError("busy", "state.db is busy")
+        return real(tx, job_id, *args, **kwargs)
+
+    monkeypatch.setattr(module, "update_attempt_by_claim", flaky)
+    runner = make_runner(runners, store, cfg(default_cap=None), kit=kit)
+    result = runner.run_pass()
+    assert result.started == [second, third]
+    assert job_row(store, first)["status"] == "queued"
+    assert job_row(store, first)["spawn_failures"] == 1
+    assert lease_row(store) is None
+
+
+def test_a_busy_failure_handler_leaves_the_claim_for_reconcile_and_goes_on(
+    store: Store, kit: ShimKit, runners: list[Runner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import jobsctl.runner as module
+
+    first, second = job_ids(2)
+    add_queued(store, first, position="1".zfill(20))
+    add_queued(store, second, position="2".zfill(20))
+    real = module.update_attempt_by_claim
+
+    def flaky(tx: Any, job_id: str, *args: Any, **kwargs: Any) -> bool:
+        if job_id == first:
+            raise JobsctlError("busy", "state.db is busy")
+        return real(tx, job_id, *args, **kwargs)
+
+    def failing(*args: Any, **kwargs: Any) -> Any:
+        raise JobsctlError("busy", "state.db is busy")
+
+    monkeypatch.setattr(module, "update_attempt_by_claim", flaky)
+    monkeypatch.setattr(module, "fail_spawn", failing)
+    result = make_runner(runners, store, cfg(default_cap=None), kit=kit).run_pass()
+    assert result.started == [second]
+    assert job_row(store, first)["status"] == "starting"
+
+
+def test_a_job_canceled_before_its_identity_is_recorded_is_not_reported_started(
+    store: Store, kit: ShimKit, runners: list[Runner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import jobsctl.runner as module
+
+    (job_id,) = job_ids(1)
+    add_queued(store, job_id)
+    real = module.identity_text
+
+    def cancel_meanwhile(host: Any, pid: int) -> str:
+        with store.write() as tx:
+            tx.execute("UPDATE jobs SET status = 'canceled' WHERE id = ?", [job_id])
+        return real(host, pid)
+
+    monkeypatch.setattr(module, "identity_text", cancel_meanwhile)
+    result = make_runner(runners, store, kit=kit).run_pass()
+    assert result.started == []
+    assert attempts_of(store, job_id)[0]["shim_identity"] is None
+    assert "shim_spawned" not in [e["event"] for e in log_events(store)]
 
 
 # -- the other steps -----------------------------------------------------------------------------
@@ -553,6 +696,30 @@ def test_an_untrusted_env_file_keeps_pass_env_jobs_queued_and_warns(
     assert "abc123secret" not in str(kit.record(plain)["env"])
 
 
+def test_the_env_file_warning_is_reported_once_per_pass_however_often_it_claims(
+    store: Store, kit: ShimKit, runners: list[Runner], tmp_path: Path
+) -> None:
+    (wants,) = job_ids(1)
+    add_queued(store, wants, pass_env='["TOKEN"]')
+    env_file = tmp_path / "secrets.env"
+    env_file.write_text("TOKEN=abc123secret\n", encoding="utf-8")
+    env_file.chmod(0o666)
+    runner = make_runner(runners, store, cfg(env_file=str(env_file)), kit=kit)
+    releases: list[str] = []
+
+    def probe(step: str) -> None:
+        if step == "release":
+            releases.append(step)
+            if len(releases) == 1:
+                with Store.open(store.paths.root) as other:
+                    request_pass(other, cfg(), None)  # a second claim iteration
+
+    runner.probe = probe
+    result = runner.run_pass()
+    assert len(releases) == 2
+    assert [w["code"] for w in result.warnings] == ["env_file_unsafe"]
+
+
 def test_the_pass_summary_is_logged_only_when_something_changed(
     store: Store, kit: ShimKit, runners: list[Runner]
 ) -> None:
@@ -589,3 +756,32 @@ def test_reaping_waits_for_exact_pids_never_for_any_child(
     runner.run_pass()
     assert waited and all(call[1][0] == pid for call in waited if call[0] == "waitpid")
     assert not [c for c in waited if c[0] == "waitid" and c[1][0] == os.P_ALL]
+
+
+# -- the spawn environment -----------------------------------------------------------------------
+
+
+def test_an_internal_process_always_gets_home_and_xdg_state_home(
+    store: Store, spawned: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `env.inherit` empty the child must still find the parent's state directory."""
+    from jobsctl.spawn import spawn_internal
+
+    monkeypatch.setenv("HOME", "/home/someone")
+    monkeypatch.setenv("XDG_STATE_HOME", "/somewhere/state")
+    monkeypatch.setenv("UNRELATED", "x")
+    spawn_internal(store.paths.root, cfg(env={"inherit": []}), None, "run")
+    (call,) = spawned
+    assert call["env"]["HOME"] == "/home/someone"
+    assert call["env"]["XDG_STATE_HOME"] == "/somewhere/state"
+    assert "UNRELATED" not in call["env"]
+
+
+def test_an_internal_process_gets_no_home_the_parent_lacks(
+    store: Store, spawned: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl.spawn import spawn_internal
+
+    monkeypatch.delenv("HOME", raising=False)
+    spawn_internal(store.paths.root, cfg(env={"inherit": []}), None, "run")
+    assert "HOME" not in spawned[0]["env"]
