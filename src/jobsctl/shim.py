@@ -132,6 +132,12 @@ class _StartState:
     identity: str = ""
 
 
+# A failing sequence step is logged on the first failure, then once per this many in a row.
+_STEP_FAILURE_LOG_EVERY = 30
+# Once the leader has exited, the shim gives up on a sequence after this many failures in a row.
+_STEP_FAILURE_LIMIT = 30
+
+
 @dataclass
 class _Job:
     """A started job: the unreaped leader, its pipe and what the shim keeps about it."""
@@ -143,6 +149,7 @@ class _Job:
     deadline: float | None = None  # monotonic time the timeout expires, from `running`
     seq: SignalSequence | None = None
     force_by: str | None = None  # a committed force request, seen at a flush
+    step_failures: int = 0  # consecutive failed sequence steps; a success resets it
 
 
 class Shim:
@@ -773,22 +780,32 @@ class Shim:
         if seq is None or seq.done:
             return
         if seq.started:
-            self._step(seq.advance)
+            self._step(job, seq.advance)
             return
         cause = self._due(job)
         if cause is None or _leader_exited(job.pid):
             return  # a leader that already exited ended on its own: nothing to signal
         self._diag(f"{cause}: running the signal sequence")
-        self._step(lambda: seq.start(cause))
-        self._step(seq.advance)
+        self._step(job, lambda: seq.start(cause))
+        self._step(job, seq.advance)
 
-    def _step(self, action: Callable[[], None]) -> None:
+    def _step(self, job: _Job, action: Callable[[], None]) -> None:
         """Run one step of the sequence. An error is logged and the step is retried at the next
-        tick: it must not end the pump (the job would then be left running unobserved)."""
+        tick: it must not end the pump (the job would then be left running unobserved). The
+        failure is logged first and then once per `_STEP_FAILURE_LOG_EVERY` consecutive failures;
+        `job.step_failures` counts them and a success resets it."""
         try:
             action()
         except Exception as exc:
-            self._diag(f"a signal sequence step failed ({type(exc).__name__}); retrying")
+            job.step_failures += 1
+            if job.step_failures % _STEP_FAILURE_LOG_EVERY == 1:
+                detail = str(exc)[:200]
+                self._diag(
+                    f"a signal sequence step failed ({type(exc).__name__}: {detail}); retrying"
+                    f" (failure {job.step_failures})"
+                )
+        else:
+            job.step_failures = 0
 
     def _finish_sequence(self, job: _Job, pump: Pump) -> None:
         """The leader exited while a sequence is under way: its group may still have members.
@@ -801,7 +818,13 @@ class Shim:
         while not seq.done:
             pump.pump_once()
             self._tick()
-            self._step(seq.advance)
+            self._step(job, seq.advance)
+            if job.step_failures >= _STEP_FAILURE_LIMIT:
+                self._diag(
+                    f"the signal sequence failed {job.step_failures} times in a row; giving up"
+                    " (the job has exited, so the shim ends it normally)"
+                )
+                return
 
     def _sequence_outcome(self, job: _Job) -> Outcome | None:
         seq = job.seq

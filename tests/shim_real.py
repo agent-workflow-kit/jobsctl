@@ -26,7 +26,7 @@ from jobsctl.config import Config
 from jobsctl.config_files import load_config
 from jobsctl.leases import identity_text, own_identity, parse_identity
 from jobsctl.proc_host import default_host
-from jobsctl.proc_identity import Identity, identify
+from jobsctl.proc_identity import Identity, check_identity, identify
 from jobsctl.proc_signal import signal_group, signal_process
 from jobsctl.spawn import spawn_internal
 from jobsctl.store_db import OpenMode, Store
@@ -130,7 +130,9 @@ class RealShims:
                 ident = parse_identity(row[key]) if row[key] else None
                 if ident is None:
                     continue
-                allow(ident.pid)  # recorded on the attempt; signaled only while the identity holds
+                if not check_identity(host, ident, allow_zombie=True).alive:
+                    continue  # gone or reused: the recorded pid is not ours to signal
+                allow(ident.pid)  # the recorded identity matches the live process
                 if key == "job_identity":
                     signal_group(host, ident, signal.SIGKILL, allow_zombie=True)
                 signal_process(host, ident, signal.SIGKILL, allow_zombie=True)
@@ -180,7 +182,9 @@ class JobGuard:
         for row in rows:
             ident = parse_identity(row["job_identity"]) if row["job_identity"] else None
             if ident is not None:
-                allow(ident.pid)  # recorded on the attempt; signaled only while the identity holds
+                if not check_identity(host, ident, allow_zombie=True).alive:
+                    continue  # gone or reused: the recorded pid is not ours to signal
+                allow(ident.pid)  # the recorded identity matches the live process
                 signal_group(host, ident, signal.SIGKILL, allow_zombie=True)
                 signal_process(host, ident, signal.SIGKILL, allow_zombie=True)
         for ident in self.extras:

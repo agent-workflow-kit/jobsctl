@@ -1,9 +1,11 @@
 """A test may signal only processes it started: anything else fails the test before the syscall.
 
 Allowed targets of a real signal: the test process itself, every PID of a `Popen` created during
-the test, PIDs a fixture registered (`allow`: what `JobGuard` and `RealShims` track, each also
-checked by recorded identity before it is signaled) and descendants of the test process. Signal 0
-passes. A test that really must signal something else carries `@pytest.mark.allow_any_kill`.
+the test, PIDs a fixture registered (`allow`: what `JobGuard` and `RealShims` track; a PID read
+back from the database is registered only after its recorded identity is confirmed against the
+live process, so the guard can catch a stale or reused PID) and descendants of the test process.
+Signal 0 passes. A test that really must signal something else carries
+`@pytest.mark.allow_any_kill`.
 """
 
 from __future__ import annotations

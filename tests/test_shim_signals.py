@@ -556,5 +556,64 @@ def test_an_error_in_a_sequence_step_is_logged_and_retried_not_fatal(
     assert make_shim(store).run() == 0
     assert (job(store)["status"], job(store)["reason"]) == ("failed", "timeout")
     err = capsys.readouterr().err
-    assert "a signal sequence step failed (RuntimeError)" in err
+    assert "a signal sequence step failed (RuntimeError: boom)" in err
     assert "the output pump failed" not in err
+
+
+class _AlwaysFailingSequence:
+    """A started sequence whose every step raises: no host is involved, nothing is signaled."""
+
+    started = True
+    done = False
+    cause = "timeout"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def advance(self) -> None:
+        self.calls += 1
+        raise RuntimeError("persistent failure detail")
+
+
+class _NoPump:
+    def pump_once(self) -> None:
+        return None
+
+
+def _failing_job(seq: _AlwaysFailingSequence) -> Any:
+    from jobsctl import shim as shim_module
+    from jobsctl.proc_identity import Identity
+
+    return shim_module._Job(None, 500, None, Identity("boot-1", 500, 1000), seq=seq)  # type: ignore[arg-type]
+
+
+def test_a_persistently_failing_step_after_the_leader_exited_gives_up_with_bounded_diags(
+    store: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed_claimed(store, ["true"])
+    shim = make_shim(store)
+    monkeypatch.setattr(shim, "_tick", lambda: None)
+    seq = _AlwaysFailingSequence()
+    shim._finish_sequence(_failing_job(seq), _NoPump())  # type: ignore[arg-type]
+    assert seq.calls == 30
+    lines = [x for x in capsys.readouterr().err.splitlines() if "signal sequence" in x]
+    assert len(lines) == 1 + 1  # the first failure, then the one line when giving up
+    assert "persistent failure detail" in lines[0]
+    assert "giving up" in lines[-1]
+
+
+def test_a_persistently_failing_step_while_the_job_runs_keeps_retrying_with_rate_limited_diags(
+    store: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed_claimed(store, ["true"])
+    shim = make_shim(store)
+    monkeypatch.setattr(shim, "_tick", lambda: None)
+    before = dict(job(store))
+    seq = _AlwaysFailingSequence()
+    running_job = _failing_job(seq)
+    for _ in range(100):
+        shim._tick_job(running_job)
+    assert seq.calls == 100  # never gives up while the leader may still run
+    lines = [x for x in capsys.readouterr().err.splitlines() if "signal sequence step" in x]
+    assert len(lines) == 4  # failures 1, 31, 61 and 91
+    assert dict(job(store)) == before  # the job record was not ended
