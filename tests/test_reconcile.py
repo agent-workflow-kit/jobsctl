@@ -6,6 +6,7 @@ asserts that reconcile itself sent no signal (`host.sent() == []`).
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import subprocess
@@ -603,12 +604,48 @@ def test_a_forged_result_file_end_time_is_clamped_to_now(rig: Rig, forged: str) 
     assert job(rig.store)["ended_at"] == ended
 
 
-def test_a_lost_outcome_keeps_the_reconcile_time(rig: Rig) -> None:
+def test_a_lost_outcome_keeps_the_reconcile_time(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = dt.datetime(2026, 3, 1, 12, 0, 0, tzinfo=dt.UTC)
+    monkeypatch.setattr(gateway, "utc_now", lambda: clock)
     running(rig)
     kill_shim(rig)
     kill_leader(rig)
+    write(rig, ended_at="2026-01-01T00:00:05.000Z").chmod(0o644)  # present, but unusable
+    assert rig.findings() == [("job_gone", "failed_lost")]
+    assert attempt(rig.store)["ended_at"] == "2026-03-01T12:00:00.000Z"
+
+
+def test_a_dry_run_carries_the_file_end_the_real_run_records(rig: Rig) -> None:
+    running(rig)
+    kill_shim(rig)
+    write(rig, ended_at="2026-01-01T00:00:05.000Z")
+    (step,) = rig.run(dry_run=True)
+    assert step.ended_at == "2026-01-01T00:00:05.000Z"
     rig.run()
-    assert attempt(rig.store)["ended_at"] >= "2026-06"  # now, not any file's time
+    assert attempt(rig.store)["ended_at"] == step.ended_at
+
+
+def test_a_dry_run_of_a_lost_outcome_carries_no_file_end(rig: Rig) -> None:
+    running(rig)
+    kill_shim(rig)
+    kill_leader(rig)
+    (step,) = rig.run(dry_run=True)
+    assert step.ended_at is None
+
+
+def test_the_cancel_projection_shows_the_file_end(rig: Rig) -> None:
+    from types import SimpleNamespace
+
+    from jobsctl import cancel_force
+
+    running(rig)
+    kill_shim(rig)
+    write(rig, ended_at="2026-01-01T00:00:05.000Z")
+    (step,) = rig.run(dry_run=True)
+    with rig.store.read() as tx:
+        op = SimpleNamespace(tx=tx, now="2026-06-01T00:00:00.000Z", config=Config(auto_run=False))
+        merged = cancel_force._projected(op, dict(job(rig.store)), [step])  # type: ignore[arg-type]
+    assert merged["ended_at"] == "2026-01-01T00:00:05.000Z"
 
 
 def test_a_file_with_loose_mode_is_ignored(rig: Rig) -> None:

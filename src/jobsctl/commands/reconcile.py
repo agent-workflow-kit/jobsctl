@@ -65,10 +65,13 @@ def _dry_run(ctx: Context) -> dict[str, Any]:
         )
         findings = [a.finding.as_json() for a in applied]
         with store.read() as tx:
-            for job_id in redeliverable_jobs(tx, host, gateway.utc_now()):
-                findings.append(
-                    {"job_id": job_id, "finding": "hooks_redelivered", "action": "redelivered"}
-                )
+            now = gateway.utc_now()
+            # The real run spawns `_deliver` (which redelivers) only without a live holder.
+            if holder_of(tx.one(LEASE_COLUMNS, ["deliver"]), host, now) is None:
+                for job_id in redeliverable_jobs(tx, host, now):
+                    findings.append(
+                        {"job_id": job_id, "finding": "hooks_redelivered", "action": "redelivered"}
+                    )
             if ctx.config.retention is not None:
                 for job_id in retention.candidates(
                     tx, gateway.utc_now(), ctx.config.retention, None

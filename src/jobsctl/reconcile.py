@@ -141,6 +141,7 @@ class Step:
     ended: bool = False  # the job is no longer `starting`/`running` (later rules skip it)
     frees_slot: bool = False
     result: ResultRecord | None = None  # a dry run: the result file the finding rests on
+    ended_at: str | None = None  # a dry run: the clamped file end the real run records
 
 
 # -- liveness -------------------------------------------------------------------------------------
@@ -489,8 +490,8 @@ class Reconciler:
             Finding(d.subject.job_id, d.finding, "kill_started"), [self._record(d, "kill_started")]
         )
 
-    def preview(self, d: Decision) -> Step:
-        """The finding a dry run reports for `d`, nothing written."""
+    def preview(self, d: Decision, tx: Tx, now: str) -> Step:
+        """The finding a dry run reports for `d`, nothing written (`tx`: a read transaction)."""
         s = d.subject
         forced = s.force_requested_by is not None and d.kind == "lost_running"
         if d.kind == "result":
@@ -498,7 +499,11 @@ class Reconciler:
         action = self.action(d, forced=forced)
         ended = d.kind in ("result", "lost_running", "lost_starting", "requeue")
         return Step(
-            Finding(s.job_id, d.finding, action), ended=ended, frees_slot=ended, result=d.result
+            Finding(s.job_id, d.finding, action),
+            ended=ended,
+            frees_slot=ended,
+            result=d.result,
+            ended_at=self._file_end(tx, d, now),
         )
 
 
@@ -596,10 +601,10 @@ def _one(
 ) -> Step | None:
     with read() as rtx:
         decision = reconciler.decide(rule, s, rtx.one, clock())
+        if decision is not None and dry_run:
+            return reconciler.preview(decision, rtx, now_text(clock))
     if decision is None:
         return None
-    if dry_run:
-        return reconciler.preview(decision)
     if decision.kind == "kill":
         return reconciler.start_kill(decision, children)
     with write() as tx:
@@ -637,7 +642,10 @@ def reconcile_job(
         decision = reconciler.decide(rule, s, tx.one, clock_now)
         if decision is None:
             continue
-        result = reconciler.preview(decision) if not write else reconciler.apply(tx, decision, now)
+        if write:
+            result = reconciler.apply(tx, decision, now)
+        else:
+            result = reconciler.preview(decision, tx, now)
         if result is None:
             continue
         applied.append(result)

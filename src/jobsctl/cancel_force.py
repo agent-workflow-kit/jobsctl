@@ -103,7 +103,9 @@ def _projected(op: Op, row: sqlite3.Row, applied: list[Step]) -> dict[str, Any]:
     return merged
 
 
-def _failed_or_requeued(op: Op, row: sqlite3.Row, reason: str) -> dict[str, Any]:
+def _failed_or_requeued(
+    op: Op, row: sqlite3.Row, reason: str, ended_at: str | None = None
+) -> dict[str, Any]:
     """The end of a failed attempt as the real run gives it: requeued with `not_before` when
     automatic retry applies (`plan_requeue`, read-only), else `failed`."""
     assert op.tx is not None
@@ -119,7 +121,7 @@ def _failed_or_requeued(op: Op, row: sqlite3.Row, reason: str) -> dict[str, Any]
     )
     if plan is not None:
         return {"status": "queued", **plan}
-    return {"status": "failed", "reason": reason, "ended_at": op.now}
+    return {"status": "failed", "reason": reason, "ended_at": ended_at or op.now}
 
 
 def _from_result(op: Op, row: sqlite3.Row, item: Step) -> dict[str, Any]:
@@ -129,14 +131,15 @@ def _from_result(op: Op, row: sqlite3.Row, item: Step) -> dict[str, Any]:
     if record is None:
         return {}
     if _force_requested(op, row):
-        return {"status": "canceled", "reason": "forced", "hold_reason": None, "ended_at": op.now}
+        end = item.ended_at or op.now
+        return {"status": "canceled", "reason": "forced", "hold_reason": None, "ended_at": end}
     if record.status == "failed" and record.reason is not None:
-        return _failed_or_requeued(op, row, record.reason)
+        return _failed_or_requeued(op, row, record.reason, item.ended_at)
     return {
         "status": record.status,
         "reason": record.reason,
         "hold_reason": record.hold_reason,
-        "ended_at": op.now if record.status != "held" else row["ended_at"],
+        "ended_at": (item.ended_at or op.now) if record.status != "held" else row["ended_at"],
     }
 
 

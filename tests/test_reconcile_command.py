@@ -290,6 +290,28 @@ def test_a_job_with_a_live_lease_holder_is_not_redelivered(
     assert findings(reconcile(capsys)) == []
 
 
+def test_a_dry_run_reports_no_redelivery_while_a_deliver_holder_lives(
+    capsys: pytest.CaptureFixture[str], children: list[subprocess.Popen[bytes]]
+) -> None:
+    job_id = add_job(capsys)
+    make_done(job_id, "failed")
+    sql("UPDATE jobs SET ended_at = ? WHERE id = ?", format_timestamp(gateway.utc_now()), job_id)
+    sql(
+        "INSERT INTO hook_outbox (event_id, job_id, hook, payload, async, created_at) "
+        "VALUES ('e1', ?, 'post-fail', '{}', 0, '2026-01-01T00:00:00.000Z')",
+        job_id,
+    )
+    assert findings(reconcile(capsys, "--dry-run")) == [("hooks_redelivered", "redelivered")]
+    _, live = start(children)
+    with Store.open(mode=OpenMode.CLI) as store:
+        now = gateway.utc_now()
+        take_lease(
+            store, "deliver", live, now=format_timestamp(now), expires_at=expiry(now),
+            is_alive=lambda h: False,
+        )  # fmt: skip
+    assert findings(reconcile(capsys, "--dry-run")) == []
+
+
 # -- the pass ----------------------------------------------------------------------------------
 
 
