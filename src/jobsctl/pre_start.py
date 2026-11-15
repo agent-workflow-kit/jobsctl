@@ -141,11 +141,8 @@ class PreStart:
         tally = _Tally()
         for chosen in selected:
             self._read_failing_since = None  # the unreadable-row timer is per hook
-            early = self._stop_reason()
-            if early in ("canceled", "internal"):
-                return self._cut_short(
-                    tally, Verdict.GONE if early == "canceled" else Verdict.INTERNAL
-                )
+            if self._stop_reason() == "canceled":
+                return self._cut_short(tally, Verdict.GONE)
             event_id = pre_start_event_id(self.claim_id, chosen.index)
             payload = build_payload(
                 HOOK,
