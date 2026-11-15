@@ -377,7 +377,9 @@ When the [timeout](#timeouts) expires the shim runs the sequence and ends the jo
 2. If the job's PID is still alive, or processes remain in the job's process group: SIGTERM to the job's process group.
 3. SIGKILL to the job's process group (and to the job's PID if it left the group).
 
-The shim keeps the job's group leader unreaped until the sequence and the leftover probe are done, so the process group id stays reserved and verifiable on every platform. Group signals are sent only to the process group the shim created for the job, and only while it is verified to be that group. Processes other than the job's own PID that left the group (e.g. a tmux server, which daemonizes into its own session) are never signaled.
+The shim keeps the job's group leader unreaped until the sequence and the leftover probe are done, so the process group id stays reserved and verifiable on every platform. Group signals are sent only to the process group the shim created for the job, and only while the leader's identity is verified.
+
+The group is addressed by the leader's PID while the leader's identity holds, even after the leader left the group, because the leader's PID stays reserved. Processes other than the job's own PID that left the group (e.g. a tmux server, which daemonizes into its own session) are never signaled.
 
 **Exact signals.** On Linux every signal that a jobsctl process (a shim, `_kill`, `cancel`, the firing process of a hook) sends to an exact PID (a shim, a job, a hook's leader) goes through `pidfd_open`, then an identity check of the pidfd's process ([Process identity](#process-identity)), then `pidfd_send_signal`. Where pidfds are unavailable (macOS; on Linux, an architecture outside the allow list of the system-call fallback, `ENOSYS`, `EPERM` from a seccomp filter, WSL1), jobsctl re-checks the identity immediately before `kill` or `killpg` and accepts the remaining window ([Residual risks](#residual-risks)).
 
@@ -407,6 +409,8 @@ A process identity is `(boot_id, pid, start)`:
 - **macOS:** `boot_id` from `sysctl kern.bootsessionuuid`; `start` from `proc_pidinfo(PROC_PIDTBSDINFO)` (seconds and microseconds) through `libproc`; never `ps` output.
 
 A process is alive only if a process with that PID exists in the current boot with the same start value. A zombie counts as not alive, except a job leader the shim keeps unreaped ([Signal sequence](#signal-sequence)). Wall-clock time is never used for identity.
+
+A zombie is a process in state `Z` with no live threads: a thread-group leader whose main thread exited while other threads run is alive. A PID recorded as an identity must be a thread-group leader, not a thread ID.
 
 ### Leases
 
@@ -613,6 +617,8 @@ A duration is `<integer><unit>` with unit `s`, `m`, `h` or `d` (e.g. `30s`, `10m
 
 Every timestamp is RFC 3339 in UTC with `Z` and millisecond precision (e.g. `2026-10-31T12:00:00.000Z`).
 
+A timestamp given as input (e.g. `export --since`) is RFC 3339 with `T` or `t`, with `Z`, `z` or a `+hh:mm`/`-hh:mm` offset, and an optional fraction of 1 to 9 digits; it is converted to UTC. A leap second (`:60`) is refused with `usage`.
+
 ## Global flags
 
 | Flag | Meaning |
@@ -792,7 +798,17 @@ An audit record's `inputs` carry `overrides` only for a `retry` whose flags chan
 
 `argv_sha256` is SHA-256 over each argv element in UTF-8 followed by a NUL byte. Every record carries `seq` from a per-file counter in `state.db`: the writer takes an exclusive `flock` on the file, increments the counter in its own short transaction, appends the line and releases the lock, so records appear in file order and `seq` has gaps only after a crash; the counter survives external rotation. No process appends to either file inside a database write transaction: it logs after the commit. Levels: `info`, `warn`, `error`. jobsctl does not rotate either file; audit records are kept forever (architecture §14).
 
-Neither file contains a `--pass-env` value, an `env_file` value, argv, raw hook output or output tails; `--env` values (non-secret by contract) are not logged either, only their names. Other secret values are masked; masking is best-effort ([Residual risks](#residual-risks)).
+Neither file contains a `--pass-env` value, an `env_file` value, argv, raw hook output or output tails; `--env` values (non-secret by contract) are not logged either, only their names. Other secret values are masked; masking is best-effort ([Residual risks](#residual-risks)). Masking applies to the free text of log records (`message`, `stderr`, `hook_id` and every key and string in `details`); identifier, enum and number fields, and so every audit field, are checked against the schema and written as given. Identifier fields (`job_id`, `queue`, `actor`, `decision_ids`, `target`, ...) must match their grammars or the record is refused (`internal`); a raw user-supplied value that may not match (such as the selector of `unknown_queue_selector`) goes in `details`.
+
+`details` and audit `inputs` never carry a key named `argv`, `env`, `pass_env`, `env_file`, `environ`, `environment`, `value`, `values`, `secret`, `output`, `tail`, `stdout` or `stderr` at any depth: keys are compared after dropping terminal escapes and control, format, bidirectional and separator characters, NFKC normalization, case folding and stripping surrounding whitespace, with `-` the same as `_`, and a record with such a key is refused (`internal`). This is a heuristic backstop; callers own what they pass. Two `details` keys that become the same text after masking and sanitizing are both kept: the later ones (in the caller's order) get `~2`, `~3`, ... appended.
+
+Both files are regular files owned by the user with mode 0600 ("public" means part of the interface, not world-readable): jobsctl creates them 0600, sets an existing file with any other mode to 0600, and refuses (`internal`) a symlink, a FIFO or device, a directory or a file owned by another user; `export` refuses the same without changing the mode. Audit appends are synced to disk (`fsync`) before the writer returns; log appends are not. A writer waits for the file's lock without a deadline, so a stopped lock holder delays every other writer of that file until it continues or exits.
+
+A failed append that the writer survives cuts the file back to its earlier length when the file is still longer, never extending it, and gives its `seq` back; a fragment left behind when the file was truncated externally in the meantime is terminated by the next append and skipped by `export`; a gap appears only when a process dies between taking a `seq` and writing its line (or cannot give the number back). A last line without a newline (a crashed append) is terminated with a newline before the next append. `export` skips blank lines, lines that are not JSON objects with an integer `seq` of at least 1 and a valid `ts`, lines with `NaN`, `Infinity` or a number JSON cannot hold (such as `1e999` or an integer of more than 4300 digits), lines over 256 KiB and a last line without a newline. Records are ASCII-only JSON, one per line; `export` re-serializes each record it prints as compact ASCII-only JSON.
+
+A record is at most 256 KiB serialized. A log record over the limit loses its `details`, replaced by `{"truncated": true}`; `message` and `hook_id` are clipped to 4096 characters and `stderr` to 2048, ending in `...`. An audit record over the limit is refused (`internal`) without taking a `seq`, so a caller splits a batch that would exceed it, such as a large `prune`, into several records, one per sub-batch.
+
+The last state of each once-per-state warning is kept in `state.db`; a writer records the new state before it appends the warning. A failed append that the writer survives puts the earlier state back, so the next load logs the warning; an error after the line was written keeps the state, so the warning is not logged twice; a crash between recording and appending loses the warning rather than repeating it. A concurrent caller with the same state that finds the state already recorded does not log, so if the first writer's append then fails the warning is logged on the next load after the restore.
 
 ## TUI
 
@@ -808,6 +824,7 @@ Every TUI action is a CLI command.
 
 - **Linux and WSL:** identity from `/proc` ([Process identity](#process-identity)); the shim is a child subreaper; exact signals use pidfds where available ([Signal sequence](#signal-sequence)), and a `shim_lost` group signal uses `PIDFD_SIGNAL_PROCESS_GROUP` on Linux 6.9 or later ([Signal sequence](#signal-sequence)). Shutting down the WSL VM ends every shim and job; the next pass sees a new boot id and marks their jobs `lost`. A shutdown or a logout with `KillUserProcesses` sends SIGTERM to the shims, so their jobs end `failed` (`terminated`). Cron runs only if the distribution runs `cron`.
 - **macOS:** identity through `libproc` and `sysctl` (`kern.bootsessionuuid`); no subreaper, so [leftovers](#leftovers) are counted only by probing the job's process group; no pidfds, so signals to processes jobsctl did not spawn are checked immediately before sending, and `PR_SET_DUMPABLE` does not exist.
+- **Hidden `/proc`:** with `hidepid=2` (or `invisible`) on `/proc`, other users' processes are inconclusive, never dead: a missing `/proc/<pid>` reads as unknown and a group probe is incomplete.
 - **Cron:** cron's environment is minimal and its `python3` may be older than 3.12; [`cron install`](#cron-install--cron-uninstall) writes the absolute path of `jobsctl`, an explicit `PATH` and the `XDG_*` directories set at install.
 - **Requirements:** Python ≥ 3.12; SQLite ≥ 3.35.
 
