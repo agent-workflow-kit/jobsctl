@@ -10,7 +10,8 @@ built from the row with the changes merged in; nothing is written.
 
 A changed `release` and a `cancel` that ended a `starting` job free a start: the commands
 request a pass after the commit (`Applied.previous_status`, `triggers.request_pass_from_command`).
-TODO(#15): the shim reacts to a `starting` job canceled under it (stops its hook, delivers).
+The shim reacts to a `starting` job canceled under it (`shim.py`, "Still starting?"): it spawns
+nothing, runs no further hook (TODO(#25): stops a running one) and exits (TODO(#24): delivers).
 TODO(#24): hook delivery (the synchronous hooks of `hold` and `cancel` run after the commit).
 """
 

@@ -86,3 +86,7 @@ def test_exit_record_json_round_trip() -> None:
     rec = ExitRecord("signaled", signal=9, core=True)
     assert ExitRecord.from_json(rec.as_json()) == rec
     assert rec.as_json() == {"kind": "signaled", "code": None, "signal": 9, "core": True}
+
+
+def test_an_unobserved_exit_is_lost() -> None:
+    assert natural_outcome(ExitRecord("unknown")) == Outcome("failed", "lost")

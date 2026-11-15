@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -545,3 +546,124 @@ def test_a_committed_force_request_makes_the_end_canceled_forced_whatever_the_ex
     assert (row["status"], row["reason"]) == ("canceled", "forced")
     assert exit_of(store)["kind"] == "exited"  # type: ignore[index]  # the observed exit stays
     assert attempt(store)["force_requested_by"] == "human:me"
+
+
+def test_a_job_canceled_while_the_shim_waits_for_the_lease_is_never_started(
+    store: Store, sleeper: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancel racing the start sequence: the shim confirmed, waits for `job:<id>`, the job is
+    canceled, the lease is released; the shim re-reads, spawns nothing and exits."""
+    from jobsctl import gateway
+    from jobsctl.store_ops import lease_release, take_lease
+
+    spawned: list[object] = []
+    monkeypatch.setattr(gateway, "spawn_job", lambda *a, **k: spawned.append(1))
+    seed_claimed(store, ["true"])
+    take_lease(
+        store, f"job:{JOB}", sleeper, now="2026-01-01T00:00:00.000Z",
+        expires_at="2099-01-01T00:00:00.000Z", is_alive=lambda h: None,
+    )  # fmt: skip
+
+    def cancel_then_release() -> None:
+        time.sleep(0.5)
+        with Store.open() as other, other.write() as tx:
+            tx.execute(
+                "UPDATE jobs SET status = 'canceled', reason = 'canceled', ended_at = ? "
+                "WHERE id = ?",
+                ["2026-01-01T00:00:00.000Z", JOB],
+            )
+            lease_release(tx, f"job:{JOB}", sleeper)
+
+    t = threading.Thread(target=cancel_then_release)
+    t.start()
+    assert make_shim(store).run() == 0
+    t.join()
+    assert spawned == []
+    row = job(store)
+    assert (row["status"], row["reason"]) == ("canceled", "canceled")
+    assert attempt(store)["effective"] is None and attempt(store)["running_at"] is None
+    assert store.query_one("SELECT 1 FROM leases WHERE name = ?", [f"job:{JOB}"]) is None
+
+
+def test_the_job_leader_is_reaped_after_the_final_commit_and_returncode_is_set(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spike C2: the leader is held unreaped (`WNOWAIT`) through the probe and the commit, and
+    `Popen.returncode` is set by the manual reap so a later `wait()` does not fail."""
+    from jobsctl import shim as shim_module
+
+    seed_claimed(store, ["sh", "-c", "exit 7"])
+    states: list[tuple[str, int | None]] = []
+    real_finish = shim_module.finish_running
+    real_reap = shim_module.reap_held_leader
+    popens: list[object] = []
+
+    def finish_spy(*args: object, **kwargs: object) -> object:
+        # at the final commit the leader is still an unreaped zombie child of this process
+        states.append(("at-commit", _zombie_state(popens[0].pid)))  # type: ignore[attr-defined]
+        return real_finish(*args, **kwargs)  # type: ignore[arg-type]
+
+    def reap_spy(popen: object) -> int | None:
+        popens.append(popen)
+        out = real_reap(popen)  # type: ignore[arg-type]
+        states.append(("reaped", popen.returncode))  # type: ignore[attr-defined]
+        return out
+
+    monkeypatch.setattr(shim_module, "finish_running", finish_spy)
+    # the reap comes after the commit; record the popen at spawn time instead
+    from jobsctl import gateway
+
+    real_spawn = gateway.spawn_job
+
+    def spawn_spy(*args: object, **kwargs: object) -> object:
+        popen = real_spawn(*args, **kwargs)  # type: ignore[arg-type]
+        popens.append(popen)
+        return popen
+
+    monkeypatch.setattr(gateway, "spawn_job", spawn_spy)
+    monkeypatch.setattr(shim_module, "reap_held_leader", reap_spy)
+    make_shim(store).run()
+    assert ("at-commit", ord("Z")) in states
+    assert ("reaped", 7) in states
+    with pytest.raises(ChildProcessError):
+        os.waitpid(popens[0].pid, os.WNOHANG)  # type: ignore[attr-defined]
+
+
+def _zombie_state(pid: int) -> int | None:
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    return ord(text.rsplit(")", 1)[1].split()[0])
+
+
+def test_a_job_spawned_but_not_recorded_is_killed_so_no_unknown_process_runs(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If anything fails between the spawn and the commit of `running`, the transaction rolls back
+    and the shim kills the group it just created (its unreaped child): no process runs that the
+    database does not know."""
+    from jobsctl import gateway
+    from jobsctl import shim as shim_module
+
+    seed_claimed(store, ["sleep", "60"])
+    spawned: list[object] = []
+    real_spawn = gateway.spawn_job
+
+    def spawn_spy(*args: object, **kwargs: object) -> object:
+        popen = real_spawn(*args, **kwargs)  # type: ignore[arg-type]
+        spawned.append(popen)
+        return popen
+
+    def boom(*args: object, **kwargs: object) -> str:
+        raise OSError("cannot read the identity")
+
+    monkeypatch.setattr(gateway, "spawn_job", spawn_spy)
+    monkeypatch.setattr(shim_module, "identity_text", boom)
+    with pytest.raises(OSError):
+        make_shim(store).run()
+    (popen,) = spawned
+    assert popen.returncode is not None  # type: ignore[attr-defined]  # killed and reaped
+    assert popen.returncode == -signal.SIGKILL  # type: ignore[attr-defined]
+    row = job(store)
+    assert row["status"] == "starting" and attempt(store)["running_at"] is None

@@ -89,7 +89,17 @@ def _noop_handler(signum: int, frame: object) -> None:
     return None
 
 
-def prepare_process(shim: Shim) -> None:
+class StopSignal:
+    """SIGTERM, recorded by the handler and looked at by the loops."""
+
+    def __init__(self) -> None:
+        self.is_set = False
+
+    def set(self) -> None:
+        self.is_set = True
+
+
+def prepare_process(stop: StopSignal) -> None:
     """Start sequence step 1. SIGHUP and SIGINT are *handled* by a function that does nothing
     rather than set to `SIG_IGN`: the shim ignores them either way, but an ignored signal stays
     ignored across `exec`, so the job would inherit it (`gateway.spawn_job`). SIGPIPE is ignored
@@ -98,7 +108,7 @@ def prepare_process(shim: Shim) -> None:
     signal.signal(signal.SIGHUP, _noop_handler)
     signal.signal(signal.SIGINT, _noop_handler)
     signal.signal(signal.SIGPIPE, signal.SIG_IGN)
-    signal.signal(signal.SIGTERM, lambda signum, frame: shim.request_stop())
+    signal.signal(signal.SIGTERM, lambda signum, frame: stop.set())
     set_child_subreaper(True)
     set_undumpable()
 
@@ -125,6 +135,7 @@ class Shim:
         host: Host | None = None,
         clock: Callable[[], Any] = gateway.utc_now,
         environ: Mapping[str, str] | None = None,
+        stop: StopSignal | None = None,
     ) -> None:
         self.store = store
         self.config = config
@@ -136,7 +147,7 @@ class Shim:
         self.clock = clock
         self.environ = os.environ if environ is None else environ
         self.writer = RecordWriter(store, clock=clock)
-        self.terminated = False
+        self.stop = stop or StopSignal()
         self._ident = ""
         self._lease = f"job:{job_id}"
         self._lease_held = False
@@ -145,9 +156,13 @@ class Shim:
 
     # -- helpers -------------------------------------------------------------------------------
 
+    @property
+    def terminated(self) -> bool:
+        return self.stop.is_set
+
     def request_stop(self) -> None:
         """SIGTERM: recorded here, acted on at the loops' next look."""
-        self.terminated = True
+        self.stop.set()
 
     def _now(self) -> str:
         return format_timestamp(self.clock())
@@ -198,6 +213,7 @@ class Shim:
             except (JobsctlError, sqlite3.Error):
                 if gateway.monotonic() + delay >= deadline:
                     raise
+                self._tick()
                 gateway.sleep(delay)
                 delay = min(delay * 2, BACKOFF_MAX)
 
@@ -285,6 +301,7 @@ class Shim:
             # the claim changed under us (canceled, requeued): look again, then exit
             if read_claim(self.store, self.job_id, self.claim_id) is None:
                 return None
+            gateway.sleep(POLL_SECONDS)
         return None
 
     def _still_starting(self) -> ClaimView | None:
@@ -317,6 +334,7 @@ class Shim:
                 message="the shim could not load its config",
                 error=self.config_error.code,
             )
+            self._diag(f"config error ({self.config_error.code}); ending the job spawn_failed")
             self._fail(view, "spawn_failed", exit_record=None)
             return 0
         effective = effective_snapshot(self.config, view.row)
@@ -524,16 +542,16 @@ class Shim:
             periodic=lambda: self._flush(job),
             tick=self._tick,
         )
+        record: ExitRecord
         try:
             waited = pump.run()
             pump.drain()
+            record = exit_record(waited.si_code, waited.si_status)
         except Exception as exc:  # a programming error must not orphan the job's bookkeeping
             self._diag(f"the output pump failed ({type(exc).__name__}); waiting for the job")
-            waited = gateway_proc.waitid_nowait(job.pid)
-            assert waited is not None
+            record = self._wait_blind(job)
         if self.terminated:
             self._diag("SIGTERM received; the job has exited and its end is unchanged")
-        record = exit_record(waited.si_code, waited.si_status)
         leftovers = count_leftovers(
             self.host, leader_pid=job.pid, pgid=job.pid, own_pid=os.getpid()
         )
@@ -550,6 +568,16 @@ class Shim:
         self._delete_result(view)
         # TODO(#24): deliver this job's undelivered events, the post hooks included.
         return 0
+
+    def _wait_blind(self, job: _Job) -> ExitRecord:
+        """After a pump failure: wait for the leader (unreaped), without capturing output. If its
+        status cannot be read either, no exit status was observed (`unknown`)."""
+        try:
+            waited = gateway_proc.waitid_nowait(job.pid)
+            assert waited is not None
+            return exit_record(waited.si_code, waited.si_status)
+        except Exception:
+            return ExitRecord("unknown")
 
     def _flush(self, job: _Job) -> None:
         """Every `tail_flush_interval`: write the live tail and read the force request."""

@@ -5,7 +5,7 @@ from __future__ import annotations
 from jobsctl.cli_registry import Context, command
 from jobsctl.diag import install
 from jobsctl.env_file import disable_dumpable
-from jobsctl.shim import Shim, prepare_process
+from jobsctl.shim import Shim, StopSignal, prepare_process
 from jobsctl.store_db import OpenMode, Store
 from jobsctl.store_dir import resolve_state_dir
 
@@ -21,6 +21,8 @@ def shim(ctx: Context) -> int:
     knows makes `Store.open` raise before anything is written (Upgrades)."""
     disable_dumpable()
     install(resolve_state_dir() / "shims" / f"{ctx.args.id}.log")
+    stop = StopSignal()
+    prepare_process(stop)  # Start sequence step 1, before anything else is done
     with Store.open(mode=OpenMode.INTERNAL, busy_timeout=ctx.config.busy_timeout) as store:
         running = Shim(
             store,
@@ -29,6 +31,6 @@ def shim(ctx: Context) -> int:
             ctx.args.id,
             ctx.args.claim_id,
             config_error=ctx.config_error,
+            stop=stop,
         )
-        prepare_process(running)
         return running.run()

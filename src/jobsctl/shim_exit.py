@@ -64,6 +64,8 @@ def exit_record(si_code: int, si_status: int) -> ExitRecord:
 
 def natural_outcome(record: ExitRecord) -> Outcome:
     """The end of a job that exited or died on its own (no timeout, no force request)."""
+    if record.kind == "unknown":  # no exit status was observed
+        return Outcome("failed", "lost")
     if record.kind == "signaled":
         return Outcome("failed", "signaled")
     if record.code == 0:

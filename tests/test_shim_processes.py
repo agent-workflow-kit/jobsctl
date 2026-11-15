@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from jobsctl.config import Config
+from jobsctl.config_files import load_config
 from jobsctl.proc_host import default_host
 from jobsctl.proc_identity import Liveness, check_identity
 from jobsctl.runner import PassResult, Runner
@@ -239,3 +240,33 @@ def test_passes_and_real_shims_run_a_queue_to_completion_within_the_cap(
         assert counts == {"done": 5}
     assert 1 <= peak <= 2
     assert outputs == {job_id: f"{job_id}\n" for job_id in ids}
+
+
+def test_a_failure_before_the_job_starts_leaves_a_private_diagnostics_file_without_values(
+    real_shims: RealShims,
+) -> None:
+    popen = real_shims.seed_and_spawn(["no-such-command-xyz", "--token=hunter2-hunter2"])
+    real_shims.wait_status("failed")
+    assert popen.wait(timeout=60) == 0
+    log = shims_dir() / f"{JOB}.log"
+    assert oct(log.stat().st_mode & 0o777) == "0o600"
+    text = log.read_text()
+    assert "argv[0]" in text and "hunter2" not in text
+
+
+def test_a_real_job_gets_no_home_when_the_config_does_not_inherit_it(
+    real_shims: RealShims, tmp_path: Path
+) -> None:
+    """HOME is passed to jobsctl's own internal processes only (Internal processes): the shim has
+    it, the job does not unless `env.inherit` lists it."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(json.dumps({"env": {"inherit": ["PATH"]}, "auto_run": False}))
+    real_shims.config_path = cfg
+    real_shims.config = load_config(cfg)
+    popen = real_shims.seed_and_spawn(["env"])
+    real_shims.wait_status("done")
+    assert popen.wait(timeout=60) == 0
+    row = real_shims.row("SELECT tail FROM outputs WHERE job_id = ?", JOB)
+    names = {line.split("=", 1)[0] for line in bytes(row["tail"]).decode().splitlines()}
+    assert "HOME" not in names and "XDG_STATE_HOME" not in names
+    assert {"PATH", "JOBSCTL_JOB_ID", "JOBSCTL_ATTEMPT"} <= names
