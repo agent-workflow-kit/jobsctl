@@ -250,7 +250,8 @@ def finish_running(
     events in one commit. It reads `force_requested_by`: a committed force request makes the end
     `canceled` (`forced`) whatever the exit (interface.md, Status transitions).
 
-    TODO(#19): `outcome` for a timeout or a signal sequence the shim ran (`timeout`, `terminated`).
+    `outcome` is what the shim decided: the exit's natural outcome, or `timeout` / `terminated` when
+    its signal sequence ran. The force request read here overrides it.
     TODO(#18): a retryable failure returns the job to `queued` with `not_before`.
     """
     with store.write() as tx:

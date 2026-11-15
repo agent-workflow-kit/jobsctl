@@ -12,8 +12,9 @@
 10. delivery of the job's events (seam, TODO(#24)).
 
 Every write is a compare-and-set on the attempt's `claim_id` (`shim_store`). The shim signals
-nothing in this issue except the group it just created when the start cannot be recorded: the
-signal sequence, the timeout and the force-request reaction are the seams marked `TODO(#19)`.
+only the job it started: the group it just created when the start cannot be recorded, and the
+signal sequence (`shim_signals`) that a timeout, a committed force request or its own SIGTERM
+starts while the job runs.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from jobsctl import gateway, gateway_proc
 from jobsctl.argv_resolve import resolve_argv0
 from jobsctl.claims import LogRecord
 from jobsctl.config import Config
+from jobsctl.durations import parse_duration
 from jobsctl.env_canonical import build_canonical_env
 from jobsctl.env_file import load_env_file
 from jobsctl.env_job import MissingEnvError, build_job_env
@@ -50,7 +52,7 @@ from jobsctl.leftovers import Leftovers, count_leftovers
 from jobsctl.log_writer import RecordWriter
 from jobsctl.output_capture import OutputCapture, TailSnapshot
 from jobsctl.proc_host import Host, default_host
-from jobsctl.proc_identity import Liveness, check_identity
+from jobsctl.proc_identity import Identity, Liveness, check_identity
 from jobsctl.proc_linux import reap_held_leader, set_child_subreaper, set_undumpable
 from jobsctl.result_file import (
     ResultFileError,
@@ -59,8 +61,16 @@ from jobsctl.result_file import (
     delete_result,
     write_result,
 )
-from jobsctl.shim_exit import SPAWN_FAILED_EXIT, ExitRecord, exit_record, natural_outcome
+from jobsctl.shim_exit import (
+    SPAWN_FAILED_EXIT,
+    ExitRecord,
+    Outcome,
+    exit_record,
+    forced_outcome,
+    natural_outcome,
+)
 from jobsctl.shim_pump import DiscardCapture, Pump
+from jobsctl.shim_signals import SignalSequence
 from jobsctl.shim_store import (
     ClaimView,
     begin_running,
@@ -119,6 +129,7 @@ class _StartState:
     """What one attempt of the start transaction spawned (nothing is retried after a spawn)."""
 
     popen: Any = None
+    identity: str = ""
 
 
 @dataclass
@@ -128,6 +139,10 @@ class _Job:
     popen: Any  # subprocess.Popen[bytes]
     pid: int
     capture: OutputCapture
+    identity: Identity  # the leader's recorded identity (signals verify it)
+    deadline: float | None = None  # monotonic time the timeout expires, from `running`
+    seq: SignalSequence | None = None
+    force_by: str | None = None  # a committed force request, seen at a flush
 
 
 class Shim:
@@ -160,7 +175,7 @@ class Shim:
         self._lease = f"job:{job_id}"
         self._lease_held = False
         self._last_renew = 0.0
-        self._term_noted = False
+        self._effective: dict[str, Any] = {}
 
     # -- helpers -------------------------------------------------------------------------------
 
@@ -379,6 +394,7 @@ class Shim:
             PRE_START_BUSY_SECONDS,
         ):
             return self._leave_unstarted()
+        self._effective = effective
         if self.terminated:  # still step 2, before the hooks: exit without writing
             return 0
         # TODO(#25), TODO(#23): run the `pre-start` hooks here (veto -> canceled/vetoed,
@@ -572,12 +588,13 @@ class Shim:
                         pgid = os.getpgid(popen.pid)
                         if pgid != popen.pid:
                             raise JobsctlError("internal", "the job did not lead its own group")
+                        state.identity = identity_text(self.host, popen.pid)
                         won, records = begin_running(
                             tx,
                             self.config,
                             fresh,
                             self.claim_id,
-                            job_identity=identity_text(self.host, popen.pid),
+                            job_identity=state.identity,
                             pgid=pgid,
                             resolved_path=resolved,
                             now=self._now(),
@@ -593,7 +610,12 @@ class Shim:
         if failed:
             self._request_pass()
             return None
-        return _Job(state.popen, state.popen.pid, capture)
+        return _Job(
+            state.popen,
+            state.popen.pid,
+            capture,
+            identity=_parsed(state.identity),
+        )
 
     def _abort_unrecorded(self, popen: Any) -> None:
         """A job was spawned but `running` was not committed: stop it, so that no process runs
@@ -624,33 +646,45 @@ class Shim:
         assert popen.stdout is not None
         settings_interval = float(self.config.tail_flush_interval)
         stdout_fd = popen.stdout.fileno()
+        job.deadline = self._timeout_deadline()
+        job.seq = SignalSequence(
+            self.host,
+            job.identity,
+            kill_grace=float(self._effective.get("kill_grace", self.config.kill_grace)),
+            leader_exited=lambda: _leader_exited(job.pid),
+            own_child=lambda: popen.returncode is None,
+            now=gateway.monotonic,
+            diag=self._diag,
+        )
         pump = Pump(
             stdout_fd,
             job.pid,
             job.capture,
             interval=settings_interval,
             periodic=lambda: self._flush(job),
-            tick=self._tick,
+            tick=lambda: self._tick_job(job),
         )
         record: ExitRecord
         try:
             waited = pump.run()
+            self._finish_sequence(job, pump)
             pump.drain()
             record = exit_record(waited.si_code, waited.si_status)
         except Exception as exc:  # a programming error must not orphan the job's bookkeeping
             self._diag(f"the output pump failed ({type(exc).__name__}); waiting for the job")
             record = self._wait_blind(job)
-        if self.terminated:
-            self._diag("SIGTERM received; the job has exited and its end is unchanged")
         leftovers = count_leftovers(
             self.host, leader_pid=job.pid, pgid=job.pid, own_pid=os.getpid()
         )
         if leftovers.count:
             self._log_leftovers(view, leftovers)
         tail = job.capture.snapshot(final=True)
-        outcome = natural_outcome(record)
+        natural = natural_outcome(record)
+        outcome = self._sequence_outcome(job) or natural
         try:
-            self._write_result(view, record, outcome, leftovers, tail)
+            self._write_result(
+                view, record, natural if outcome.reason == "forced" else outcome, leftovers, tail
+            )
             committed = self._finish(job, record, outcome, leftovers, tail)
         finally:
             self._reap(job)
@@ -673,10 +707,11 @@ class Shim:
                 job.pid,
                 DiscardCapture(),
                 interval=float(self.config.tail_flush_interval),
-                periodic=lambda: None,
-                tick=self._tick,
+                periodic=lambda: self._check_force(job),
+                tick=lambda: self._tick_job(job),
             )
             waited = pump.run()
+            self._finish_sequence(job, pump)
             pump.drain()
             return exit_record(waited.si_code, waited.si_status)
         except Exception as exc:
@@ -693,13 +728,80 @@ class Shim:
             return
         if not result.still_running:
             self._diag("the job is no longer running under this claim")
-        # TODO(#19): when `result.force_requested_by` is set, run the signal sequence; also the
-        # timeout (`effective.timeout`) and a SIGTERM to the shim (`self.terminated`) start it.
-        if self.terminated and not self._term_noted:
-            self._term_noted = True
-            self._diag(
-                "SIGTERM received while the job runs; the signal sequence is not implemented yet"
-            )
+        elif result.force_requested_by is not None:
+            job.force_by = result.force_requested_by
+
+    def _check_force(self, job: _Job) -> None:
+        """The force request alone (the pump failed, so there is no tail to flush)."""
+        try:
+            view = read_claim(self.store, self.job_id, self.claim_id)
+        except (JobsctlError, sqlite3.Error) as exc:
+            self._diag(f"the force request was not read ({type(exc).__name__})")
+            return
+        if view is not None and view.status == "running" and view.force_requested_by:
+            job.force_by = view.force_requested_by
+
+    # -- the signal sequence and the timeout ---------------------------------------------------
+
+    def _timeout_deadline(self) -> float | None:
+        """The timeout, on the monotonic clock, counted from now: `running` was just committed.
+        The shim's own snapshot (`effective`) decides, never the current config."""
+        timeout = self._effective.get("timeout")
+        if timeout is None or timeout == "none":
+            return None
+        seconds = timeout if isinstance(timeout, (int, float)) else parse_duration(str(timeout))
+        return gateway.monotonic() + float(seconds)
+
+    def _due(self, job: _Job) -> str | None:
+        """Why the sequence must start now, if it must: a committed force request, SIGTERM, or the
+        timeout. A force request wins over SIGTERM (`cancel --force` sends it as a wake-up), and
+        over the timeout, in the label only: the final commit re-reads the request anyway."""
+        if self.terminated and job.force_by is None:
+            self._check_force(job)  # the SIGTERM may be a force request's wake-up
+        if job.force_by is not None:
+            return "forced"
+        if self.terminated:
+            return "terminated"
+        if job.deadline is not None and gateway.monotonic() >= job.deadline:
+            return "timeout"
+        return None
+
+    def _tick_job(self, job: _Job) -> None:
+        """Every pump iteration: the lease, then the sequence (stepped, or started when due)."""
+        self._tick()
+        seq = job.seq
+        if seq is None or seq.done:
+            return
+        if seq.started:
+            seq.advance()
+            return
+        cause = self._due(job)
+        if cause is None or _leader_exited(job.pid):
+            return  # a leader that already exited ended on its own: nothing to signal
+        self._diag(f"{cause}: running the signal sequence")
+        seq.start(cause)
+        seq.advance()
+
+    def _finish_sequence(self, job: _Job, pump: Pump) -> None:
+        """The leader exited while a sequence is under way: its group may still have members.
+        Keep stepping it (and reading the pipe, so no member blocks on it) until it is done."""
+        seq = job.seq
+        if seq is None or not seq.started:
+            if self.terminated:
+                self._diag("SIGTERM received; the job has exited and its end is unchanged")
+            return
+        while not seq.done:
+            pump.pump_once()
+            self._tick()
+            seq.advance()
+
+    def _sequence_outcome(self, job: _Job) -> Outcome | None:
+        seq = job.seq
+        if seq is None or seq.cause is None:
+            return None
+        if seq.cause == "forced":
+            return forced_outcome()
+        return Outcome("failed", seq.cause)
 
     def _log_leftovers(self, view: ClaimView, leftovers: Leftovers) -> None:
         self._log(
@@ -785,6 +887,23 @@ class Shim:
             reap_held_leader(job.popen)
         except OSError as exc:
             self._diag(f"could not reap the job leader ({exc.strerror})")
+
+
+def _leader_exited(pid: int) -> bool:
+    """Whether child `pid` has exited, without reaping it (`WNOWAIT`)."""
+    try:
+        return gateway_proc.waitid_nowait(pid, nohang=True) is not None
+    except ChildProcessError:
+        return True  # reaped elsewhere: nothing is left to signal by this PID
+    except OSError:
+        return False
+
+
+def _parsed(text: str) -> Identity:
+    ident = parse_identity(text)
+    if ident is None:
+        raise JobsctlError("internal", "the job's identity could not be parsed")
+    return ident
 
 
 def _is_directory(path: str) -> bool:

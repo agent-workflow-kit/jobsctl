@@ -151,3 +151,41 @@ def real_shims(tmp_path_factory: pytest.TempPathFactory) -> Iterator[RealShims]:
 
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text())
+
+
+@dataclass
+class JobGuard:
+    """Teardown for jobs an in-process shim started: every job's recorded group (while the
+    leader's identity holds) and every PID a test announced (with the identity it had when it was
+    announced) is killed; nothing else, never by name."""
+
+    extras: list[Identity] = field(default_factory=list)
+
+    def track(self, pid: int) -> Identity:
+        ident = identify(default_host(), pid)
+        self.extras.append(ident)
+        return ident
+
+    def stop_all(self) -> None:
+        host = default_host()
+        try:
+            with Store.open(mode=OpenMode.CLI) as store:
+                rows = store.query_all("SELECT job_identity FROM attempts")
+        except Exception:
+            rows = []
+        for row in rows:
+            ident = parse_identity(row["job_identity"]) if row["job_identity"] else None
+            if ident is not None:
+                signal_group(host, ident, signal.SIGKILL, allow_zombie=True)
+                signal_process(host, ident, signal.SIGKILL, allow_zombie=True)
+        for ident in self.extras:
+            signal_process(host, ident, signal.SIGKILL)
+
+
+@pytest.fixture
+def job_guard() -> Iterator[JobGuard]:
+    guard = JobGuard()
+    try:
+        yield guard
+    finally:
+        guard.stop_all()

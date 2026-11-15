@@ -27,7 +27,6 @@ import enum
 import signal
 from collections.abc import Callable
 
-from jobsctl import gateway_proc
 from jobsctl.proc_group import probe_group
 from jobsctl.proc_host import Host
 from jobsctl.proc_identity import Identity
@@ -91,9 +90,11 @@ class SignalSequence:
     def _signal_pid(self, sig: int, what: str) -> None:
         out = signal_process(self._host, self._leader, sig)
         if self._fallback_ok(out):
-            self._diag(f"{what}: identity not confirmed ({out.detail}); the PID is our unreaped child")
+            self._diag(
+                f"{what}: identity not confirmed ({out.detail}); the PID is our unreaped child"
+            )
             try:
-                gateway_proc.kill(self._leader.pid, sig)
+                self._host.kill(self._leader.pid, sig)
                 out = SignalOutcome(Result.SENT, "kill", "fallback")
             except OSError as exc:
                 out = SignalOutcome(Result.ERROR, "kill", exc.strerror or "")
@@ -104,7 +105,7 @@ class SignalSequence:
         if self._fallback_ok(out):
             self._diag(f"{what}: identity not confirmed ({out.detail}); the group id is reserved")
             try:
-                gateway_proc.killpg(self._leader.pid, sig)
+                self._host.killpg(self._leader.pid, sig)
                 out = SignalOutcome(Result.SENT, "killpg", "fallback")
             except ProcessLookupError:
                 out = SignalOutcome(Result.NOT_ALIVE, "killpg", "gone")
