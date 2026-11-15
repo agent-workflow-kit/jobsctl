@@ -23,7 +23,6 @@ from jobsctl.delivery import Deliverer
 from jobsctl.errors import JobsctlError
 from jobsctl.hook_interrupt import InterruptGuard
 from jobsctl.hook_run import HookResult
-from jobsctl.job_lease import Lease
 from jobsctl.shim import StopSignal
 from jobsctl.triggers import DELIVER_REQUESTED
 from tests.conftest import validate_against
@@ -100,9 +99,9 @@ def test_a_live_lease_holder_keeps_the_events_for_itself(
     job_id = add_job(capsys, config=cfg)
     holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
+        from jobsctl import gateway
         from jobsctl.leases import expiry, identity_text
         from jobsctl.proc_host import default_host
-        from jobsctl import gateway
 
         with open_store() as store:
             with store.write() as tx:
@@ -122,8 +121,16 @@ def test_a_live_lease_holder_keeps_the_events_for_itself(
         holder.wait(timeout=10)
     # the holder died: `_deliver` redelivers, with the same event id
     with open_store() as store:
-        assert Delivery(store, Config.model_validate({"hooks": {"post-held": [
-            {"name": "w", "cmd": recorder(out)}]}}), None).run() == 0
+        assert (
+            Delivery(
+                store,
+                Config.model_validate(
+                    {"hooks": {"post-held": [{"name": "w", "cmd": recorder(out)}]}}
+                ),
+                None,
+            ).run()
+            == 0
+        )
     (file,) = ran(out)
     assert json.loads(file.read_text())["event_id"] == outbox()[0]["event_id"]
     assert outbox()[0]["delivered_at"] is not None
@@ -144,13 +151,19 @@ def test_events_of_one_job_are_delivered_in_outbox_order(
     sql(
         "INSERT INTO hook_outbox (event_id, job_id, hook, payload, async, created_at) "
         "VALUES (?, ?, 'post-cancel', ?, 0, ?)",
-        second["event_id"], job_id, json.dumps(second), row["created_at"],
+        second["event_id"],
+        job_id,
+        json.dumps(second),
+        row["created_at"],
     )
     third = dict(row["payload"], event_id=f"{job_id}:post-held:98")
     sql(
         "INSERT INTO hook_outbox (event_id, job_id, hook, payload, async, created_at) "
         "VALUES (?, ?, 'post-held', ?, 0, ?)",
-        third["event_id"], job_id, json.dumps(third), row["created_at"],
+        third["event_id"],
+        job_id,
+        json.dumps(third),
+        row["created_at"],
     )
     with open_store() as store:
         d = Deliverer(store, Config.model_validate({"hooks": hooks}))
@@ -251,7 +264,9 @@ def test_entries_are_selected_at_delivery_with_the_redelivering_config(
     assert hold(capsys, cfg, job_id).code == 0
     assert outbox()[0]["async"] == 1
     # the config now has the entry as a synchronous one: an async event runs async entries only
-    sync_cfg = Config.model_validate({"hooks": {"post-held": [{"name": "w", "cmd": recorder(out)}]}})
+    sync_cfg = Config.model_validate(
+        {"hooks": {"post-held": [{"name": "w", "cmd": recorder(out)}]}}
+    )
     with open_store() as store:
         assert Deliverer(store, sync_cfg).deliver_sync(job_id) is True
         assert len(pending(store)) == 1
@@ -274,17 +289,23 @@ def test_a_damaged_event_is_skipped_and_does_not_block_later_ones(
         sql(
             "INSERT INTO hook_outbox (event_id, job_id, hook, payload, async, created_at) "
             "VALUES (?, ?, 'post-held', ?, 0, 'x')",
-            f"{job_id}:post-held:bad{seq}", job_id, bad,
+            f"{job_id}:post-held:bad{seq}",
+            job_id,
+            bad,
         )
     again = {**good, "event_id": f"{job_id}:post-held:77"}
     sql(
         "INSERT INTO hook_outbox (event_id, job_id, hook, payload, async, created_at) "
         "VALUES (?, ?, 'post-held', ?, 0, 'x')",
-        again["event_id"], job_id, json.dumps(again),
+        again["event_id"],
+        job_id,
+        json.dumps(again),
     )
     with open_store() as store:
-        d = Deliverer(store, Config.model_validate({"hooks": {"post-held": [
-            {"name": "w", "cmd": recorder(out)}]}}))
+        d = Deliverer(
+            store,
+            Config.model_validate({"hooks": {"post-held": [{"name": "w", "cmd": recorder(out)}]}}),
+        )
         assert d.deliver_sync(job_id) is True
         assert pending(store) == []
     assert len(ran(out)) == 2  # the original (already delivered by hold) is not run again
@@ -293,7 +314,9 @@ def test_a_damaged_event_is_skipped_and_does_not_block_later_ones(
 # -- `_deliver`: async hooks, concurrency, the counter ----------------------------------------
 
 
-def async_events(capsys: pytest.CaptureFixture[str], tmp_path: Path, n: int, per_job: int) -> list[str]:
+def async_events(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, n: int, per_job: int
+) -> list[str]:
     cfg = config_file(tmp_path, hooks={"post-held": [{"name": "w", "cmd": "true", "async": True}]})
     ids = []
     for _ in range(n):
@@ -306,7 +329,9 @@ def async_events(capsys: pytest.CaptureFixture[str], tmp_path: Path, n: int, per
             sql(
                 "INSERT INTO hook_outbox (event_id, job_id, hook, payload, async, created_at) "
                 "VALUES (?, ?, 'post-held', ?, 1, 'x')",
-                extra["event_id"], job_id, json.dumps(extra),
+                extra["event_id"],
+                job_id,
+                json.dumps(extra),
             )
     return ids
 
@@ -354,8 +379,11 @@ def test_async_hooks_run_at_most_n_at_once_one_per_job_in_order(
     assert 1 < probe.peak <= 3 and not probe.overlap
     for job_id in ids:
         seq = [e for j, e in probe.order if j == job_id]
-        assert len(seq) == 3 and seq[0].startswith(f"{job_id}:post-held:") and seq[1:] == [
-            f"{job_id}:post-held:x0", f"{job_id}:post-held:x1"]
+        assert (
+            len(seq) == 3
+            and seq[0].startswith(f"{job_id}:post-held:")
+            and seq[1:] == [f"{job_id}:post-held:x0", f"{job_id}:post-held:x1"]
+        )
 
 
 def test_a_request_made_while_delivering_starts_another_round(
@@ -405,7 +433,11 @@ def test_only_one_deliver_runs_under_the_lease(
             with store.write() as tx:
                 tx.execute(
                     "INSERT INTO leases (name, holder_identity, expires_at) VALUES (?, ?, ?)",
-                    ["deliver", identity_text(default_host(), holder.pid), expiry(gateway.utc_now())],
+                    [
+                        "deliver",
+                        identity_text(default_host(), holder.pid),
+                        expiry(gateway.utc_now()),
+                    ],
                 )
             probe = Probe()
             d = Deliverer(store, cfg, runner=probe)

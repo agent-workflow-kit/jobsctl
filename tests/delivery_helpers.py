@@ -12,10 +12,7 @@ from jobsctl.store_db import OpenMode, Store
 def recorder(out: Path, name: str = "ran") -> str:
     """A hook command that saves its stdin to `<out>/<name>-<job id>-<n>.json` (n = run count)."""
     out.mkdir(exist_ok=True)
-    return (
-        f'n=$(ls {out} | grep -c "^{name}-$JOBSCTL_ID-"); '
-        f"cat > {out}/{name}-$JOBSCTL_ID-$n.json"
-    )
+    return f'n=$(ls {out} | grep -c "^{name}-$JOBSCTL_ID-"); cat > {out}/{name}-$JOBSCTL_ID-$n.json'
 
 
 def ran(out: Path, name: str = "ran") -> list[Path]:

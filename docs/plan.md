@@ -38,7 +38,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 | `output_capture.py`, `output_tail.py`, `output_store.py`, `textsafe.py` | 2 | ring buffer; tail rendering (window rules, masking, sanitizing, live flush); compression and the `outputs` table; the shared sanitizer |
 | `kill.py` | 3 | `_kill` for force-cancel after a shim loss |
 | `reconcile.py` | 3 | reconcile rules and findings |
-| `hook_run.py`, `hook_output.py`, `hook_env.py`, `hook_payload.py`, `hook_select.py`, `hook_interrupt.py`, `deliver.py` | 4 | hook processes (WNOWAIT reservation, timeout, interrupted CLI commands), selectors, outbox delivery, `_deliver` and its async hooks |
+| `hook_run.py`, `hook_output.py`, `hook_env.py`, `hook_payload.py`, `hook_select.py`, `hook_interrupt.py`, `delivery.py`, `delivery_cli.py`, `job_lease.py`, `deliver.py` | 4 | hook processes (WNOWAIT reservation, timeout, interrupted CLI commands), selectors, outbox delivery (planning, running and recording an event; synchronous delivery by a lease holder or a command), `_deliver` and its async hooks |
 | `cron.py` | 5 | `cron install`/`uninstall` block |
 | `tui/` | 6 | `browse` (Textual, `tui` extra) |
 
@@ -88,7 +88,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 
 **Status**: In Progress (runner pass, start triggers, the shim spawn contract, the shim's start sequence with atomic job spawn, exit mapping, leftovers, result file and final commit, output capture, the signal sequence with timeout enforcement, `retry`, `resolve` and automatic retry, `wait` and `add --wait` done)
 
-Interim behavior until the dependent issues land: `_kill` ends a forced cancel and never retries; the shim does not yet run `pre-start` hooks (`TODO(#25)`) or deliver events (`TODO(#24)`). `_deliver` has no handler (`TODO(#24)`), so a spawned `_deliver` exits at once and the next pass requests it again while events stay undelivered.
+Interim behavior until the dependent issues land: `_kill` ends a forced cancel and never retries; the shim does not yet run `pre-start` hooks (`TODO(#25)`).
 
 ## Stage 3: Cancellation and recovery (0.3)
 
