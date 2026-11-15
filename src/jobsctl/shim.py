@@ -414,9 +414,6 @@ class Shim:
         self._deliver_events()  # earlier attempts' events, before any `pre-start` hook
         if self.terminated:
             return 0
-        view = self._still_starting()
-        if view is None:
-            return self._leave_unstarted()
         if self.config_error is not None:
             self._log(
                 "config_invalid",
