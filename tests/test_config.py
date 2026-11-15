@@ -534,10 +534,50 @@ def test_duplicate_hook_name_in_one_list_is_config_invalid(tmp_path: Path) -> No
     assert "hooks.pre-start" in message and "'g'" in message
 
 
-def test_unnamed_hooks_may_repeat_a_cmd(tmp_path: Path) -> None:
-    # Only a duplicate `name` is config_invalid (interface.md, Hooks).
-    cfg = load(tmp_path, "hooks:\n  post-fail: [{cmd: a}, {cmd: a}]\n")
+@pytest.mark.parametrize(
+    "entries",
+    [
+        "{cmd: a}, {cmd: a}",
+        "{cmd: foo}, {name: foo, cmd: x}",
+        "{name: foo, cmd: x}, {cmd: foo}",
+    ],
+)
+def test_two_hooks_sharing_an_identity_are_config_invalid(tmp_path: Path, entries: str) -> None:
+    # A hook's identity is its name, else its cmd; vetoed_by, override_hooks and hook_id rely on
+    # it being unique within one hooks.<hook> list (interface.md, Hooks).
+    message = invalid(tmp_path, f"hooks:\n  post-fail: [{entries}]\n")
+    assert "hooks.post-fail" in message and "duplicate hook identity" in message
+
+
+def test_identity_collision_message_never_echoes_a_long_cmd(tmp_path: Path) -> None:
+    secret = "tok-" + "x" * 5000
+    message = invalid(tmp_path, f"hooks:\n  post-fail: [{{cmd: {secret}}}, {{cmd: {secret}}}]\n")
+    assert "duplicate hook identity" in message and secret not in message
+    assert "tok-" not in message  # an unnamed hook's cmd is never echoed, not even a prefix
+    assert "hooks.post-fail" in message and "entries 0 and 1" in message
+
+
+def test_identity_collision_with_a_name_echoes_the_name_only(tmp_path: Path) -> None:
+    message = invalid(tmp_path, "hooks:\n  post-fail: [{name: foo, cmd: x}, {cmd: foo}]\n")
+    assert "duplicate hook identity 'foo': entries 0 and 1" in message
+
+
+def test_same_cmd_with_different_names_or_in_different_hooks_is_fine(tmp_path: Path) -> None:
+    cfg = load(
+        tmp_path,
+        "hooks:\n  post-fail: [{name: a, cmd: x}, {name: b, cmd: x}]\n  post-held: [{cmd: x}]\n"
+        "  pre-start: [{cmd: x}]\n",
+    )
     assert len(cfg.hooks.post_fail) == 2
+
+
+def test_identity_collision_across_drop_ins_is_config_invalid(tmp_path: Path) -> None:
+    base = write(tmp_path / "config.yaml", "hooks:\n  post-fail: [{cmd: foo}]\n")
+    write(tmp_path / "config.d" / "x.yaml", "hooks:\n  post-fail: [{name: foo, cmd: b}]\n")
+    with pytest.raises(JobsctlError) as info:
+        load_config(base)
+    assert info.value.code == "config_invalid"
+    assert "duplicate hook identity 'foo': entries 0 and 1" in info.value.message
 
 
 def test_unknown_queue_selector_is_a_warning_only(tmp_path: Path) -> None:

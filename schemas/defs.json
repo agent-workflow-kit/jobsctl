@@ -2587,7 +2587,7 @@
         },
         "truncated": {
           "type": "boolean",
-          "description": "true when earlier output was dropped."
+          "description": "true when the tail lacks earlier output: it was dropped from the ring buffer or cut to the tail size."
         },
         "updated_at": {
           "$ref": "#/$defs/ts",
