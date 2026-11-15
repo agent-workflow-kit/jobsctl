@@ -24,7 +24,7 @@ def job_row(tx: Tx, job_id: str) -> sqlite3.Row | None:
     return tx.one("SELECT * FROM jobs WHERE id = ?", [job_id])
 
 
-def _current_attempt(tx: Tx, row: JobRow) -> sqlite3.Row | None:
+def current_attempt(tx: Tx, row: JobRow) -> sqlite3.Row | None:
     """The attempt in progress, or the one whose end or hold produced the job's status."""
     status = row["status"]
     if status == "queued" or row["attempt"] < 1:
@@ -66,7 +66,7 @@ def job_object(
     labels = tx.all("SELECT key, value FROM job_labels WHERE job_id = ?", [row["id"]])
     pass_env: list[str] = json.loads(row["pass_env"])
     overrides: dict[str, Any] = json.loads(row["overrides"])
-    attempt = _current_attempt(tx, row)
+    attempt = current_attempt(tx, row)
     snapshot = None
     if attempt is not None and row["status"] in _RUNNING and attempt["effective"] is not None:
         snapshot = json.loads(attempt["effective"])

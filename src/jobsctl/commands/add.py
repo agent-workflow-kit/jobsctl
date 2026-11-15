@@ -20,6 +20,7 @@ from typing import Any
 from jobsctl import gateway
 from jobsctl.cli_output import print_json
 from jobsctl.cli_registry import Context, command
+from jobsctl.commands.wait import print_summary, wait_for_job
 from jobsctl.env_canonical import CanonicalEnv, build_canonical_env
 from jobsctl.env_file import EnvFile, load_env_file
 from jobsctl.env_logging import log_env_file_state, log_path_state
@@ -407,6 +408,16 @@ def _write(
         return out
 
 
+def _warn_human(ctx: Context, req: Request, out: Outcome) -> None:
+    if ctx.quiet:
+        return
+    if out.queue_created:
+        sys.stderr.write(f"jobsctl: warning: the queue {req.queue} was created on first use\n")
+    for warning in out.warnings:
+        sys.stderr.write(f"jobsctl: warning: {sanitize(warning['message'], inline=True)}\n")
+    sys.stderr.flush()
+
+
 def _report(ctx: Context, req: Request, out: Outcome, *, dry_run: bool) -> None:
     if ctx.json:
         print_json(
@@ -420,15 +431,32 @@ def _report(ctx: Context, req: Request, out: Outcome, *, dry_run: bool) -> None:
             }
         )
         return
-    if not ctx.quiet:
-        if out.queue_created:
-            sys.stderr.write(f"jobsctl: warning: the queue {req.queue} was created on first use\n")
-        for warning in out.warnings:
-            sys.stderr.write(f"jobsctl: warning: {sanitize(warning['message'], inline=True)}\n")
-        sys.stderr.flush()
+    _warn_human(ctx, req, out)
     if out.job is not None:
         sys.stdout.write(out.job["id"] + "\n")
         sys.stdout.flush()
+
+
+def _report_waited(ctx: Context, req: Request, out: Outcome) -> int:
+    """`add --wait`: the job is committed; wait on it, then print `add.json` with the job as
+    `show` prints it. The exit code is wait's (Ctrl-C: 130, the job stays queued)."""
+    assert out.job is not None
+    result = wait_for_job(ctx, out.job["id"], ctx.args.wait_timeout)
+    if ctx.json:
+        print_json(
+            {
+                "created": out.created,
+                "queue_created": out.queue_created,
+                "dry_run": False,
+                "waited": True,
+                "warnings": out.warnings,
+                "job": result.job,
+            }
+        )
+    else:
+        _warn_human(ctx, req, out)
+        print_summary(ctx, result.job)
+    return result.code
 
 
 @command("add")
@@ -439,9 +467,6 @@ def add(ctx: Context) -> int:
     canonical = build_canonical_env(ctx.config, dict(os.environ))
     masking = masking_values(ctx.config, canonical, env_file)
     check_secrets(req, masking, ctx.config.mask_env, env_file)
-    if args.wait:
-        # TODO(#17): `--wait` behaves as `wait` on the added job; refused until `wait` exists.
-        raise JobsctlError("internal", "add --wait is not available yet")
     # TODO(#34): the pre-add hook runs here (1.x). Pre-start hooks run in the shim, not here.
     now = format_timestamp(gateway.utc_now())
     if args.dry_run:
@@ -450,5 +475,8 @@ def add(ctx: Context) -> int:
         out = _write(ctx, req, env_file, canonical, masking, now)
         if not args.no_start:  # also for a unique-key hit: the earlier request may have been lost
             request_pass_from_command(ctx.config, ctx.config_path, quiet=ctx.quiet)
+    if args.wait:
+        assert out.job is not None  # a committed add (or a unique-key hit) always has a job
+        return _report_waited(ctx, req, out)
     _report(ctx, req, out, dry_run=args.dry_run)
     return 0
