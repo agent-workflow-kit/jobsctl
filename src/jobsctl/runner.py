@@ -480,7 +480,6 @@ class Runner:
         if child is None:  # nothing to deliver, or a live `_deliver` holds the lease
             return
         self.children.append(Child(child, "deliver"))
-        # TODO(#24): `_deliver` delivers; until then the same jobs match again at every pass.
         for job_id in redeliver:
             self._found(result, job_id, "hooks_redelivered", "redelivered")
 

@@ -9,7 +9,8 @@
 7. the atomic start: re-check, spawn in a new process group and set `running` in one
    `BEGIN IMMEDIATE` transaction;
 8. the output pump, 9. the exit, the leftovers, the result file and the final commit;
-10. delivery of the job's events (seam, TODO(#24)).
+10. delivery of the job's events (`delivery.py`; the earlier attempts' events are delivered at
+    step 2, before the `pre-start` hooks).
 
 Every write is a compare-and-set on the attempt's `claim_id` (`shim_store`). The shim signals
 only the job it started: the group it just created when the start cannot be recorded, and the
@@ -33,6 +34,7 @@ from jobsctl import gateway, gateway_proc
 from jobsctl.argv_resolve import resolve_argv0
 from jobsctl.claims import LogRecord
 from jobsctl.config import Config
+from jobsctl.delivery import Deliverer
 from jobsctl.durations import parse_duration
 from jobsctl.env_canonical import build_canonical_env
 from jobsctl.env_file import load_env_file
@@ -86,7 +88,7 @@ from jobsctl.shim_store import (
 from jobsctl.store_db import Store
 from jobsctl.store_ops import IsAlive, lease_release, lease_renew, take_lease
 from jobsctl.timestamps import format_timestamp
-from jobsctl.triggers import request_pass
+from jobsctl.triggers import request_delivery_quietly, request_pass
 
 POLL_SECONDS = 0.1
 FINAL_COMMIT_SECONDS = 600.0  # the final transaction is retried with backoff for up to 10 minutes
@@ -372,18 +374,49 @@ class Shim:
         return view
 
     def _leave_unstarted(self) -> int:
-        # TODO(#24): deliver the job's undelivered events (the `post-cancel` of a canceled
-        # `starting` job among them) while holding the `job:<id>` lease, then exit.
+        """The `post-cancel` of a canceled `starting` job is among the events delivered here."""
         self._diag("the job is no longer starting under this claim; exiting")
+        self._deliver_events()
         return 0
+
+    def _deliver_events(self) -> None:
+        """Deliver this job's undelivered synchronous events, in order, while holding the
+        `job:<id>` lease, and request delivery for its `async` ones. SIGTERM stops a running
+        hook and leaves its event for `_deliver`. Never raises: the transitions are committed."""
+        if not self._lease_held:
+            return
+        try:
+            deliverer = Deliverer(
+                self.store,
+                self.config,
+                environ=self.environ,
+                clock=self.clock,
+                host=self.host,
+                diag=self._diag,
+            )
+            deliverer.deliver_sync(
+                self.job_id,
+                stop=lambda: "SIGTERM" if self.terminated else None,
+                held=lambda: self._lease_held,
+                tick=self._tick,
+            )
+            if deliverer.has_pending(self.job_id, is_async=True):
+                request_delivery_quietly(
+                    self.store, self.config, self.config_path, host=self.host, warn=False
+                )
+        except (JobsctlError, sqlite3.Error, OSError) as exc:
+            self._diag(f"hook delivery failed ({type(exc).__name__})")
 
     def _with_lease(self) -> int:
         view = self._still_starting()
         if view is None:
             return self._leave_unstarted()
-        # TODO(#24): deliver every undelivered synchronous event of this job, in order, here.
+        self._deliver_events()  # earlier attempts' events, before any `pre-start` hook
         if self.terminated:
             return 0
+        view = self._still_starting()
+        if view is None:
+            return self._leave_unstarted()
         if self.config_error is not None:
             self._log(
                 "config_invalid",
@@ -445,7 +478,7 @@ class Shim:
         self._emit(records)
         if won:
             self._request_pass()
-            # TODO(#24): deliver the `post-fail` event.
+            self._deliver_events()  # the `post-fail` event
 
     def _request_pass(self) -> None:
         """Start trigger after the final commit; never fails the shim."""
@@ -510,7 +543,9 @@ class Shim:
             return 0
         job = self._start(view, argv, resolved, dict(job_env.values), cwd, capture)
         if job is None:
+            self._deliver_events()  # a failed start or a cancel that won the race
             return 0
+        self._request_async_delivery()  # `async` post-start hooks run while the job does
         return self._supervise(view, job)
 
     def _start(
@@ -699,8 +734,22 @@ class Shim:
         if committed is None:
             return 1  # the result file stays for reconcile
         self._delete_result(view)
-        # TODO(#24): deliver this job's undelivered events, the post hooks included.
+        self._deliver_events()  # the post hooks, `post-start` included, in outbox order
         return 0
+
+    def _request_async_delivery(self) -> None:
+        """`async` events (a `post-start` hook, say) are run by `_deliver` while the job runs."""
+        try:
+            if self.store.query_one(
+                "SELECT 1 FROM hook_outbox WHERE job_id = ? AND delivered_at IS NULL "
+                "AND async = 1 LIMIT 1",
+                [self.job_id],
+            ):
+                request_delivery_quietly(
+                    self.store, self.config, self.config_path, host=self.host, warn=False
+                )
+        except (JobsctlError, sqlite3.Error, OSError) as exc:
+            self._diag(f"could not request delivery ({type(exc).__name__})")
 
     def _wait_blind(self, job: _Job) -> ExitRecord:
         """After a pump failure: keep reading (and discarding) the pipe so the job cannot block on
