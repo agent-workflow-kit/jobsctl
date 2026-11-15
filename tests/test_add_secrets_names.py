@@ -254,6 +254,29 @@ def test_a_secret_as_the_default_actor_user_name_is_refused(
     assert_clean(res, TOKEN)
 
 
+def test_a_secret_default_actor_is_reported_as_the_default_not_as_the_flag(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = default_actor_cfg(tmp_path, monkeypatch, TOKEN, TOKEN)
+    res = run_add(capsys, cfg, [])
+    assert res.code == 2
+    assert res.envelope()["error"]["message"] == (
+        "the default actor contains a secret value; pass a different --actor"
+    )
+    assert_clean(res, TOKEN)
+
+
+def test_an_explicit_secret_actor_keeps_the_flag_message(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = default_actor_cfg(tmp_path, monkeypatch, "ann", TOKEN)
+    res = run_add(capsys, cfg, ["--actor", f"human:{TOKEN}"])
+    assert res.code == 2
+    assert res.envelope()["error"]["message"] == "--actor contains a secret value"
+    assert res.envelope()["error"]["details"] == {"code": "secret_in_actor"}
+    assert_clean(res, TOKEN)
+
+
 def test_a_raw_user_name_that_sanitizing_would_rewrite_is_still_refused(
     capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

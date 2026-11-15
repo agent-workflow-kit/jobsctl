@@ -59,6 +59,8 @@ class Request:
     # `me.name` or the OS user name as given, when it became the default actor (the actor holds
     # only its sanitized form); secret check only.
     default_user_name: str | None = field(default=None, repr=False)
+    # True when --actor was given (changes only the wording of the secret_in_actor refusal).
+    actor_explicit: bool = False
     # The `--env`/`--pass-env` duplicate or conflict error, raised only after the name checks
     # (it would echo a variable name that may itself be a secret).
     name_conflict: str | None = field(default=None, repr=False)
@@ -156,6 +158,7 @@ def build_request(ctx: Context) -> Request:
         default_user_name=(
             ctx.me_name if ctx.explicit_actor is None and ctx.stdin_isatty else None
         ),
+        actor_explicit=ctx.explicit_actor is not None,
         name_conflict=name_conflict,
     )
 
@@ -204,7 +207,12 @@ def _check_names(req: Request, masking: MaskingSet) -> None:
     if masking.contains_secret(req.actor) or (
         req.default_user_name is not None and masking.contains_secret(req.default_user_name)
     ):
-        raise usage_error("--actor contains a secret value", code="secret_in_actor")
+        if req.actor_explicit:
+            raise usage_error("--actor contains a secret value", code="secret_in_actor")
+        raise usage_error(
+            "the default actor contains a secret value; pass a different --actor",
+            code="secret_in_actor",
+        )
     for decision_id in req.decision_ids:
         if masking.contains_secret(decision_id):
             raise usage_error(
