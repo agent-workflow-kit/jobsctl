@@ -29,7 +29,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 | `log_records.py`, `log_files.py`, `log_writer.py`, `log_export.py` | 0 | `log.jsonl`/`audit.jsonl` with `flock` + `state.db` `seq` counters, once-per-change-of-state warnings, `export` |
 | `diag.py` | 2 (planned) | diagnostics files of triggered passes and internal processes (`diag/<kind>-<pid>.log`, 0600, created on first write, capped at 1 MiB, deleted after 7 days; D43) |
 | `order.py` | 1 | position keys, `rank`, `move`/`pin`/`priority`, selection across queues, `blocked_by`, capacity |
-| `env.py` | 1 | `env_file` loading and checks (ancestors, `O_NOFOLLOW`/`O_NONBLOCK`, format), canonical environment, job environment, masking set |
+| `env_file.py`, `env_canonical.py`, `env_job.py`, `env_mask.py` | 1 | `env_file` loading and checks (ancestors, `O_NOFOLLOW`/`O_NONBLOCK`, format, `PR_SET_DUMPABLE`); canonical environment; job environment; masking set |
 | `commands/` | 1–4 | one module per command group |
 | `runner.py` | 2 | the pass: lease, reconcile, claim loop with the `pass_requested` counter, shim spawn and identity record, delivery hand-off, retention, checkpoint; `run --loop` |
 | `shim.py` | 2–4 | start sequence, output pump, tail flush, final commit and result file, timeout, signal sequence |
