@@ -20,6 +20,7 @@ from jobsctl.store_db import Tx
 from jobsctl.store_ops import OutboxEvent, counter_incr, outbox_insert
 
 EVENT_COUNTER = "hook_events"
+_OUTPUT_HOOKS = ("post-finish", "post-fail", "post-held", "post-cancel")
 
 
 def hook_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -112,9 +113,10 @@ def write_post_event(
             "previous_status": previous_status,
             "job": hook_job(job),
             "attempt": None if attempt is None else attempt_object(attempt),
-            "output_available": _output_available(tx, attempt),
-            "output_tail": None,
         }
+        if hook in _OUTPUT_HOOKS:  # `post-start` and `pre-start` payloads carry no output fields
+            payload["output_available"] = _output_available(tx, attempt)
+            payload["output_tail"] = None
         outbox_insert(
             tx,
             job["id"],
