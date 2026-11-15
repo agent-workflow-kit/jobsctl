@@ -567,7 +567,9 @@ def test_a_symlinked_file_is_ignored_and_never_followed(rig: Rig, tmp_path: Path
     assert target.read_text() == "{}" and rig.warnings
 
 
-@pytest.mark.parametrize("content", [b"not json", b"{}", b"[]", b'{"version": 2}'])
+@pytest.mark.parametrize(
+    "content", [b"not json", b"{}", b"[]", b'{"version": 2}', b"[" * 1_000_000]
+)
 def test_a_damaged_file_is_ignored(rig: Rig, content: bytes) -> None:
     running(rig)
     kill_shim(rig)
@@ -577,6 +579,36 @@ def test_a_damaged_file_is_ignored(rig: Rig, content: bytes) -> None:
     path.chmod(0o600)
     assert rig.findings() == [("job_gone", "failed_lost")]
     assert rig.warnings
+
+
+def test_a_result_file_end_time_is_the_files_own(rig: Rig) -> None:
+    running(rig)
+    kill_shim(rig)
+    write(rig, ended_at="2026-01-01T00:00:05.000Z")
+    rig.run()
+    assert attempt(rig.store)["ended_at"] == "2026-01-01T00:00:05.000Z"
+    assert job(rig.store)["ended_at"] == "2026-01-01T00:00:05.000Z"
+    assert job(rig.store)["status_changed_at"] != "2026-01-01T00:00:05.000Z"  # reconcile time
+
+
+@pytest.mark.parametrize("forged", ["2999-01-01T00:00:00.000Z", "2000-01-01T00:00:00.000Z"])
+def test_a_forged_result_file_end_time_is_clamped_to_now(rig: Rig, forged: str) -> None:
+    running(rig)
+    kill_shim(rig)
+    write(rig, ended_at=forged)
+    before = format_timestamp(gateway.utc_now())
+    rig.run()
+    ended = attempt(rig.store)["ended_at"]
+    assert before <= ended <= format_timestamp(gateway.utc_now())
+    assert job(rig.store)["ended_at"] == ended
+
+
+def test_a_lost_outcome_keeps_the_reconcile_time(rig: Rig) -> None:
+    running(rig)
+    kill_shim(rig)
+    kill_leader(rig)
+    rig.run()
+    assert attempt(rig.store)["ended_at"] >= "2026-06"  # now, not any file's time
 
 
 def test_a_file_with_loose_mode_is_ignored(rig: Rig) -> None:
@@ -593,6 +625,9 @@ def test_a_file_with_loose_mode_is_ignored(rig: Rig) -> None:
         {"status": "done", "reason": "forced"},
         {"status": "failed", "reason": "lost", "exit": ExitRecord("unknown")},
         {"status": "done", "reason": "exit", "exit": ExitRecord("exited", code=7)},
+        {"status": "failed", "reason": "exit", "exit": ExitRecord("exited", code=0)},
+        {"status": "failed", "reason": "signaled", "exit": ExitRecord("exited", code=1)},
+        {"status": "failed", "reason": "exit", "exit": ExitRecord("signaled", signal=9)},
     ],
 )
 def test_an_outcome_no_shim_writes_is_ignored(rig: Rig, over: dict[str, Any]) -> None:
@@ -697,6 +732,58 @@ def test_one_bad_job_does_not_stop_the_others(rig: Rig, monkeypatch: pytest.Monk
     )
     assert [a.finding.job_id for a in applied] == [other] and failures == [JOB]
     assert status(rig)[0] == "starting"
+
+
+def test_a_failed_rule_skips_the_job_for_the_rest_of_the_run(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    running(rig)
+    kill_shim(rig)
+    kill_leader(rig)
+    write(rig)  # result_file_finalized fails; job_gone must not then end it as lost
+    real = Reconciler.apply
+    calls: list[str] = []
+
+    def flaky(self: Reconciler, tx: Any, d: Any, now: str) -> Any:
+        calls.append(d.finding)
+        if len(calls) == 1:
+            raise OSError("disk")
+        return real(self, tx, d, now)
+
+    monkeypatch.setattr(Reconciler, "apply", flaky)
+    failures: list[str] = []
+    applied = run_rules(
+        rig.reconciler(),
+        read=rig.store.read,
+        write=rig.store.write,
+        clock=gateway.utc_now,
+        dry_run=False,
+        fail=lambda job_id, rule, exc: failures.append(rule),
+    )
+    assert applied == [] and failures == ["result_file_finalized"]
+    assert calls == ["result_file_finalized"]
+    assert status(rig)[0] == "running"
+
+
+def test_any_error_of_a_rule_is_a_per_job_failure(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kill_shim(rig)
+
+    def boom(self: Reconciler, *a: Any) -> Any:
+        raise RecursionError("deep")
+
+    monkeypatch.setattr(Reconciler, "decide", boom)
+    failures: list[str] = []
+    applied = run_rules(
+        rig.reconciler(),
+        read=rig.store.read,
+        write=rig.store.write,
+        clock=gateway.utc_now,
+        dry_run=False,
+        fail=lambda job_id, rule, exc: failures.append(type(exc).__name__),
+    )
+    assert applied == [] and failures == ["RecursionError"]
 
 
 def test_the_run_stops_after_its_time_budget(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -15,11 +15,13 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from jobsctl import cancel_force
+from jobsctl.config import Config
 from jobsctl.leases import format_identity, identity_text
 from jobsctl.proc_host import default_host
 from jobsctl.proc_identity import Identity
@@ -441,6 +443,25 @@ def test_a_shim_identity_from_another_boot_is_never_signaled_and_the_job_is_lost
     assert lines(log) == [] and bystander.poll() is None and spawned_kills == []
     assert doc["jobs"][0]["status"] == "failed" and doc["jobs"][0]["reason"] == "lost"
     assert doc["changed"] is False
+
+
+def test_deliver_request_itself_never_signals_a_shim_of_another_boot(
+    capsys: pytest.CaptureFixture[str],
+    procs: list[Any],
+    tmp_path: Path,
+    spawned_kills: list[str],
+) -> None:
+    """Without reconcile in front of it (which would end such a job first), the delivery's own
+    identity check still refuses a recorded shim from another boot."""
+    job_id = running_job(capsys)
+    bystander, log = start_fake_shim(procs, tmp_path, job_id, finalize=False)
+    ident = Identity("0000-other-boot", bystander.pid, 1)
+    target = cancel_force.ForceTarget(job_id, format_identity(ident), False, 30.0)
+    ctx: Any = SimpleNamespace(config=Config())
+
+    assert cancel_force.deliver_request(ctx, target) is None
+    time.sleep(0.3)
+    assert lines(log) == [] and bystander.poll() is None and spawned_kills == [job_id]
 
 
 @pytest.mark.parametrize("recorded", [None, "", "garbage", "a:b:c"])

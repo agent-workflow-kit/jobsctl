@@ -278,6 +278,7 @@ def finish_running_in(
     leftovers: int | None,
     tail: TailSnapshot | None,
     now: str,
+    ended_at: str | None = None,
 ) -> FinalResult:
     """The final transition of a `running` attempt, in the caller's transaction: the transition,
     the final tail and the hook events together. It reads `force_requested_by`: a committed force
@@ -288,7 +289,12 @@ def finish_running_in(
     when a signal sequence ran, or `lost` (reconcile). The force request read here overrides it. A
     failed attempt that automatic retry applies to (`auto_retry.plan_requeue`) returns the job to
     `queued` with `not_before` instead of ending it; the attempt is `failed` either way.
+
+    `ended_at` is the end time to record when it is not `now` (reconcile finalizing from a result
+    file records the file's); `now` stays the time of the transition (`status_changed_at`,
+    `not_before`, the events).
     """
+    end = now if ended_at is None else ended_at
     view = read_claim_in(tx, job_id, claim_id)
     if view is None or view.status != "running":
         return FinalResult(False, None)
@@ -301,7 +307,7 @@ def finish_running_in(
     if plan is not None:
         job_updates = plan
     elif outcome.terminal:
-        job_updates.update(reason=outcome.reason, ended_at=now)
+        job_updates.update(reason=outcome.reason, ended_at=end)
     else:
         job_updates.update(hold_reason=outcome.hold_reason)
     won = transition_job_by_claim(
@@ -322,7 +328,7 @@ def finish_running_in(
             "status": outcome.status,
             "reason": outcome.reason,
             "hold_reason": outcome.hold_reason,
-            "ended_at": now,
+            "ended_at": end,
             "exit": json.dumps(exit_record.as_json()),
             "leftovers": leftovers,
         },

@@ -171,7 +171,7 @@ def _parse(raw: bytes, job_id: str, attempt: int) -> ResultRecord:
             tail=ResultTail(_text(tail["text"]), _int(tail["bytes_seen"]), bool(tail["truncated"])),
             ended_at=_text(doc["ended_at"]),
         )
-    except (ValueError, KeyError, TypeError) as exc:
+    except Exception as exc:  # also RecursionError of a deeply nested document
         raise ResultFileError(f"{result_name(job_id, attempt)} is damaged") from exc
     if record.status not in ("done", "failed", "held"):
         raise ResultFileError(f"{result_name(job_id, attempt)} records an unknown status")

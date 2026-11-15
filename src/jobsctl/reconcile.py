@@ -44,7 +44,7 @@ from jobsctl.shim_exit import ExitRecord, Outcome, natural_outcome
 from jobsctl.shim_store import fail_starting, finish_running_in, read_claim_in
 from jobsctl.store_db import Tx
 from jobsctl.store_ops import transition_job_by_claim
-from jobsctl.timestamps import TimestampError, format_timestamp
+from jobsctl.timestamps import TimestampError, format_timestamp, parse_timestamp
 
 # Rules that act on one job's attempt, in the order of the Reconcile table.
 JOB_RULES: Final = (
@@ -140,6 +140,7 @@ class Step:
     after: list[Callable[[], object]] = field(default_factory=list)  # run after the commit
     ended: bool = False  # the job is no longer `starting`/`running` (later rules skip it)
     frees_slot: bool = False
+    result: ResultRecord | None = None  # a dry run: the result file the finding rests on
 
 
 # -- liveness -------------------------------------------------------------------------------------
@@ -169,7 +170,7 @@ class Prober:
         return result is not None and result.state is Liveness.ALIVE
 
 
-_ALLOWED_FAILURES: Final = frozenset({"exit", "signaled", "timeout", "terminated"})
+_SEQUENCE_ENDS: Final = frozenset({"timeout", "terminated"})  # ends after a signal sequence
 
 
 def _plausible(record: ResultRecord) -> bool:
@@ -183,9 +184,7 @@ def _plausible(record: ResultRecord) -> bool:
     if recorded == natural:
         return True
     return (
-        record.status == "failed"
-        and record.reason in _ALLOWED_FAILURES
-        and record.hold_reason is None
+        record.status == "failed" and record.reason in _SEQUENCE_ENDS and record.hold_reason is None
     )
 
 
@@ -405,6 +404,7 @@ class Reconciler:
             leftovers=leftovers,
             tail=tail,
             now=now,
+            ended_at=self._file_end(tx, d, now),
         )
         if not done.committed or done.outcome is None:
             return None
@@ -427,6 +427,25 @@ class Reconciler:
                 )
             )
         return applied
+
+    def _file_end(self, tx: Tx, d: Decision, now: str) -> str | None:
+        """The end time the result file records, when it is plausible: not before the attempt
+        started and not after `now`; otherwise (and for a lost outcome) `None`, which is `now`."""
+        if d.result is None:
+            return None
+        row = tx.one(
+            "SELECT running_at, claimed_at FROM attempts WHERE job_id = ? AND n = ?",
+            [d.subject.job_id, d.subject.attempt],
+        )
+        if row is None:
+            return None
+        try:
+            ended = parse_timestamp(d.result.ended_at)
+            started = parse_timestamp(row["running_at"] or row["claimed_at"])
+            current = parse_timestamp(now)
+            return format_timestamp(ended) if started <= ended <= current else None
+        except (TimestampError, TypeError, OverflowError):
+            return None
 
     def _ended(self, d: Decision, records: list[LogRecord], action: str) -> Step:
         return Step(
@@ -478,7 +497,9 @@ class Reconciler:
             forced = False
         action = self.action(d, forced=forced)
         ended = d.kind in ("result", "lost_running", "lost_starting", "requeue")
-        return Step(Finding(s.job_id, d.finding, action), ended=ended, frees_slot=ended)
+        return Step(
+            Finding(s.job_id, d.finding, action), ended=ended, frees_slot=ended, result=d.result
+        )
 
 
 # -- running the rules -------------------------------------------------------------------------
@@ -515,25 +536,24 @@ def run_rules(
     """
     applied: list[Step] = []
     ended: set[str] = set()
+    skipped: set[str] = set()  # a rule failed for these: no later rule runs on them this run
     sink: list[subprocess.Popen[bytes]] = children if children is not None else []
     deadline = gateway.monotonic() + budget
     for rule in rules:
         with read() as tx:
             subjects = read_subjects(one_all_of(tx))
         for s in subjects:
-            if s.job_id in ended:
+            if s.job_id in ended or s.job_id in skipped:
                 continue
             if gateway.monotonic() > deadline:
                 return applied
             tick()
             try:
                 result = _one(reconciler, rule, s, read, write, clock, dry_run, sink)
-            except (OSError, sqlite3.Error, ValueError) as exc:
-                fail(s.job_id, rule, exc)
-                continue
-            except Exception as exc:
-                if not _is_jobsctl_error(exc):
+            except Exception as exc:  # one job's failure of any kind never stops the others
+                if _must_propagate(exc):
                     raise
+                skipped.add(s.job_id)
                 fail(s.job_id, rule, exc)
                 continue
             if result is None:
@@ -547,10 +567,14 @@ def run_rules(
     return applied
 
 
-def _is_jobsctl_error(exc: Exception) -> bool:
+def _must_propagate(exc: Exception) -> bool:
+    """A lost runner lease and a newer schema stop the run; anything else is one job's failure."""
     from jobsctl.errors import JobsctlError
+    from jobsctl.runner import LeaseLost
 
-    return isinstance(exc, JobsctlError) and exc.code != "version_skew"
+    return isinstance(exc, LeaseLost) or (
+        isinstance(exc, JobsctlError) and exc.code == "version_skew"
+    )
 
 
 def _after(action: Callable[[], object], reconciler: Reconciler, s: Subject) -> None:

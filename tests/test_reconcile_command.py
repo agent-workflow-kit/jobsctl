@@ -363,6 +363,56 @@ def test_a_pass_that_cannot_reconcile_still_claims(
     assert result.started == [waiting]
 
 
+def test_a_step_that_fails_with_any_error_does_not_stop_the_pass(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from jobsctl.config import Config
+
+    waiting = add_job(capsys)
+
+    def broken(runner: Any, result: Any) -> None:
+        raise RecursionError("deep")
+
+    with Store.open(mode=OpenMode.CLI) as store:
+        runner = Runner(
+            store,
+            Config.model_validate({"auto_run": False}),
+            None,
+            python="/bin/true",
+            reconcile=broken,
+        )
+        result = runner.run_pass()
+        for child in runner.children:
+            child.popen.wait(timeout=30)
+    assert result.started == [waiting]
+
+
+def test_a_live_deliver_lease_holder_means_no_redelivery_finding_and_no_pass_record(
+    capsys: pytest.CaptureFixture[str], children: list[subprocess.Popen[bytes]]
+) -> None:
+    from jobsctl.config import Config
+
+    job_id = add_job(capsys)
+    make_done(job_id, "failed")
+    sql("UPDATE jobs SET ended_at = ? WHERE id = ?", format_timestamp(gateway.utc_now()), job_id)
+    sql(
+        "INSERT INTO hook_outbox (event_id, job_id, hook, payload, async, created_at) "
+        "VALUES ('e1', ?, 'post-fail', '{}', 0, '2026-01-01T00:00:00.000Z')",
+        job_id,
+    )
+    _, live = start(children)
+    with Store.open(mode=OpenMode.CLI) as store:
+        now = gateway.utc_now()
+        take_lease(
+            store, "deliver", live, now=format_timestamp(now), expires_at=expiry(now),
+            is_alive=lambda h: False,
+        )  # fmt: skip
+        runner = Runner(store, Config.model_validate({"auto_run": False}), None)
+        result = runner.run_pass()
+    assert result.reconciled == [] and runner.children == []
+    assert log_records("pass") == [] and log_records("reconcile") == []
+
+
 # -- cancel --force ----------------------------------------------------------------------------
 
 
@@ -457,3 +507,91 @@ def test_force_cancel_leaves_a_slow_live_shim_alone(
     job_id = running_job(capsys, shim_ident, job_ident, pgid=job.pid)
     force(capsys, job_id)
     assert row(job_id)["shim_lost"] == 0 and row(job_id)["status"] == "running"
+
+
+# -- cancel --force dry run projections --------------------------------------------------------
+
+
+def put_result(job_id: str, **over: Any) -> Path:
+    from jobsctl.result_file import ResultRecord, ResultTail, result_name, write_result
+    from jobsctl.shim_exit import ExitRecord
+    from jobsctl.store_dir import resolve_state_dir
+
+    shims = resolve_state_dir() / "shims"
+    values: dict[str, Any] = {
+        "job_id": job_id,
+        "attempt": 1,
+        "claim_id": attempt_row(job_id)["claim_id"],
+        "status": "done",
+        "reason": "exit",
+        "hold_reason": None,
+        "exit": ExitRecord("exited", code=0),
+        "leftovers": 0,
+        "tail": ResultTail("", 0, False),
+        "ended_at": "2026-01-01T00:00:05.000Z",
+    }
+    values.update(over)
+    write_result(shims, ResultRecord(**values))
+    return shims / result_name(job_id, 1)
+
+
+RETRY = json.dumps({"timeout": None, "max_retries": 2, "kill_grace": 30})
+
+
+def test_force_cancel_dry_run_projects_the_requeue_of_a_retryable_loss(
+    capsys: pytest.CaptureFixture[str],
+    children: list[subprocess.Popen[bytes]],
+    spawned_kills: list[str],
+) -> None:
+    job_id = running_job(capsys, dead_identity(children), dead_identity(children), effective=RETRY)
+    before = table_dump()
+    dry = force(capsys, job_id, "--dry-run").envelope()
+    assert table_dump() == before
+    projected = dry["jobs"][0]
+    assert projected["status"] == "queued" and projected["not_before"] is not None
+    real = force(capsys, job_id).envelope()["jobs"][0]
+    assert real["status"] == "queued" and real["not_before"] is not None
+
+
+def test_force_cancel_dry_run_projects_a_forced_end_for_a_result_file(
+    capsys: pytest.CaptureFixture[str],
+    children: list[subprocess.Popen[bytes]],
+    spawned_kills: list[str],
+) -> None:
+    job_id = running_job(
+        capsys, dead_identity(children), dead_identity(children), force_requested_by="human:lee"
+    )
+    put_result(job_id)
+    dry = force(capsys, job_id, "--dry-run").envelope()["jobs"][0]
+    assert (dry["status"], dry["reason"]) == ("canceled", "forced")
+    real = force(capsys, job_id).envelope()["jobs"][0]
+    assert (real["status"], real["reason"]) == ("canceled", "forced")
+
+
+def test_force_cancel_dry_run_survives_a_result_file_that_vanishes(
+    capsys: pytest.CaptureFixture[str],
+    children: list[subprocess.Popen[bytes]],
+    spawned_kills: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jobsctl import reconcile as reconcile_module
+
+    job_id = running_job(capsys, dead_identity(children), dead_identity(children))
+    path = put_result(job_id, status="failed", reason="exit", exit=_exit(3))
+    real_read = reconcile_module.read_result
+
+    def read_then_vanish(*args: Any) -> Any:
+        record = real_read(*args)
+        path.unlink()
+        return record
+
+    monkeypatch.setattr(reconcile_module, "read_result", read_then_vanish)
+    res = force(capsys, job_id, "--dry-run")
+    assert res.code == 0, res.out + res.err
+    assert res.envelope()["jobs"][0]["status"] == "failed"
+
+
+def _exit(code: int) -> Any:
+    from jobsctl.shim_exit import ExitRecord
+
+    return ExitRecord("exited", code=code)

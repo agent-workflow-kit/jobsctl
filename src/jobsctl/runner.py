@@ -477,8 +477,9 @@ class Runner:
         child = request_delivery(
             self.store, self.config, self.config_path, host=self.host, now=self.clock()
         )
-        if child is not None:
-            self.children.append(Child(child, "deliver"))
+        if child is None:  # nothing to deliver, or a live `_deliver` holds the lease
+            return
+        self.children.append(Child(child, "deliver"))
         # TODO(#24): `_deliver` delivers; until then the same jobs match again at every pass.
         for job_id in redeliver:
             self._found(result, job_id, "hooks_redelivered", "redelivered")
@@ -504,7 +505,7 @@ class Runner:
             step(result)
         except LeaseLost:
             raise
-        except (JobsctlError, sqlite3.Error, OSError) as exc:
+        except Exception as exc:  # a step's failure of any kind (also RecursionError) is logged
             self._fail_step(name, type(exc).__name__, "the step failed")
 
     def _fail_step(self, name: str, error: str, message: str) -> None:

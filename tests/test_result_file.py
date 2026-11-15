@@ -169,3 +169,11 @@ def test_delete_of_a_symlink_removes_the_link_only(shims: Path, tmp_path: Path) 
     delete_result(shims, JOB, 2)
     assert victim.read_text() == "precious"
     assert list(shims.iterdir()) == []
+
+
+def test_a_deeply_nested_file_is_damaged_not_a_crash(shims: Path) -> None:
+    path = shims / result_name(JOB, 2)
+    path.write_bytes(b"[" * 1_000_000)
+    path.chmod(0o600)
+    with pytest.raises(ResultFileError, match="damaged"):
+        read_result(shims, JOB, 2)

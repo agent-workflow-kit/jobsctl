@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from jobsctl import gateway
+from jobsctl.auto_retry import plan_requeue
 from jobsctl.cli_registry import Context
 from jobsctl.env_file import load_env_file
 from jobsctl.errors import JobsctlError
@@ -38,7 +39,6 @@ from jobsctl.log_files import check_appendable
 from jobsctl.proc_host import default_host
 from jobsctl.proc_signal import Result, signal_process
 from jobsctl.reconcile import Reconciler, Step, reconcile_job
-from jobsctl.result_file import read_result
 from jobsctl.spawn import spawn_internal
 from jobsctl.store_db import OpenMode, Store
 from jobsctl.store_dir import resolve_state_dir
@@ -97,24 +97,56 @@ def _projected(op: Op, row: sqlite3.Row, applied: list[Step]) -> dict[str, Any]:
         elif action == "canceled_forced":
             merged.update(status="canceled", reason="forced", ended_at=op.now)
         elif item.finding.finding == "result_file_finalized":
-            merged.update(_from_result(op, row))
+            merged.update(_from_result(op, row, item))
         else:  # failed_lost
-            merged.update(status="failed", reason="lost", ended_at=op.now)
+            merged.update(_failed_or_requeued(op, row, "lost"))
     return merged
 
 
-def _from_result(op: Op, row: sqlite3.Row) -> dict[str, Any]:
-    """The end the result file records (a force request committed after it is not applied in a
-    dry run, which shows the file's end)."""
+def _failed_or_requeued(op: Op, row: sqlite3.Row, reason: str) -> dict[str, Any]:
+    """The end of a failed attempt as the real run gives it: requeued with `not_before` when
+    automatic retry applies (`plan_requeue`, read-only), else `failed`."""
     assert op.tx is not None
-    record = read_result(op.tx.store.paths.shims, str(row["id"]), int(row["attempt"]))
-    assert record is not None
+    attempt = op.tx.one(
+        "SELECT claim_id FROM attempts WHERE job_id = ? AND n = ?", [row["id"], row["attempt"]]
+    )
+    plan = (
+        None
+        if attempt is None
+        else plan_requeue(
+            op.tx, op.config, str(row["id"]), str(attempt["claim_id"]), reason=reason, now=op.now
+        )
+    )
+    if plan is not None:
+        return {"status": "queued", **plan}
+    return {"status": "failed", "reason": reason, "ended_at": op.now}
+
+
+def _from_result(op: Op, row: sqlite3.Row, item: Step) -> dict[str, Any]:
+    """The end the result file records, as the real run applies it: a committed force request
+    makes it `canceled` (`forced`), a failure may be requeued. Without the record the row stays."""
+    record = item.result
+    if record is None:
+        return {}
+    if _force_requested(op, row):
+        return {"status": "canceled", "reason": "forced", "hold_reason": None, "ended_at": op.now}
+    if record.status == "failed" and record.reason is not None:
+        return _failed_or_requeued(op, row, record.reason)
     return {
         "status": record.status,
         "reason": record.reason,
         "hold_reason": record.hold_reason,
         "ended_at": op.now if record.status != "held" else row["ended_at"],
     }
+
+
+def _force_requested(op: Op, row: sqlite3.Row) -> bool:
+    assert op.tx is not None
+    found = op.tx.one(
+        "SELECT force_requested_by FROM attempts WHERE job_id = ? AND n = ?",
+        [row["id"], row["attempt"]],
+    )
+    return found is not None and found["force_requested_by"] is not None
 
 
 def default_timeout(target: ForceTarget) -> int:
