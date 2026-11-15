@@ -69,6 +69,10 @@ _READ_ATTEMPT = (
 )
 
 
+class AlreadyHandled(Exception):
+    """Another process finalized or took over the attempt: nothing is left to do (exit 0)."""
+
+
 class GaveUp(Exception):
     """`_kill` stops without finalizing; a repeated request or reconcile starts another."""
 
@@ -240,6 +244,9 @@ class Killer:
             return 0
         try:
             return self._with_lease()
+        except AlreadyHandled as why:
+            self._diag(f"{why}; nothing to do")
+            return 0
         except GaveUp as why:
             self._diag(f"{why}; nothing finalized")
             return 1
@@ -306,7 +313,10 @@ class Killer:
                     unknown_since = None
             if self._leader_state(leader) is Liveness.DEAD:
                 # No signal is sent once the leader is gone: its PID (the group id) is no longer
-                # reserved, so a group signal could reach a stranger.
+                # reserved, so a group signal could reach a stranger. Unlike the shim's
+                # step-2-at-once rule, the sequence ends here: members that remain are counted
+                # as leftovers, not signaled.
+                # TODO(#35): signal them via PIDFD_SIGNAL_PROCESS_GROUP (Linux 6.9+).
                 if started:
                     return
             try:
@@ -337,7 +347,7 @@ class Killer:
             self._diag(f"the attempt was not re-read ({type(exc).__name__})")
             return
         if now is None or now.claim_id != target.claim_id:
-            raise GaveUp("the attempt is no longer running with a force request")
+            raise AlreadyHandled("the attempt is no longer running with a force request")
 
     def _leftovers(self, leader: Identity) -> Leftovers:
         """Counted, never signaled. The leader was verified when the sequence began."""
@@ -408,7 +418,7 @@ class Killer:
                         "job_id": self.job_id,
                         "queue": target.queue,
                         "attempt": target.attempt,
-                        "message": "processes outlived the job's leader; they were not signaled",
+                        "message": "processes outlived the job's leader",
                         "details": {"count": leftovers.count, "complete": leftovers.complete},
                     },
                 )
@@ -427,7 +437,9 @@ class Killer:
         while True:
             try:
                 return action()
-            except Exception:  # a busy database, an I/O failure: tried again until the deadline
+            except Exception as exc:  # a busy database, an I/O failure: tried until the deadline
+                if self.stop.is_set:
+                    raise GaveUp("SIGTERM received") from exc
                 if self._mono() + delay >= deadline:
                     raise
                 self._tick()

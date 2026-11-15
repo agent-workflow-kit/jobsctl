@@ -382,8 +382,33 @@ def test_an_attempt_finalized_meanwhile_ends_this_kill_without_a_second_finaliza
             tx.execute("UPDATE jobs SET status = 'failed', reason = 'lost'")
 
     rig.on_sleep = finish_elsewhere
-    assert rig.killer().run() == 1
+    assert rig.killer().run() == 0  # handled by someone else: nothing to do, not a give-up
     assert job(rig.store)["reason"] == "lost"  # untouched by this `_kill`
+
+
+def test_sigterm_while_the_final_commit_is_retried_stops_promptly(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del rig.host.procs[LEADER]
+    calls = []
+
+    def busy(*a: Any, **k: Any) -> None:
+        calls.append(1)
+        rig.stop.set()
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr("jobsctl.kill.finish_running", busy)
+    assert rig.killer().run() == 1
+    assert len(calls) == 1  # no backoff loop after the stop
+    assert job(rig.store)["status"] == "running"
+    assert lease(rig) is None
+
+
+def test_the_leftovers_warning_makes_no_claim_about_signals(rig: Rig) -> None:
+    rig.host.reactions[("kill", LEADER, signal.SIGTERM)] = rig.die(LEADER)
+    rig.killer().run()
+    message = log_records("leftovers")[0]["message"]
+    assert message == "processes outlived the job's leader"
 
 
 def test_a_forced_end_is_not_retried_even_with_a_retry_budget(rig: Rig) -> None:
