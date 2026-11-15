@@ -300,10 +300,9 @@ class Runner:
         except LeaseLost:
             raise
         except (JobsctlError, sqlite3.Error) as exc:
+            reason = exc.code if isinstance(exc, JobsctlError) else type(exc).__name__
             try:
-                self._spawn_failed(
-                    claim, result, f"the shim could not be started ({type(exc).__name__})"
-                )
+                self._spawn_failed(claim, result, f"recording the shim failed ({reason})")
             except LeaseLost:
                 raise
             except (JobsctlError, sqlite3.Error):

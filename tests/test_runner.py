@@ -543,6 +543,24 @@ def test_a_busy_identity_write_of_one_claim_does_not_stop_the_others(
     assert lease_row(store) is None
 
 
+def test_a_busy_identity_write_names_the_real_cause(
+    store: Store, kit: ShimKit, runners: list[Runner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import jobsctl.runner as module
+
+    (job_id,) = job_ids(1)
+    add_queued(store, job_id)
+
+    def busy(*args: Any, **kwargs: Any) -> bool:
+        raise JobsctlError("busy", "state.db is busy")
+
+    monkeypatch.setattr(module, "update_attempt_by_claim", busy)
+    result = make_runner(runners, store, cfg(default_cap=None), kit=kit).run_pass()
+    (warning,) = [w for w in result.warnings if w["code"] == "shim_spawn_failed"]
+    assert warning["message"] == "recording the shim failed (busy)"
+    assert "could not be started" not in warning["message"]
+
+
 def test_a_busy_failure_handler_leaves_the_claim_for_reconcile_and_goes_on(
     store: Store, kit: ShimKit, runners: list[Runner], monkeypatch: pytest.MonkeyPatch
 ) -> None:
