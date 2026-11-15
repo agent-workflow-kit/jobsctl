@@ -235,13 +235,12 @@ def test_golden_change_document(capsys: pytest.CaptureFixture[str]) -> None:
 # -- secrets ---------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("action", ["add", "remove"])
 def test_a_secret_in_a_label_value_is_refused_naming_the_key(
-    capsys: pytest.CaptureFixture[str], tmp_path: Path, action: str
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     cfg = secret_config(tmp_path)
     seed_job(JOB, labels=[("a", "1")])
-    res = run(capsys, "--config", cfg, "label", action, JOB, f"note={SECRET}")
+    res = run(capsys, "--config", cfg, "label", "add", JOB, f"note={SECRET}")
     assert res.code == 2 and SECRET not in res.out + res.err
     err = res.envelope()["error"]
     validate_against("cli/error.json", res.envelope())
@@ -250,12 +249,10 @@ def test_a_secret_in_a_label_value_is_refused_naming_the_key(
     assert stored() == ["a=1"] and label_records() == []
 
 
-@pytest.mark.parametrize("action", ["add", "remove"])
 def test_a_secret_in_a_label_key_is_refused_without_naming_it(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    action: str,
 ) -> None:
     cfg = tmp_path / "config.yaml"
     secret_key = "tokenabc12345"
@@ -264,7 +261,7 @@ def test_a_secret_in_a_label_key_is_refused_without_naming_it(
     )
     monkeypatch.setenv("MYSECRET", secret_key)
     seed_job(JOB)
-    res = run(capsys, "--config", str(cfg), "label", action, JOB, f"{secret_key}=v")
+    res = run(capsys, "--config", str(cfg), "label", "add", JOB, f"{secret_key}=v")
     assert res.code == 2 and secret_key not in res.out + res.err
     err = res.envelope()["error"]
     assert err["details"] == {"code": "secret_in_label"}
@@ -276,3 +273,50 @@ def test_the_secret_check_precedes_the_lookup_and_the_dry_run(
     cfg = secret_config(tmp_path)
     res = run(capsys, "--config", cfg, "label", "add", "jb-cccccc22", f"n={SECRET}", "--dry-run")
     assert res.code == 2 and res.envelope()["error"]["details"]["code"] == "secret_in_label"
+
+
+JOINED = "tok.en=value12345"
+
+
+def joined_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        json.dumps({"mask_env": ["MYSECRET"], "env": {"inherit": ["MYSECRET"]}}), encoding="utf-8"
+    )
+    monkeypatch.setenv("MYSECRET", JOINED)
+    return str(cfg)
+
+
+@pytest.mark.parametrize("flags", [[], ["--dry-run"]])
+def test_a_secret_spanning_key_and_value_is_refused_without_naming_the_key(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    flags: list[str],
+) -> None:
+    cfg = joined_config(tmp_path, monkeypatch)
+    seed_job(JOB)
+    res = run(capsys, "--config", cfg, "label", "add", JOB, JOINED, *flags)
+    assert res.code == 2
+    assert res.envelope()["error"]["details"] == {"code": "secret_in_label"}
+    assert "tok.en" not in res.out + res.err
+    assert stored() == [] and label_records() == []
+
+
+def test_remove_does_not_check_for_secrets(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    cfg = secret_config(tmp_path)
+    seed_job(JOB, labels=[("note", SECRET), ("a", "1")])
+    doc = change(run(capsys, "--config", cfg, "label", "remove", JOB, f"note={SECRET}"))
+    assert doc["changed"] is True
+    assert stored() == ["a=1"]
+    assert SECRET not in (resolve_state_dir() / "log.jsonl").read_text(encoding="utf-8")
+
+
+def test_dry_run_leaves_the_state_directory_as_found(capsys: pytest.CaptureFixture[str]) -> None:
+    seed_job(JOB, labels=[("a", "1")])
+    state = resolve_state_dir()
+    before = sorted(p.name for p in state.iterdir())
+    change(run(capsys, "label", "add", JOB, "b=2", "--dry-run"))
+    assert sorted(p.name for p in state.iterdir()) == before

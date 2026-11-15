@@ -22,23 +22,23 @@ def clean(value: object) -> str:
 def exit_text(record: dict[str, Any]) -> str:
     kind = record["kind"]
     if kind == "exited":
-        return f"exited {record['code']}"
+        return f"exited {clean(record['code'])}"
     if kind == "signaled":
-        return f"signaled {record['signal']}" + (" (core dumped)" if record["core"] else "")
-    return str(kind)
+        return f"signaled {clean(record['signal'])}" + (" (core dumped)" if record["core"] else "")
+    return clean(kind)
 
 
 def job_line(job: dict[str, Any]) -> str:
     """One line for `list`."""
-    state = job["status"]
+    state = clean(job["status"])
     detail = job["reason"] or job["hold_reason"]
     if detail:
-        state += f"({detail})"
-    parts = [job["id"], state, f"queue={clean(job['queue'])}"]
+        state += f"({clean(detail)})"
+    parts = [clean(job["id"]), state, f"queue={clean(job['queue'])}"]
     if job["rank"] is not None:
-        parts.append(f"rank={job['rank']}")
+        parts.append(f"rank={clean(job['rank'])}")
     if job["blocked_by"]:
-        parts.append(f"blocked_by={job['blocked_by']}")
+        parts.append(f"blocked_by={clean(job['blocked_by'])}")
     parts.append("--")
     parts.extend(shlex.quote(clean(arg)) for arg in job["argv"])
     return " ".join(parts)
@@ -46,7 +46,7 @@ def job_line(job: dict[str, Any]) -> str:
 
 def _field(lines: list[str], name: str, value: object) -> None:
     if value is not None and value != [] and value != {}:
-        lines.append(f"{name}: {value}")
+        lines.append(f"{name}: {clean(value)}")
 
 
 def show_text(job: dict[str, Any]) -> str:
@@ -67,16 +67,18 @@ def show_text(job: dict[str, Any]) -> str:
     if job["shim_lost"]:
         lines.append("shim_lost: true")
     for attempt in job["attempts"]:
-        state = attempt["status"]
+        state = clean(attempt["status"])
         detail = attempt["reason"] or attempt["hold_reason"]
         if detail:
-            state += f"({detail})"
-        lines.append(f"attempt {attempt['attempt']}: {state} claimed {attempt['claimed_at']}")
+            state += f"({clean(detail)})"
+        lines.append(
+            f"attempt {clean(attempt['attempt'])}: {state} claimed {clean(attempt['claimed_at'])}"
+        )
         if attempt["exit"] is not None:
             lines.append(f"  exit: {exit_text(attempt['exit'])}")
         for message in attempt["hook_messages"]:
             lines.append(
-                f"  hook {clean(message['hook_id'])} {message['outcome']}: "
+                f"  hook {clean(message['hook_id'])} {clean(message['outcome'])}: "
                 f"{clean(message['message'])}"
             )
         if attempt["note"]:

@@ -300,6 +300,12 @@ CASES: list[tuple[str, dict[str, Any], dict[str, Any], bool]] = [
         False,
     ),
     (
+        "canceled while queued after a retry of a canceled attempt",
+        {**CANCELED_JOB, "retried_from_attempt": 1},
+        starting_attempt(status="canceled", reason="canceled", ended_at=ENDED),
+        False,
+    ),
+    (
         "canceled in starting",
         CANCELED_JOB,
         starting_attempt(status="canceled", reason="canceled", ended_at=ENDED),
@@ -477,3 +483,61 @@ def test_quiet_does_not_hide_the_requested_data(capsys: pytest.CaptureFixture[st
     seed_job("jb-aaaaaa22")
     assert "jb-aaaaaa22" in run_cli(capsys, "--quiet", "show", "jb-aaaaaa22").out
     assert "jb-aaaaaa22" in run_cli(capsys, "--quiet", "list").out
+
+
+# -- every string field is sanitized in human output ------------------------------------------
+
+FORGE = "\x1b[31mX\nforged: y"
+
+
+def _assert_no_forgery(out: str) -> None:
+    assert "\x1b" not in out
+    assert not any(line.startswith("forged") for line in out.splitlines())
+
+
+def test_human_show_sanitizes_reason_hold_reason_and_timestamps(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    seed_job(
+        "jb-aaaaaa22",
+        status="failed",
+        reason=FORGE,
+        attempt=1,
+        ended_at=FORGE,
+        created_at=FORGE,
+        enqueued_at=FORGE,
+        status_changed_at=FORGE,
+        not_before=FORGE,
+        attempts=[
+            finished(
+                reason=FORGE,
+                hold_reason=FORGE,
+                claimed_at=FORGE,
+                status="failed",
+                hook_messages=[{"hook_id": "h:0", "outcome": FORGE, "message": "m"}],
+            )
+        ],
+    )
+    res = run_cli(capsys, "show", "jb-aaaaaa22")
+    assert res.code == 0, res.err
+    _assert_no_forgery(res.out)
+
+
+def test_human_list_sanitizes_reason_and_hold_reason(capsys: pytest.CaptureFixture[str]) -> None:
+    seed_job("jb-aaaaaa22", status="failed", reason=FORGE, attempt=1, ended_at=ENDED)
+    seed_job("jb-bbbbbb22", status="held", hold_reason=FORGE)
+    res = run_cli(capsys, "list", "--all")
+    assert res.code == 0, res.err
+    _assert_no_forgery(res.out)
+    assert len(res.out.splitlines()) == 2
+
+
+def test_exit_text_sanitizes_its_fields() -> None:
+    from jobsctl.job_text import exit_text
+
+    for record in (
+        {"kind": FORGE, "code": None, "signal": None, "core": False},
+        {"kind": "exited", "code": FORGE, "signal": None, "core": False},
+        {"kind": "signaled", "code": None, "signal": FORGE, "core": False},
+    ):
+        _assert_no_forgery(exit_text(record))

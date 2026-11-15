@@ -569,7 +569,7 @@ A terminal job, or a job held for `exit_13`, returns to `queued` in one transact
 
 ### `label add` / `label remove`
 
-`jobsctl label add <id> k=v...`, `jobsctl label remove <id> k=v...`. Any status. A command that changes at least one label is logged as one `label` event (`details`: `op` `add` or `remove`, and `labels`, the pairs actually added or removed); one that changes nothing logs nothing. A label that would be the job's 33rd exits 2 (`usage`, `details.limit`) after the id is resolved, and applies to `--dry-run` too. A key or value that contains a masked value ([Masking and sanitizing](#masking-and-sanitizing)) is refused before the database is opened, like `add`'s labels: exit 2 (`usage`, `details.code` `secret_in_label`, `details.label` the key for a value hit and omitted for a key hit, since naming the key would echo the secret). `--dry-run` opens the database read-only and prints the projected job; with no state directory yet the id is not found (exit 10). Output: `schemas/cli/change.json`.
+`jobsctl label add <id> k=v...`, `jobsctl label remove <id> k=v...`. Any status. A command that changes at least one label is logged as one `label` event (`details`: `op` `add` or `remove`, and `labels`, the pairs actually added or removed); one that changes nothing logs nothing. A label that would be the job's 33rd exits 2 (`usage`, `details.limit`) after the id is resolved, and applies to `--dry-run` too. `label add` refuses, before the database is opened and like `add`'s labels, a key or value that contains a masked value ([Masking and sanitizing](#masking-and-sanitizing)): exit 2 (`usage`, `details.code` `secret_in_label`, `details.label` the key for a value hit and omitted for a key hit, since naming the key would echo the secret). A `key=value` pair whose joined text contains a masked value is refused likewise, with no `details.label`. `label remove` runs no secret check (it only deletes), so a label stored with a secret can still be removed. `--dry-run` opens the database read-only, leaves the state directory as it found it, and prints the projected job; with no state directory yet the id is not found (exit 10). Output: `schemas/cli/change.json`.
 
 ### `capacity`
 
@@ -653,7 +653,7 @@ With `--json`, every non-zero exit prints `{"error": {...}}` on stdout (`schemas
 | `message` | always |
 | `reason` | with `refused` |
 | `candidates` | with `ambiguous`: the matching job ids |
-| `details` | optional, code-specific (e.g. `job_id` for `duplicate_key` and `cancel_pending`, `status` for `not_held` from `resolve`, `limit` for the label limit, `code` with `index`, `variable` or `label` for a secret refused by `add` or `label add`/`label remove`) |
+| `details` | optional, code-specific (e.g. `job_id` for `duplicate_key` and `cancel_pending`, `status` for `not_held` from `resolve`, `limit` for the label limit, `code` with `index`, `variable` or `label` for a secret refused by `add` or `label add`) |
 
 | Code | Exit | Commands |
 |---|---|---|

@@ -47,6 +47,8 @@ def current_attempt(tx: Tx, row: JobRow) -> sqlite3.Row | None:
     )
     if attempt is None:
         return None
+    if row["retried_from_attempt"] == row["attempt"]:
+        return None  # a retry requeued the job and nothing has been claimed since
     if status in (*_RUNNING, "held"):
         return attempt if attempt["status"] == status else None
     if attempt["status"] != status or attempt["reason"] != row["reason"]:
