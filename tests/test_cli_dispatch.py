@@ -170,38 +170,44 @@ def test_gate_passes_on_a_tty(
 
 
 @pytest.fixture
-def real_hold_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
-    """A command module another issue could add under `commands/`, registering `hold`."""
+def real_browse_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """A command module another issue could add under `commands/`, registering `browse`.
+
+    A real `browse` handler (a later issue) is set aside while the fake registers and put back
+    afterwards, so the test holds whether or not the real command exists."""
     package_dir = tmp_path / "fakecmds"
     package_dir.mkdir()
-    (package_dir / "fake_hold.py").write_text(
+    (package_dir / "fake_browse.py").write_text(
         "from jobsctl.cli_registry import command\n\n"
-        "@command('hold')\ndef hold(ctx):\n    return 7\n"
+        "@command('browse')\ndef browse(ctx):\n    return 7\n"
     )
     real_table = cli_registry._HANDLERS
+    saved = real_table.pop("browse", None)
     monkeypatch.setattr(commands, "__path__", [*commands.__path__, str(package_dir)])
-    yield "fake_hold"
-    real_table.pop("hold", None)
-    sys.modules.pop("jobsctl.commands.fake_hold", None)
+    yield "fake_browse"
+    real_table.pop("browse", None)
+    if saved is not None:
+        real_table["browse"] = saved
+    sys.modules.pop("jobsctl.commands.fake_browse", None)
 
 
-def test_load_all_registers_command_modules_once(real_hold_module: str) -> None:
-    assert "hold" not in cli_registry._HANDLERS
+def test_load_all_registers_command_modules_once(real_browse_module: str) -> None:
+    assert "browse" not in cli_registry._HANDLERS
     commands.load_all()
-    assert cli_registry.lookup("hold") is not None
+    assert cli_registry.lookup("browse") is not None
     before = dict(cli_registry._HANDLERS)
     commands.load_all()  # idempotent: no duplicate-registration error, nothing changes
     assert cli_registry._HANDLERS == before
 
 
 def test_fixture_survives_a_real_module_registering_the_same_command(
-    real_hold_module: str,
+    real_browse_module: str,
     handlers: dict[str, cli_registry.Handler],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    command("hold")(lambda ctx: 0)  # the test's own handler under the real module's name
-    assert run_cli(capsys, "hold", JID).code == 0
-    assert cli_registry.lookup("hold") is not None
+    command("browse")(lambda ctx: 0)  # the test's own handler under the real module's name
+    assert run_cli(capsys, "browse").code == 0
+    assert cli_registry.lookup("browse") is not None
 
 
 def test_real_entry_point_version_and_usage_error(tmp_path: Path) -> None:
