@@ -46,6 +46,31 @@ def spawn_detached(argv: list[str], *, env: dict[str, str], cwd: str) -> subproc
     )
 
 
+def spawn_job(
+    argv: list[str], *, executable: str, env: dict[str, str], cwd: str
+) -> subprocess.Popen[bytes]:
+    """Start a job's process (fork and exec only): `executable` is the resolved absolute path and
+    `argv` keeps the job's own argv[0]; a **new process group** whose id is the job's PID (the
+    group the shim may later signal, and only that one), exactly `env`, `cwd`, stdin
+    ``/dev/null``, stdout and stderr on **one** pipe the caller reads, every other descriptor
+    closed. No new session: a job is not a daemon. Signal dispositions: SIGPIPE is restored to its
+    default by `Popen`; a handled signal is reset by exec, an ignored one would be inherited, so
+    the shim handles (rather than ignores) SIGHUP and SIGINT. `OSError` if the exec fails."""
+    return subprocess.Popen(
+        argv,
+        executable=executable,
+        env=env,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        close_fds=True,
+        process_group=0,
+        restore_signals=True,
+        shell=False,
+    )
+
+
 def sleep(seconds: float) -> None:
     """Sleep (tests replace this to run back-offs and loop intervals instantly)."""
     time.sleep(seconds)

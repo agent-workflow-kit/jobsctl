@@ -39,7 +39,9 @@ def test_death_by_signal_is_signaled_with_the_signal_number() -> None:
 
 
 def test_a_shell_reporting_a_killed_child_is_an_ordinary_exit_143() -> None:
-    got = _wait("import subprocess; raise SystemExit(subprocess.call(['/bin/sh', '-c', 'exit 143']))")
+    got = _wait(
+        "import subprocess; raise SystemExit(subprocess.call(['/bin/sh', '-c', 'exit 143']))"
+    )
     assert exit_record(got.si_code, got.si_status) == ExitRecord("exited", code=143)
 
 

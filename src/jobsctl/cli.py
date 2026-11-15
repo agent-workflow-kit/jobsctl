@@ -62,7 +62,9 @@ def _config_path(args: argparse.Namespace) -> Path | None:
     return absolute(args.config) if args.config is not None else None
 
 
-def _context(args: argparse.Namespace, config: Config) -> Context:
+def _context(
+    args: argparse.Namespace, config: Config, config_error: JobsctlError | None = None
+) -> Context:
     return Context(
         args=args,
         command=args.command_key,
@@ -74,6 +76,7 @@ def _context(args: argparse.Namespace, config: Config) -> Context:
         me_name=config.actor_name(os_user_name()),
         config=config,
         explicit_actor=getattr(args, "actor", None),
+        config_error=config_error,
     )
 
 
@@ -105,12 +108,19 @@ def _dispatch(argv: list[str]) -> tuple[int, bool]:
             # diagnostics of a triggered pass: diag/run-<pid>.log, created on the first write; set
             # up before the config is read so that a broken config leaves a trace
             install(resolve_state_dir() / "diag" / f"run-{os.getpid()}.log")
-        config = load_config(_config_path(args))
+        config_error: JobsctlError | None = None
+        try:
+            config = load_config(_config_path(args))
+        except JobsctlError as err:
+            if args.command_key != "_shim":
+                raise
+            # the shim reports an unreadable config on its job (`failed`, `spawn_failed`) itself
+            config, config_error = Config(), err
         commands.load_all()
         handler = lookup(args.command_key)
         if handler is None:
             raise JobsctlError("internal", f"{args.command_key}: not implemented yet")
-        return handler(_context(args, config)), args.json
+        return handler(_context(args, config, config_error)), args.json
     except JobsctlError as err:
         print_error(err, as_json=args.json)
         return err.exit_code, args.json

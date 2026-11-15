@@ -64,7 +64,7 @@ def new_claim_id() -> str:
     return secrets.token_hex(16)
 
 
-def _transition_record(
+def transition_record(
     job_id: str, queue: str, from_status: str, to_status: str, attempt: int, **extra: Any
 ) -> LogRecord:
     fields: dict[str, Any] = {
@@ -142,9 +142,7 @@ def claim_jobs(
             [chosen.job_id, number, claim_id, now, claimed_by, __version__],
         )
         claims.append(Claim(chosen.job_id, chosen.queue, number, claim_id))
-        records.append(
-            _transition_record(chosen.job_id, chosen.queue, "queued", "starting", number)
-        )
+        records.append(transition_record(chosen.job_id, chosen.queue, "queued", "starting", number))
         snapshot = _with_claim(snapshot, chosen.queue, chosen.job_id)
     return claims, records
 
@@ -247,7 +245,7 @@ def fail_spawn(
     )
     return SpawnFailure(job_id, number, True, message), [
         LogRecord("shim_spawn_failed", "error", {**detail, "details": {"failures": failures}}),
-        _transition_record(
+        transition_record(
             job_id,
             queue,
             "starting",

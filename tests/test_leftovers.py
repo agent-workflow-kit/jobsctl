@@ -112,10 +112,12 @@ def test_real_processes_group_members_and_a_setsid_orphan_are_counted_and_not_si
     assert leader.stdout is not None
     leader.stdout.readline()
     os.waitid(os.P_PID, leader.pid, os.WEXITED | os.WNOWAIT)
+    pids: tuple[int, ...] = ()
     try:
         got = count_leftovers(
             LinuxHost(), leader_pid=leader.pid, pgid=leader.pid, own_pid=os.getpid()
         )
+        pids = got.pids
         assert got.count == 2
         for pid in got.pids:
             os.kill(pid, 0)  # still alive: counted, never signaled
@@ -124,13 +126,13 @@ def test_real_processes_group_members_and_a_setsid_orphan_are_counted_and_not_si
         os.killpg(leader.pid, signal.SIGKILL)
         leader.wait(timeout=10)
         leader.stdout.close()
-        for pid in got.pids:
+        for pid in pids:
             try:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
         deadline = time.monotonic() + 10
-        for pid in got.pids:
+        for pid in pids:
             while time.monotonic() < deadline and not gateway_proc.reap_if_exited(pid):
                 time.sleep(0.02)
         gateway_proc.prctl(gateway_proc.PR_SET_CHILD_SUBREAPER, 0)
