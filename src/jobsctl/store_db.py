@@ -84,7 +84,7 @@ class Tx:
         self._store = store
         self._writable = writable
         self._open = True
-        self._callbacks: list[Callable[[], None]] = []
+        self._callbacks: list[Callable[[], object]] = []
 
     @property
     def store(self) -> Store:
@@ -118,7 +118,7 @@ class Tx:
         except sqlite3.Error as exc:
             raise translate(exc, timeout=self._store.busy_timeout) from exc
 
-    def after_commit(self, callback: Callable[[], None]) -> None:
+    def after_commit(self, callback: Callable[[], object]) -> None:
         """Run ``callback`` after a successful COMMIT (never on rollback): the place to log."""
         if not self._writable:
             raise RuntimeError("only a write transaction has commit callbacks")
