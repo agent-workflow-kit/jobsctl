@@ -4,8 +4,8 @@ One `BEGIN IMMEDIATE` transaction resolves the job, applies the change and build
 object; the `label` log record is appended after the commit. `--dry-run` runs the same
 decisions in a read transaction on a read-only connection and writes nothing. Labels are
 identifier fields the log builders do not mask, so a secret is refused here, before the
-database is opened (the same refusal `add` makes for its labels); `label remove` skips the
-check so that a label stored with a secret can still be removed.
+database is opened (`add` is to get the same refusal for its labels from issue #46); `label
+remove` skips the check so that a label stored with a secret can still be removed.
 """
 
 from __future__ import annotations
