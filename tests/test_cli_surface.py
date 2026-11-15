@@ -163,7 +163,7 @@ VALID: list[tuple[list[str], dict[str, Any]]] = [
             "priority": -5,
             "top": True,
             "pin": True,
-            "cwd": "/a/c",
+            "cwd": "/a/b/../c",  # normalized later, by add
             "env": [("A", "b=c"), ("B", "")],
             "pass_env": ["TOKEN"],
             "label": [("k", "v=w"), ("x", "")],
