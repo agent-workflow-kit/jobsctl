@@ -442,6 +442,15 @@ Action names: `finalized`, `failed_lost`, `canceled_forced`, `requeued`, `marked
 
 A `failed_lost` failure is subject to [automatic retry](#automatic-retry). Reconcile itself signals nothing and fires no hooks (hooks are run by the processes in [Delivery](#delivery)); job processes are signaled only by a shim or by a `_kill` started for a committed force request.
 
+Only a process proven dead counts as gone (not found, a reused PID, a zombie, another boot id); an inconclusive identity check changes nothing, so a slow shim is never finalized. Details the table leaves open:
+
+- `result_file_finalized` applies to `running` attempts (a `starting` attempt has no job process, so no result). A file is used only when its `claim_id` is the attempt's and its outcome is one a shim writes (what the exit alone decides, or `timeout`/`terminated`); a symlink, a loose mode, a damaged or foreign file is ignored with a diagnostics line and the other rules apply. The file is deleted after the commit.
+- `job_gone` counts `leftovers` when the leader is gone or a zombie (while group members remain, its PID cannot be a stranger's); a reused leader PID leaves `leftovers` `null`, as does a reboot.
+- `force_resumed` starts a `_kill` only when the shim is proven dead; a live shim acts on its request itself.
+- `hooks_redelivered` is reported for every job with undelivered synchronous events and no live `job:<id>` lease holder at the time the delivery is requested; delivery itself is `_deliver`'s.
+- `reconcile` (the command) asks for a pass when it ended or requeued a job, so a freed slot is used; its `--dry-run` takes no lease and writes nothing, and reports `already_running` when a live process holds the lease.
+- A pass spends at most 20 seconds on the rules, renews its lease before each job, and logs and skips a job whose rule fails; the rest waits for the next pass.
+
 ### Upgrades
 
 The database records its schema version (`user_version`). Migrations are **additive only**: new tables and new columns with defaults, never a drop, a rename or a change of meaning, so code of the previous version keeps working against a migrated database. A change that cannot be made additively ships only in a new major version, whose release notes give a drain step: stop `run --loop` and the cron entry, then wait until `jobsctl list --status starting --status running` is empty.

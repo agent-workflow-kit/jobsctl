@@ -1,7 +1,8 @@
 """The result file `shims/<id>.<attempt>.result` (docs/interface.md, Start sequence step 9).
 
 The shim writes the outcome of the job here before its final commit, so a shim that dies between
-the two leaves what reconcile needs to finalize the attempt (`result_file_finalized`, TODO(#22)).
+the two leaves what reconcile needs to finalize the attempt (`result_file_finalized`,
+`jobsctl.reconcile`).
 The name is predictable and lives in a directory only the user can write, but the file is still
 created defensively: the directory is opened without following symlinks and every operation is
 relative to that descriptor; the content goes to an exclusively created temporary file (0600,
