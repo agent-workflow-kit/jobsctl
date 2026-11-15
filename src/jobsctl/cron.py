@@ -48,10 +48,22 @@ def quote(value: str) -> str:
     """``value`` as one single-quoted shell word with ``%`` escaped for cron.
 
     ``'`` becomes ``'\\''``. Cron turns a bare ``%`` into a newline even inside quotes and turns
-    ``\\%`` back into ``%`` before the shell runs, so that is the only escape needed; the value
-    is otherwise literal to the shell (no ``$``, backtick or backslash expansion in single quotes).
+    ``\\%`` back into ``%`` before the shell runs, so ``%`` becomes ``\\%``. A backslash directly
+    before a ``%`` would pair with the escape's backslash (``\\\\%``: cron keeps the pair and
+    sees a bare ``%``), so that backslash is written outside the single quotes as ``'"\\\\"'``
+    (a double-quoted backslash). The value is otherwise literal to the shell.
     """
-    return "'" + value.replace("'", "'\\''").replace("%", "\\%") + "'"
+    out: list[str] = []
+    for i, ch in enumerate(value):
+        if ch == "'":
+            out.append("'\\''")
+        elif ch == "%":
+            out.append("\\%")
+        elif ch == "\\" and value[i + 1 : i + 2] == "%":
+            out.append("'\"\\\\\"'")
+        else:
+            out.append(ch)
+    return "'" + "".join(out) + "'"
 
 
 def has_control(text: str) -> bool:
@@ -186,6 +198,11 @@ def _parse(data: bytes | None) -> _Parsed:
     lines = raw.split(b"\n")
     if lines and lines[-1] == b"":
         lines.pop()
+    if any(line == HEADER + b"\r" for line in lines):
+        raise _fail(
+            "the crontab has a '# jobsctl managed' line with a trailing CR (CRLF line ends); "
+            "fix it by hand"
+        )
     headers = [i for i, line in enumerate(lines) if line == HEADER]
     if len(headers) > 1:
         raise _fail("the crontab has more than one '# jobsctl managed' block; fix it by hand")
@@ -325,8 +342,11 @@ def install(*, dry_run: bool, environ: Mapping[str, str], argv0: str, home: str)
     entries = environ.get("PATH", "").split(":") if environ.get("PATH") else []
     local_bin = home.rstrip("/") + "/.local/bin"
     path, warnings = filter_path(entries, home=home)
-    if local_bin not in path and os.path.isdir(local_bin):
-        path.append(local_bin)
+    if local_bin not in path:
+        extra, extra_warnings = filter_path([local_bin], home=home)
+        path += extra
+        # a missing ~/.local/bin is normal and silent; an odd HOME is worth a warning
+        warnings += [w for w in extra_warnings if w["reason"] not in ("missing", "empty")]
     if not path:
         raise _fail("no usable PATH entry is left to write; set PATH and try again")
     xdg, xdg_warnings = filter_xdg(environ)

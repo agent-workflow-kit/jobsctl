@@ -8,16 +8,18 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
-from jobsctl import cron
+from jobsctl import cron, gateway
 from tests.conftest import validate_against
 from tests.cron_fakes import FakeCrontab, install_fake_crontab
 from tests.helpers import run_cli
 
 JOBSCTL = "/opt/jobsctl bin/jobsctl"
+REAL_LOCATE = cron.locate_jobsctl
 
 
 @pytest.fixture
@@ -337,3 +339,147 @@ def test_concurrent_installs_serialize_and_leave_one_block(
     data = fake.get()
     assert data is not None
     assert data.count(b"# jobsctl managed\n") == 1 and data.startswith(b"keep\n")
+
+
+def test_a_second_install_blocks_while_the_cron_lock_is_held(
+    fake: FakeCrontab, tmp_path: Path
+) -> None:
+    """Fails without the flock: the second install would finish (and touch the crontab) at once."""
+    fake.set(b"keep\n")
+    home = tmp_path / "home"
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "XDG_STATE_HOME": str(home / ".local/state"),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+    }
+    code = (
+        "import sys; from jobsctl import cron; "
+        f"cron.TEMP_ROOTS = (); cron.locate_jobsctl = lambda a, e: {JOBSCTL!r}; "
+        "from jobsctl.cli import main; sys.exit(main(['cron', 'install', '--quiet']))"
+    )
+    lock_fd = cron._acquire_lock()
+    proc = subprocess.Popen([sys.executable, "-I", "-c", code], env=env, stderr=subprocess.PIPE)
+    try:
+        try:
+            time.sleep(2.0)
+            assert proc.poll() is None, "install did not wait for cron.lock"
+            assert fake.calls() == [] and fake.get() == b"keep\n"
+        finally:
+            os.close(lock_fd)  # release; the install now proceeds
+        _, err = proc.communicate(timeout=60)
+        assert proc.returncode == 0, err.decode()
+    except BaseException:
+        proc.kill()
+        proc.wait(timeout=15)
+        raise
+    data = fake.get()
+    assert data is not None and data.count(b"# jobsctl managed\n") == 1
+
+
+def test_retry_exhaustion_is_an_error_and_writes_nothing(
+    fake: FakeCrontab, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    count = {"n": 0}
+
+    def always_changing() -> bytes | None:
+        count["n"] += 1
+        return b"v%d\n" % count["n"]
+
+    monkeypatch.setattr(gateway, "crontab_read", always_changing)
+    res = run_cli(capsys, "--json", "cron", "install")
+    assert res.code == 1
+    assert "keeps changing under us" in res.envelope()["error"]["message"]
+    assert count["n"] == 6  # three attempts, two reads each
+    assert fake.get() is None and fake.calls() == []
+
+
+def test_no_usable_path_entry_is_an_error(
+    fake: FakeCrontab, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "relative:")
+    res = run_cli(capsys, "--json", "cron", "install")
+    assert res.code == 1 and "no usable PATH entry" in res.envelope()["error"]["message"]
+    assert res.envelope()["error"]["code"] == "internal"
+
+
+def test_a_jobsctl_path_with_a_control_character_is_an_error(
+    fake: FakeCrontab,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    exe = tmp_path / "bad\ndir" / "jobsctl"
+    exe.parent.mkdir()
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    monkeypatch.setattr(cron, "locate_jobsctl", REAL_LOCATE)
+    monkeypatch.setattr(cron, "main_argv0", lambda: str(exe))
+    fake.set(b"keep\n")
+    res = run_cli(capsys, "--json", "cron", "install")
+    assert res.code == 1 and "control character" in res.envelope()["error"]["message"]
+    assert fake.get() == b"keep\n" and fake.calls() == []
+
+
+@pytest.mark.parametrize("verb", ["install", "uninstall"])
+def test_a_crontab_call_timeout_is_an_error(
+    fake: FakeCrontab,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+) -> None:
+    def hang(*args: object, **kwargs: object) -> object:
+        raise subprocess.TimeoutExpired(cmd="crontab", timeout=30)
+
+    monkeypatch.setattr(gateway.subprocess, "run", hang)
+    res = run_cli(capsys, "--json", "cron", verb)
+    assert res.code == 1
+    err = res.envelope()["error"]
+    assert err["code"] == "internal" and "timed out" in err["message"]
+
+
+def test_json_reports_a_relative_xdg_value_and_a_path_entry_with_a_newline(
+    fake: FakeCrontab, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", "rel/s")
+    monkeypatch.setenv("PATH", f"{os.environ['PATH']}:/evil\n* * * * * rm -rf ~")
+    # XDG_STATE_HOME is relative so jobsctl's own state dir falls back to HOME: still private
+    doc = install(capsys)
+    warnings = doc["warnings"]
+    assert isinstance(warnings, list)
+    assert {(w.get("variable"), w["reason"]) for w in warnings} == {
+        ("XDG_STATE_HOME", "relative"),
+        (None, "control"),
+    }
+    assert "rm -rf" not in str(doc["block"]) and "rm -rf" not in (fake.get() or b"").decode()
+    assert len((fake.get() or b"").splitlines()) == 2
+
+
+def test_a_home_with_a_newline_or_relative_adds_no_local_bin_entry(
+    fake: FakeCrontab, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    good = tmp_path / "good"
+    good.mkdir()
+    nl_home = tmp_path / "h\nome"
+    (nl_home / ".local" / "bin").mkdir(parents=True)
+    rel_home = tmp_path / "rel"
+    (rel_home / ".local" / "bin").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    for home, reason in ((str(nl_home), "control"), ("rel", "relative")):
+        result = cron.install(dry_run=True, environ={"PATH": str(good)}, argv0="jobsctl", home=home)
+        assert result.block is not None and len(result.block.split("\n")) == 2
+        assert f"PATH='{good}'" in result.block
+        assert [(w["code"], w["reason"]) for w in result.warnings] == [
+            ("path_entry_dropped", reason)
+        ]
+
+
+def test_a_crlf_header_is_refused_by_install_and_uninstall(
+    fake: FakeCrontab, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bad = b"# jobsctl managed\r\n* * * * * PATH='/a' '/j' run --quiet\r\n"
+    fake.set(bad)
+    for verb in ("install", "uninstall"):
+        res = run_cli(capsys, "--json", "cron", verb)
+        assert res.code == 1 and res.envelope()["error"]["code"] == "internal"
+    assert fake.get() == bad and set(fake.calls()) == {"-l"}

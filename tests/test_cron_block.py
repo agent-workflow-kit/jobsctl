@@ -50,15 +50,65 @@ def test_quote_round_trips_through_a_shell(value: str) -> None:
     assert out.stdout == value.encode()
 
 
+def cron_preprocess(command: str) -> tuple[str, bool]:
+    """What cron does to a crontab command before ``sh -c``: a backslash takes the next character
+    with it (``\\%`` becomes ``%``, any other pair is kept as is, so ``\\\\`` consumes both) and the
+    first unescaped ``%`` ends the command. Returns the command and whether a bare ``%`` cut it."""
+    out: list[str] = []
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if ch == "\\" and i + 1 < len(command):
+            nxt = command[i + 1]
+            out.append("%" if nxt == "%" else ch + nxt)
+            i += 2
+            continue
+        if ch == "%":
+            return "".join(out), True
+        out.append(ch)
+        i += 1
+    return "".join(out), False
+
+
 def test_quoted_percent_is_cron_escaped_and_shell_literal() -> None:
     """Cron turns ``\\%`` into ``%`` before the shell sees it; emulate that step."""
-    quoted = cron.quote("a%b\\%c")
-    assert "%" not in quoted.replace("\\%", "")
-    after_cron = quoted.replace("\\%", "%")
-    out = subprocess.run(
-        ["/bin/sh", "-c", f"printf %s {after_cron}"], capture_output=True, check=True
+    value = "a%b\\%c"
+    after_cron, cut = cron_preprocess(f"printf \\%s {cron.quote(value)}")
+    assert not cut
+    out = subprocess.run(["/bin/sh", "-c", after_cron], capture_output=True, check=True)
+    assert out.stdout == value.encode()
+
+
+SPECIAL = ["a\\%b", "\\%", "\\\\%", "x\\", "50%", "it's\\%", "\\'%"]
+
+
+@pytest.mark.parametrize("value", SPECIAL)
+def test_entry_survives_cron_preprocessing_for_jobsctl_path_path_and_xdg(
+    tmp_path: Path, value: str
+) -> None:
+    stub = tmp_path / ("j" + value.replace("/", "_"))
+    stub.write_text('#!/bin/sh\nprintf "%s\\n" "$PATH" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$@"\n')
+    stub.chmod(0o755)
+    line = cron.build_entry(
+        jobsctl=str(stub),
+        path=["/p" + value],
+        xdg={"XDG_CONFIG_HOME": "/c" + value, "XDG_STATE_HOME": "/s" + value},
     )
-    assert out.stdout == b"a%b\\%c"
+    command, cut = cron_preprocess(line.removeprefix("* * * * * "))
+    assert not cut, command
+    out = subprocess.run(["/bin/sh", "-c", command], capture_output=True, check=True, text=True)
+    assert out.stdout.split("\n")[:-1] == [
+        "/p" + value,
+        "/c" + value,
+        "/s" + value,
+        "run",
+        "--quiet",
+    ]
+
+
+def test_backslash_before_percent_is_moved_out_of_the_single_quotes() -> None:
+    assert cron.quote("a\\%b") == "'a'\"\\\\\"'\\%b'"
+    assert cron.quote("a\\b") == "'a\\b'"
 
 
 # -- PATH filtering ---------------------------------------------------------------------------
@@ -97,6 +147,17 @@ def test_filter_path_drops_with_a_reason_each(tmp_path: Path) -> None:
     ]
     assert {w["code"] for w in warnings} == {"path_entry_dropped"}
     assert all(w["message"] for w in warnings)
+
+
+def test_header_with_a_trailing_cr_is_ambiguous_for_install_and_uninstall() -> None:
+    """A CRLF crontab: the header line is not recognised, so refuse rather than add a second."""
+    data = b"# jobsctl managed\r\n" + ENTRY + b"\r\n"
+    with pytest.raises(JobsctlError) as err:
+        cron.with_block(data, ENTRY)
+    assert err.value.code == "internal"
+    with pytest.raises(JobsctlError) as err2:
+        cron.without_block(data)
+    assert err2.value.code == "internal"
 
 
 def test_filter_path_drops_an_entry_with_a_control_character(tmp_path: Path) -> None:

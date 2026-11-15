@@ -73,17 +73,20 @@ def test_a_real_cron_pass_starts_a_queued_job_and_its_shim_outlives_the_pass(
         backup.write_bytes(original)  # kept on disk even if this test is killed
 
     marker, pid_file = tmp_path / "done", tmp_path / "job.pid"
+    cleanup: subprocess.CompletedProcess[str] | None = None
+    cleanup_error: BaseException | None = None
     try:
-        installed = jobsctl("--json", "cron", "install")
-        assert installed.returncode == 0, installed.stderr
-        assert json.loads(installed.stdout)["changed"] is True
-
+        # Add the job before the entry exists, so nothing can start it before cron does.
         added = jobsctl(
             "--json", "add", "--", "sh", "-c", f"echo $$ > {pid_file}; sleep 8; touch {marker}"
         )
         assert added.returncode == 0, added.stderr
         job_id = json.loads(added.stdout)["job"]["id"]
         assert not pid_file.exists()  # nothing but cron may start it
+
+        installed = jobsctl("--json", "cron", "install")
+        assert installed.returncode == 0, installed.stderr
+        assert json.loads(installed.stdout)["changed"] is True
 
         deadline = time.monotonic() + WAIT_FOR_CRON
         while not marker.exists() and time.monotonic() < deadline:
@@ -100,9 +103,19 @@ def test_a_real_cron_pass_starts_a_queued_job_and_its_shim_outlives_the_pass(
             db.close()
         assert row == ("done",)
     finally:
-        cleanup = jobsctl("cron", "uninstall")
         try:
-            _restore(original)
+            cleanup = jobsctl("cron", "uninstall")
+        except BaseException as exc:  # e.g. a timeout: still restore below
+            cleanup_error = exc
         finally:
-            assert cleanup.returncode == 0, cleanup.stderr
-    assert gateway.crontab_read() == original
+            # The original crontab comes back whatever happened above.
+            try:
+                _restore(original)
+            except BaseException:
+                print(f"RESTORE FAILED: the original crontab is saved at {backup}")
+                raise
+    restored = gateway.crontab_read()
+    assert restored == original, f"crontab not restored; original saved at {backup}"
+    assert cleanup_error is None, f"cron uninstall raised {cleanup_error!r}"
+    assert cleanup is not None
+    assert cleanup.returncode == 0, cleanup.stderr
