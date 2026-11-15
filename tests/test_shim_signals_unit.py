@@ -1,4 +1,4 @@
-"""The signal sequence state machine over a fake host: order, grace, fallbacks, what is never sent."""
+"""The signal sequence state machine over a fake host: order, grace, fallbacks, never-sent."""
 
 from __future__ import annotations
 

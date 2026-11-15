@@ -177,7 +177,7 @@ def test_a_job_that_exits_on_its_own_before_the_timeout_is_not_signaled(store: S
     assert exit_of(store)["code"] == 3  # type: ignore[index]
 
 
-# -- escalation: a job that ignores SIGTERM, shell jobs with children (spike A4) ---------------------
+# -- escalation: a job that ignores SIGTERM, shell jobs with children (spike A4) ------------
 
 
 def test_a_job_ignoring_sigterm_is_killed_after_two_graces(
@@ -268,8 +268,8 @@ def test_a_process_that_left_the_group_is_never_signaled(
     """A daemon that called setsid is not in the job's group: the sequence never touches it."""
     pids = tmp_path / "pids"
     daemon = (
-        "import os,time; os.setsid(); open(%r,'a').write(str(os.getpid())+'\\n'); time.sleep(600)"
-        % str(pids)
+        "import os,time; os.setsid(); "
+        f"open({str(pids)!r},'a').write(str(os.getpid())+'\\n'); time.sleep(600)"
     )
     script = f'{sys.executable} -I -c "{daemon}" & while [ ! -s {pids} ]; do sleep 0.05; done; wait'
     seed_claimed(store, sh(script), overrides={"timeout": 2, "kill_grace": 1})
@@ -280,7 +280,7 @@ def test_a_process_that_left_the_group_is_never_signaled(
     assert alive(daemon_ident)  # still running: it was not in the group
 
 
-# -- SIGTERM to the shim and force requests ------------------------------------------------------------
+# -- SIGTERM to the shim and force requests -----------------------------------------
 
 
 def test_sigterm_while_running_ends_the_job_terminated(store: Store, job_guard: JobGuard) -> None:
