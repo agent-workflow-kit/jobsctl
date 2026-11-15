@@ -35,7 +35,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 | `hook_events.py`, `job_lookup.py`, `transitions_manual.py` | 1–4 | the post-hook outbox events written with a transition; finding jobs by id, prefix and selector; `hold`/`release`/`cancel` of non-running jobs |
 | `runner.py`, `claims.py`, `triggers.py`, `spawn.py`, `leases.py` | 2 | the pass: lease, reconcile hook point, claim loop with the `pass_requested` counter, shim spawn and identity record, delivery hand-off, retention, checkpoint; start triggers; `run --loop` (`commands/run.py`) |
 | `shim.py` | 2–4 | start sequence, output pump, tail flush, final commit and result file, timeout, signal sequence |
-| `output.py` | 2 | ring buffer, masking (window rules), sanitizing, compression |
+| `output_capture.py`, `output_tail.py`, `output_store.py`, `textsafe.py` | 2 | ring buffer; tail rendering (window rules, masking, sanitizing, live flush); compression and the `outputs` table; the shared sanitizer |
 | `kill.py` | 3 | `_kill` for force-cancel after a shim loss |
 | `reconcile.py` | 3 | reconcile rules and findings |
 | `hooks.py`, `deliver.py` | 4 | hook processes (WNOWAIT reservation, timeout, interrupted CLI commands), selectors, outbox delivery, `_deliver` and its async hooks |

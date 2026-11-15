@@ -85,7 +85,7 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 | `cli_registry.py` | the `@command` registry and the per-invocation `Context` |
 | `cli_output.py` | the error envelope and JSON line output (stdout with `--json`, stderr otherwise) |
 | `actors.py`, `checks.py`, `errors.py` | the actor grammar and the human-only gate; the usage, lookup, state, human check order; error codes, exit codes and the error envelope |
-| `textsafe.py` | the sanitizer for human output and echoed input |
+| `textsafe.py` | the sanitizer for human output and echoed input; `strip_escapes` and `escape_unsafe` are its steps 3 and 5 for the masked pipeline |
 | `commands/` | one module per command or small group, registered with `@command`: `add`, `capacity`, `queues`, `reorder` (move/pin/unpin/priority), `hold_release`, `cancel`, `prune`, `export`, `run` (one pass, or `--loop`), `internal` (`_shim`, and `_deliver`/`_kill` when they land); later issues add `list`/`show`/`wait`, `retry`, `resolve`, labels, `reconcile` and `cron` modules |
 | `retention.py` | retention and `prune`: batches of 100 jobs per transaction under a time budget (job, `job:<id>` lease and its `lease_since` counter rows deleted with the `pruned_ids` reservation), `shims/` and `diag/` file removal anchored by descriptors, the orphan sweep, forgetting unconfigured empty queues, audit records after the commit |
 | `hook_events.py` | the post-hook outbox events written with a transition (payload per `schemas/hooks/payload.json`, sync and async event per hook) |
@@ -108,7 +108,7 @@ D1–D25 come from the design session; D26–D37 and the revisions marked "(pass
 | `env_canonical.py` | the canonical environment (inherit, `JOBSCTL_*` removal, `env.set.PATH`, `path_prepend`, `PATH` cleaning) |
 | `env_job.py` | the job environment (the six steps, `missing_env`, reserved and invalid names) |
 | `env_mask.py` | the masking set (`mask_env`, every `env_file` value, `--pass-env` values; short-value warnings) and the one-pass replacement of its values, used for masking and the `add` secret refusal |
-| `output.py` | planned (output-capture issue): ring buffer, live-flush withholding, masking (with the masking set from `env_mask.py`), sanitizing, compression |
+| `output_tail.py`, `output_capture.py`, `output_store.py` | the tail renderer (steps 1 to 6 of masking and sanitizing, live-flush withholding), the ring buffer with byte counts and `snapshot`, tail encoding (zlib above 4 KiB, bounded decode) and the `outputs` row; the shim's pump is in `shim.py` |
 | `hooks.py` | sync hook execution under the unreaped-leader rule (process groups, timeouts, selectors, output read in memory for `decision_id`, `hook_messages` and the `hook_ran` excerpt), payload building, leaving async events to `_deliver` (D39), stopping a running hook when a CLI command is interrupted (D48) |
 | `config.py` | Pydantic models for every config key (strict, unknown keys refused, durations as seconds, `~/` expanded), per-queue precedence (`Config.queue`), `unknown_queue_selector` detection |
 | `config_files.py` | default path (`XDG_CONFIG_HOME`), `config.d/*.yaml` drop-ins and merge (maps merge, hook lists append), YAML loading without anchors, aliases or duplicate keys, absolute `--config` hand-off; errors name keys, never `env.*` values |
