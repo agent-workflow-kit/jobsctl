@@ -377,7 +377,9 @@ When the [timeout](#timeouts) expires the shim runs the sequence and ends the jo
 2. If the job's PID is still alive, or processes remain in the job's process group: SIGTERM to the job's process group.
 3. SIGKILL to the job's process group (and to the job's PID if it left the group).
 
-The shim keeps the job's group leader unreaped until the sequence and the leftover probe are done, so the process group id stays reserved and verifiable on every platform. Group signals are sent only to the process group the shim created for the job, and only while it is verified to be that group. Processes other than the job's own PID that left the group (e.g. a tmux server, which daemonizes into its own session) are never signaled.
+The shim keeps the job's group leader unreaped until the sequence and the leftover probe are done, so the process group id stays reserved and verifiable on every platform. Group signals are sent only to the process group the shim created for the job, and only while the leader's identity is verified.
+
+The group is addressed by the leader's PID while the leader's identity holds, even after the leader left the group, because the leader's PID stays reserved. Processes other than the job's own PID that left the group (e.g. a tmux server, which daemonizes into its own session) are never signaled.
 
 **Exact signals.** On Linux every signal that a jobsctl process (a shim, `_kill`, `cancel`, the firing process of a hook) sends to an exact PID (a shim, a job, a hook's leader) goes through `pidfd_open`, then an identity check of the pidfd's process ([Process identity](#process-identity)), then `pidfd_send_signal`. Where pidfds are unavailable (macOS; on Linux, an architecture outside the allow list of the system-call fallback, `ENOSYS`, `EPERM` from a seccomp filter, WSL1), jobsctl re-checks the identity immediately before `kill` or `killpg` and accepts the remaining window ([Residual risks](#residual-risks)).
 
@@ -407,6 +409,8 @@ A process identity is `(boot_id, pid, start)`:
 - **macOS:** `boot_id` from `sysctl kern.bootsessionuuid`; `start` from `proc_pidinfo(PROC_PIDTBSDINFO)` (seconds and microseconds) through `libproc`; never `ps` output.
 
 A process is alive only if a process with that PID exists in the current boot with the same start value. A zombie counts as not alive, except a job leader the shim keeps unreaped ([Signal sequence](#signal-sequence)). Wall-clock time is never used for identity.
+
+A zombie is a process in state `Z` with no live threads: a thread-group leader whose main thread exited while other threads run is alive. A PID recorded as an identity must be a thread-group leader, not a thread ID.
 
 ### Leases
 
@@ -613,6 +617,8 @@ A duration is `<integer><unit>` with unit `s`, `m`, `h` or `d` (e.g. `30s`, `10m
 
 Every timestamp is RFC 3339 in UTC with `Z` and millisecond precision (e.g. `2026-10-31T12:00:00.000Z`).
 
+A timestamp given as input (e.g. `export --since`) is RFC 3339 with `T` or `t`, with `Z`, `z` or a `+hh:mm`/`-hh:mm` offset, and an optional fraction of 1 to 9 digits; it is converted to UTC. A leap second (`:60`) is refused with `usage`.
+
 ## Global flags
 
 | Flag | Meaning |
@@ -786,6 +792,8 @@ jobsctl reads no `JOBSCTL_*` variable and removes every one from the [canonical 
 - **`audit.jsonl`** (`schemas/audit.json`): `seq`, `ts`, `actor`, `decision_id` (list), `target` (job id; `null` for `prune`), `action`, `inputs` (`argv_sha256`, `attempt`, `unique_key`, `queue`, `overrides`), `result` (the resulting status; `deleted` for `prune`), for: `cancel --force`, `cancel` of a held job, `release --override-escalation`, `resolve`, `retry` and `prune` (one record per pruned batch, with `inputs` `ids`, `older_than` in seconds and `trigger`: `command` or `retention`). Actions: `cancel_force`, `cancel_held`, `release_override`, `resolve`, `retry`, `prune`.
 - **`log.jsonl`** (`schemas/log.json`): every status transition (`event: transition`, with seq, job_id, queue, from, to, reason, hold_reason, attempt, actor, decision_ids, attempt_status, attempt_reason, retry_pending), `reorder` (move, pin, unpin, priority), `label` (label add or remove), `queue_created`, `shim_spawned`, `shim_spawn_failed`, `shim_lost`, `leftovers`, `short_secret_not_masked`, `env_file_unsafe`, `env_file_line_ignored`, `env_file_line_invalid`, `path_entry_dropped`, `pass_env_undefined`, `missing_env`, `unique_key_reused` (with `argv_sha256`), `hook_ran` (see [Hooks](#hooks)), `invalid_decision_id`, `unknown_queue_selector`, `config_invalid`, `runner_stuck`, `reconcile` (with `finding` and `action`), `pass` summaries (only for a pass that changed something).
 
+The state directory, `shims/` and `diag/` must be real directories and `state.db` a regular file, each owned by the user and none of them a symlink (ancestors of the state directory may be symlinks); otherwise every command that opens the database exits 1 (`internal`). To relocate the state directory, set `XDG_STATE_HOME`.
+
 An audit record's `inputs` carry `overrides` only for a `retry` whose flags changed the job's `overrides`, holding them after the change. A `transition` record carries the command's `decision_ids` and the job's `attempt`; whenever the transition changes an attempt's status (an attempt ends, or a `resolve` or `cancel` of an `escalated` or `exit_13` hold), also `attempt_status`, `attempt_reason` and `retry_pending` (so an attempt that failed and was requeued for an automatic retry shows its reason). `reorder` and `label` records carry `job_id`, `queue`, `actor` and `decision_ids`. State warnings (`env_file_unsafe`, `env_file_line_ignored`, `env_file_line_invalid`, `path_entry_dropped`, `unknown_queue_selector`, `config_invalid` from passes) are logged once per change of state, not at every load.
 
 `argv_sha256` is SHA-256 over each argv element in UTF-8 followed by a NUL byte. Every record carries `seq` from a per-file counter in `state.db`: the writer takes an exclusive `flock` on the file, increments the counter in its own short transaction, appends the line and releases the lock, so records appear in file order and `seq` has gaps only after a crash; the counter survives external rotation. No process appends to either file inside a database write transaction: it logs after the commit. Levels: `info`, `warn`, `error`. jobsctl does not rotate either file; audit records are kept forever (architecture §14).
@@ -806,6 +814,7 @@ Every TUI action is a CLI command.
 
 - **Linux and WSL:** identity from `/proc` ([Process identity](#process-identity)); the shim is a child subreaper; exact signals use pidfds where available ([Signal sequence](#signal-sequence)), and a `shim_lost` group signal uses `PIDFD_SIGNAL_PROCESS_GROUP` on Linux 6.9 or later ([Signal sequence](#signal-sequence)). Shutting down the WSL VM ends every shim and job; the next pass sees a new boot id and marks their jobs `lost`. A shutdown or a logout with `KillUserProcesses` sends SIGTERM to the shims, so their jobs end `failed` (`terminated`). Cron runs only if the distribution runs `cron`.
 - **macOS:** identity through `libproc` and `sysctl` (`kern.bootsessionuuid`); no subreaper, so [leftovers](#leftovers) are counted only by probing the job's process group; no pidfds, so signals to processes jobsctl did not spawn are checked immediately before sending, and `PR_SET_DUMPABLE` does not exist.
+- **Hidden `/proc`:** with `hidepid=2` (or `invisible`) on `/proc`, other users' processes are inconclusive, never dead: a missing `/proc/<pid>` reads as unknown and a group probe is incomplete.
 - **Cron:** cron's environment is minimal and its `python3` may be older than 3.12; [`cron install`](#cron-install--cron-uninstall) writes the absolute path of `jobsctl`, an explicit `PATH` and the `XDG_*` directories set at install.
 - **Requirements:** Python ≥ 3.12; SQLite ≥ 3.35.
 
