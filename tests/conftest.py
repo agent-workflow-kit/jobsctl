@@ -48,3 +48,43 @@ def validate_against(schema_name: str, instance: object) -> None:
     """Validate ``instance`` against ``schemas/<schema_name>`` (e.g. ``cli/error.json``)."""
     doc = json.loads((SCHEMAS / schema_name).read_text(encoding="utf-8"))
     Draft202012Validator(doc, registry=_registry()).validate(instance)
+
+
+def validate_record_file(path: Path, schema_name: str, *, torn: int = 0) -> list[dict[str, Any]]:
+    """Validate every line of the record file ``path`` against ``schemas/<schema_name>``.
+
+    Records written by child processes bypass ``validated_records``, so process tests check the
+    files afterwards. Exactly ``torn`` lines may be torn fragments (not JSON); every other line
+    must be a record matching the schema. Returns the records in file order.
+    """
+    records: list[dict[str, Any]] = []
+    fragments = 0
+    for line in path.read_text(encoding="ascii").splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            fragments += 1
+            continue
+        validate_against(schema_name, record)
+        records.append(record)
+    assert fragments == torn, f"{path.name}: {fragments} torn lines, expected {torn}"
+    return records
+
+
+@pytest.fixture
+def validated_records(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Validate every record a ``RecordWriter`` appends in this process against its schema.
+
+    Audit appends are the durable ones, so ``durable`` tells the two files apart. A record that
+    does not match fails the test (``ValidationError`` is not a ``ValueError``). Tests that write
+    foreign or torn lines straight to a file bypass the writer and are not checked.
+    """
+    from jobsctl import log_writer
+
+    real = log_writer.append_line
+
+    def checked(fd: int, data: bytes, *, durable: bool) -> None:
+        validate_against("audit.json" if durable else "log.json", json.loads(data))
+        real(fd, data, durable=durable)
+
+    monkeypatch.setattr(log_writer, "append_line", checked)

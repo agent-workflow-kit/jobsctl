@@ -56,6 +56,19 @@ def _escape_char(ch: str) -> str:
     return ch
 
 
+def strip_escapes(text: str) -> str:
+    """``text`` without terminal escape sequences (the first step of :func:`sanitize`)."""
+    return _ESCAPES.sub("", text)
+
+
+def is_invisible(ch: str) -> bool:
+    """Is ``ch`` a control, format, surrogate, separator or bidi character (escaped by
+    :func:`sanitize`)?"""
+    return (
+        unicodedata.category(ch) in ("Cc", "Cs", "Cf", "Zl", "Zp") or ord(ch) in _BIDI_AND_INVISIBLE
+    )
+
+
 def sanitize(text: str, *, inline: bool = False) -> str:
     """Strip terminal escape sequences and escape control, bidirectional, invisible format and
     line or paragraph separator characters as `\\uNNNN`.
