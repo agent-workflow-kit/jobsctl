@@ -5,7 +5,10 @@ description = "Generic job queue with concurrency caps, ordering and held jobs"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-dependencies = []
+dependencies = [
+    "pydantic>=2.14.2",
+    "pyyaml>=6.0.3",
+]
 
 [project.scripts]
 jobsctl = "jobsctl.cli:main"
@@ -24,6 +27,7 @@ dev = [
     "pyright>=1.1.380",
     "pymarkdownlnt>=0.9.41",
     "jsonschema>=4.26.0",
+    "types-pyyaml>=6.0.12.20261103",
 ]
 
 [tool.ruff]
