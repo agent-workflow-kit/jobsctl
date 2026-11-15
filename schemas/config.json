@@ -10,6 +10,7 @@
         "null"
       ],
       "minimum": 0,
+      "maximum": 2147483647,
       "default": 1,
       "description": "Cap of a queue with no configured cap; null: unbounded."
     },
@@ -19,6 +20,7 @@
         "null"
       ],
       "minimum": 0,
+      "maximum": 2147483647,
       "default": null,
       "description": "Total running jobs across queues; null: none."
     },
@@ -34,13 +36,13 @@
     },
     "run_interval": {
       "type": "string",
-      "pattern": "^[1-9][0-9]*[smhd]$",
+      "pattern": "^(?:[1-9][0-9]{0,3}|[12][0-9]{4}|3[0-5][0-9]{3}|36[0-4][0-9]{2}|36500)d$|^(?:[1-9][0-9]{0,4}|[1-7][0-9]{5}|8[0-6][0-9]{4}|87[0-5][0-9]{3}|876000)h$|^(?:[1-9][0-9]{0,6}|[1-4][0-9]{7}|5[01][0-9]{6}|52[0-4][0-9]{5}|525[0-5][0-9]{4}|52560000)m$|^(?:[1-9][0-9]{0,8}|[12][0-9]{9}|30[0-9]{8}|31[0-4][0-9]{7}|315[0-2][0-9]{6}|3153[0-5][0-9]{5}|3153600000)s$",
       "description": "run --loop interval.",
       "default": "10s"
     },
     "kill_grace": {
       "type": "string",
-      "pattern": "^[1-9][0-9]*[smhd]$",
+      "pattern": "^(?:[1-9][0-9]{0,3}|[12][0-9]{4}|3[0-5][0-9]{3}|36[0-4][0-9]{2}|36500)d$|^(?:[1-9][0-9]{0,4}|[1-7][0-9]{5}|8[0-6][0-9]{4}|87[0-5][0-9]{3}|876000)h$|^(?:[1-9][0-9]{0,6}|[1-4][0-9]{7}|5[01][0-9]{6}|52[0-4][0-9]{5}|525[0-5][0-9]{4}|52560000)m$|^(?:[1-9][0-9]{0,8}|[12][0-9]{9}|30[0-9]{8}|31[0-4][0-9]{7}|315[0-2][0-9]{6}|3153[0-5][0-9]{5}|3153600000)s$",
       "description": "Wait per step of the signal sequence.",
       "default": "30s"
     },
@@ -53,11 +55,12 @@
     "tail_lines": {
       "type": "integer",
       "minimum": 1,
+      "maximum": 2147483647,
       "default": 200
     },
     "tail_flush_interval": {
       "type": "string",
-      "pattern": "^[1-9][0-9]*[smhd]$",
+      "pattern": "^(?:[1-9][0-9]{0,3}|[12][0-9]{4}|3[0-5][0-9]{3}|36[0-4][0-9]{2}|36500)d$|^(?:[1-9][0-9]{0,4}|[1-7][0-9]{5}|8[0-6][0-9]{4}|87[0-5][0-9]{3}|876000)h$|^(?:[1-9][0-9]{0,6}|[1-4][0-9]{7}|5[01][0-9]{6}|52[0-4][0-9]{5}|525[0-5][0-9]{4}|52560000)m$|^(?:[1-9][0-9]{0,8}|[12][0-9]{9}|30[0-9]{8}|31[0-4][0-9]{7}|315[0-2][0-9]{6}|3153[0-5][0-9]{5}|3153600000)s$",
       "description": "DURATION: a positive integer and a unit (s, m, h, d).",
       "default": "5s"
     },
@@ -117,7 +120,10 @@
             "$ref": "#/$defs/env_name"
           },
           "additionalProperties": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 131072,
+            "description": "No NUL; at most 128 KiB as UTF-8 (maxLength approximates it in characters)."
           },
           "default": {},
           "description": "Fixed, non-secret values for jobs. PATH set here also replaces the inherited PATH in the canonical environment (hooks and jobsctl's own processes); recommended, since an inherited PATH comes from the process that started the chain."
@@ -229,7 +235,7 @@
     },
     "busy_timeout": {
       "type": "string",
-      "pattern": "^[1-9][0-9]*[smhd]$",
+      "pattern": "^(?:[1-9][0-9]{0,3}|[12][0-9]{4}|3[0-5][0-9]{3}|36[0-4][0-9]{2}|36500)d$|^(?:[1-9][0-9]{0,4}|[1-7][0-9]{5}|8[0-6][0-9]{4}|87[0-5][0-9]{3}|876000)h$|^(?:[1-9][0-9]{0,6}|[1-4][0-9]{7}|5[01][0-9]{6}|52[0-4][0-9]{5}|525[0-5][0-9]{4}|52560000)m$|^(?:[1-9][0-9]{0,8}|[12][0-9]{9}|30[0-9]{8}|31[0-4][0-9]{7}|315[0-2][0-9]{6}|3153[0-5][0-9]{5}|3153600000)s$",
       "description": "SQLite busy timeout.",
       "default": "5s"
     },
@@ -269,12 +275,12 @@
   "$defs": {
     "config_path": {
       "type": "string",
-      "pattern": "^(/|~/)[^\\n]*$",
-      "description": "Absolute path, or a path starting with ~/ (expanded to the user's home)."
+      "pattern": "^(/|~/)[^\\n\\u0000]*$",
+      "description": "Absolute path, or a path starting with ~/ (expanded to the user's home); no newline or NUL."
     },
     "duration": {
       "type": "string",
-      "pattern": "^[1-9][0-9]*[smhd]$",
+      "pattern": "^(?:[1-9][0-9]{0,3}|[12][0-9]{4}|3[0-5][0-9]{3}|36[0-4][0-9]{2}|36500)d$|^(?:[1-9][0-9]{0,4}|[1-7][0-9]{5}|8[0-6][0-9]{4}|87[0-5][0-9]{3}|876000)h$|^(?:[1-9][0-9]{0,6}|[1-4][0-9]{7}|5[01][0-9]{6}|52[0-4][0-9]{5}|525[0-5][0-9]{4}|52560000)m$|^(?:[1-9][0-9]{0,8}|[12][0-9]{9}|30[0-9]{8}|31[0-4][0-9]{7}|315[0-2][0-9]{6}|3153[0-5][0-9]{5}|3153600000)s$",
       "description": "DURATION: a positive integer and a unit (s, m, h, d)."
     },
     "env_name": {
@@ -298,11 +304,13 @@
         "cmd": {
           "type": "string",
           "minLength": 1,
-          "description": "Runs via /bin/sh -c in its own process group."
+          "maxLength": 131072,
+          "pattern": "^[^\\u0000]*$",
+          "description": "Runs via /bin/sh -c in its own process group. No NUL; at most 128 KiB as UTF-8 (maxLength approximates it in characters)."
         },
         "timeout": {
           "type": "string",
-          "pattern": "^[1-9][0-9]*[smhd]$",
+          "pattern": "^(?:[1-9][0-9]{0,3}|[12][0-9]{4}|3[0-5][0-9]{3}|36[0-4][0-9]{2}|36500)d$|^(?:[1-9][0-9]{0,4}|[1-7][0-9]{5}|8[0-6][0-9]{4}|87[0-5][0-9]{3}|876000)h$|^(?:[1-9][0-9]{0,6}|[1-4][0-9]{7}|5[01][0-9]{6}|52[0-4][0-9]{5}|525[0-5][0-9]{4}|52560000)m$|^(?:[1-9][0-9]{0,8}|[12][0-9]{9}|30[0-9]{8}|31[0-4][0-9]{7}|315[0-2][0-9]{6}|3153[0-5][0-9]{5}|3153600000)s$",
           "description": "DURATION: a positive integer and a unit (s, m, h, d).",
           "default": "30s"
         },
@@ -363,11 +371,13 @@
         "cmd": {
           "type": "string",
           "minLength": 1,
-          "description": "Runs via /bin/sh -c in its own process group."
+          "maxLength": 131072,
+          "pattern": "^[^\\u0000]*$",
+          "description": "Runs via /bin/sh -c in its own process group. No NUL; at most 128 KiB as UTF-8 (maxLength approximates it in characters)."
         },
         "timeout": {
           "type": "string",
-          "pattern": "^[1-9][0-9]*[smhd]$",
+          "pattern": "^(?:[1-9][0-9]{0,3}|[12][0-9]{4}|3[0-5][0-9]{3}|36[0-4][0-9]{2}|36500)d$|^(?:[1-9][0-9]{0,4}|[1-7][0-9]{5}|8[0-6][0-9]{4}|87[0-5][0-9]{3}|876000)h$|^(?:[1-9][0-9]{0,6}|[1-4][0-9]{7}|5[01][0-9]{6}|52[0-4][0-9]{5}|525[0-5][0-9]{4}|52560000)m$|^(?:[1-9][0-9]{0,8}|[12][0-9]{9}|30[0-9]{8}|31[0-4][0-9]{7}|315[0-2][0-9]{6}|3153[0-5][0-9]{5}|3153600000)s$",
           "description": "DURATION: a positive integer and a unit (s, m, h, d).",
           "default": "30s"
         },
@@ -421,6 +431,7 @@
             "null"
           ],
           "minimum": 0,
+          "maximum": 2147483647,
           "description": "Absent: default_cap. null: unbounded. 0 holds the queue (nothing starts)."
         },
         "priority": {
@@ -451,13 +462,13 @@
         },
         "retry_delay": {
           "type": "string",
-          "pattern": "^[1-9][0-9]*[smhd]$",
+          "pattern": "^(?:[1-9][0-9]{0,3}|[12][0-9]{4}|3[0-5][0-9]{3}|36[0-4][0-9]{2}|36500)d$|^(?:[1-9][0-9]{0,4}|[1-7][0-9]{5}|8[0-6][0-9]{4}|87[0-5][0-9]{3}|876000)h$|^(?:[1-9][0-9]{0,6}|[1-4][0-9]{7}|5[01][0-9]{6}|52[0-4][0-9]{5}|525[0-5][0-9]{4}|52560000)m$|^(?:[1-9][0-9]{0,8}|[12][0-9]{9}|30[0-9]{8}|31[0-4][0-9]{7}|315[0-2][0-9]{6}|3153[0-5][0-9]{5}|3153600000)s$",
           "description": "DURATION: a positive integer and a unit (s, m, h, d).",
           "default": "60s"
         },
         "kill_grace": {
           "type": "string",
-          "pattern": "^[1-9][0-9]*[smhd]$",
+          "pattern": "^(?:[1-9][0-9]{0,3}|[12][0-9]{4}|3[0-5][0-9]{3}|36[0-4][0-9]{2}|36500)d$|^(?:[1-9][0-9]{0,4}|[1-7][0-9]{5}|8[0-6][0-9]{4}|87[0-5][0-9]{3}|876000)h$|^(?:[1-9][0-9]{0,6}|[1-4][0-9]{7}|5[01][0-9]{6}|52[0-4][0-9]{5}|525[0-5][0-9]{4}|52560000)m$|^(?:[1-9][0-9]{0,8}|[12][0-9]{9}|30[0-9]{8}|31[0-4][0-9]{7}|315[0-2][0-9]{6}|3153[0-5][0-9]{5}|3153600000)s$",
           "description": "Absent: the global kill_grace."
         },
         "tail_bytes": {
@@ -469,6 +480,7 @@
         "tail_lines": {
           "type": "integer",
           "minimum": 1,
+          "maximum": 2147483647,
           "description": "Absent: the global tail_lines."
         }
       },

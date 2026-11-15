@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from jobsctl.textsafe import echo, sanitize
+from jobsctl.textsafe import echo, echo_input, sanitize
 
 
 @pytest.mark.parametrize(
@@ -64,3 +64,18 @@ def test_echo_truncates_and_sanitizes() -> None:
     assert echo("a" * 10, limit=5) == "aaaaa..."
     assert echo("\x1b[31mred") == "red"
     assert echo("short") == "short"
+
+
+@pytest.mark.parametrize(
+    ("text", "shown"),
+    [
+        ("plain", "plain"),
+        ("API_KEY=hunter2", "API_KEY=..."),
+        ("a=b=c", "a=..."),
+        ("=x", "=..."),
+        ("\x1b[31mk\n=v", "k\\n=..."),
+        ("k" * 100 + "=v", "k" * 80 + "...=..."),
+    ],
+)
+def test_echo_input_cuts_at_the_first_equals(text: str, shown: str) -> None:
+    assert echo_input(text) == shown

@@ -377,7 +377,9 @@ When the [timeout](#timeouts) expires the shim runs the sequence and ends the jo
 2. If the job's PID is still alive, or processes remain in the job's process group: SIGTERM to the job's process group.
 3. SIGKILL to the job's process group (and to the job's PID if it left the group).
 
-The shim keeps the job's group leader unreaped until the sequence and the leftover probe are done, so the process group id stays reserved and verifiable on every platform. Group signals are sent only to the process group the shim created for the job, and only while it is verified to be that group. Processes other than the job's own PID that left the group (e.g. a tmux server, which daemonizes into its own session) are never signaled.
+The shim keeps the job's group leader unreaped until the sequence and the leftover probe are done, so the process group id stays reserved and verifiable on every platform. Group signals are sent only to the process group the shim created for the job, and only while the leader's identity is verified.
+
+The group is addressed by the leader's PID while the leader's identity holds, even after the leader left the group, because the leader's PID stays reserved. Processes other than the job's own PID that left the group (e.g. a tmux server, which daemonizes into its own session) are never signaled.
 
 **Exact signals.** On Linux every signal that a jobsctl process (a shim, `_kill`, `cancel`, the firing process of a hook) sends to an exact PID (a shim, a job, a hook's leader) goes through `pidfd_open`, then an identity check of the pidfd's process ([Process identity](#process-identity)), then `pidfd_send_signal`. Where pidfds are unavailable (macOS; on Linux, an architecture outside the allow list of the system-call fallback, `ENOSYS`, `EPERM` from a seccomp filter, WSL1), jobsctl re-checks the identity immediately before `kill` or `killpg` and accepts the remaining window ([Residual risks](#residual-risks)).
 
@@ -407,6 +409,8 @@ A process identity is `(boot_id, pid, start)`:
 - **macOS:** `boot_id` from `sysctl kern.bootsessionuuid`; `start` from `proc_pidinfo(PROC_PIDTBSDINFO)` (seconds and microseconds) through `libproc`; never `ps` output.
 
 A process is alive only if a process with that PID exists in the current boot with the same start value. A zombie counts as not alive, except a job leader the shim keeps unreaped ([Signal sequence](#signal-sequence)). Wall-clock time is never used for identity.
+
+A zombie is a process in state `Z` with no live threads: a thread-group leader whose main thread exited while other threads run is alive. A PID recorded as an identity must be a thread-group leader, not a thread ID.
 
 ### Leases
 
@@ -613,6 +617,8 @@ A duration is `<integer><unit>` with unit `s`, `m`, `h` or `d` (e.g. `30s`, `10m
 
 Every timestamp is RFC 3339 in UTC with `Z` and millisecond precision (e.g. `2026-10-31T12:00:00.000Z`).
 
+A timestamp given as input (e.g. `export --since`) is RFC 3339 with `T` or `t`, with `Z`, `z` or a `+hh:mm`/`-hh:mm` offset, and an optional fraction of 1 to 9 digits; it is converted to UTC. A leap second (`:60`) is refused with `usage`.
+
 ## Global flags
 
 | Flag | Meaning |
@@ -732,16 +738,24 @@ Delivery is **at least once and in order per job** (a job's synchronous events i
 
 Config is per invocation, while the state directory is shared: a job added with `--config X` starts under the config of whichever process claims it (a cron pass, or a pass triggered by another command, uses the default config). For a separate queue system, use `--config X` together with a matching `XDG_STATE_HOME`.
 
+Drop-ins are the entries of `config.d` whose name ends in `.yaml` (case-sensitive; `.yml` and `.YAML` are ignored) and does not start with `.`, read in byte-wise lexical order, at most 256 of them. The main file and each drop-in must be, or resolve to, a regular file of at most 256 KiB, and all of them together at most 1 MiB (`config_invalid` naming the file that crosses the limit).
+
+Lists other than the `hooks.<hook>` lists (e.g. `mask_env`, `env.inherit`, `env.path_prepend`, `hooks_strip_env`) are replaced by a later file, not appended. A hook `name` may be omitted but not `null`; one used in two files is `config_invalid` naming both files.
+
+Config files are UTF-8 YAML with YAML 1.2 core-schema scalars: booleans are only `true`, `True`, `TRUE`, `false`, `False`, `FALSE`; integers only decimal without leading zeros or `_`; null only `~`, `null`, `Null`, `NULL` or empty; every other plain scalar (`yes`, `on`, `0x10`, `1:30`, `2024-01-01`) is a string. Anchors, aliases, explicit tags (`!!bool`, `!foo`), mapping keys that are not strings, and duplicate keys are refused (`config_invalid` with the position, never the text).
+
+`hooks.<hook>[].cmd`, `env.set` values, `env_file` and `env.path_prepend` entries must not contain NUL and must be valid Unicode (no lone surrogates); a `cmd` and an `env.set` value are at most 128 KiB as UTF-8. An `env.set` key that is not a valid variable name is reported as `env.set.<invalid name>`. `~/` needs a known, absolute home directory: an empty or relative `HOME` is `config_invalid` naming the key.
+
 | Key | Default | Meaning |
 |---|---|---|
-| `default_cap` | `1` | cap of a queue with no configured `cap`; `null` = unbounded |
-| `global_cap` | `null` | total running jobs across queues; `null` = none |
+| `default_cap` | `1` | cap of a queue with no configured `cap`, 0..2147483647; `null` = unbounded |
+| `global_cap` | `null` | total running jobs across queues, 0..2147483647; `null` = none |
 | `strict_queues` | `false` | `add` to an unknown queue exits 10; affects `add` only |
 | `auto_run` | `true` | [Start triggers](#start-triggers) |
 | `run_interval` | `10s` | `run --loop` interval |
 | `kill_grace` | `30s` | per step of the [signal sequence](#signal-sequence) |
 | `tail_bytes` | `16384` | [Output capture](#output-capture) (max 262144) |
-| `tail_lines` | `200` | |
+| `tail_lines` | `200` | 1..2147483647 |
 | `tail_flush_interval` | `5s` | |
 | `mask_env` | `[]` | variable names whose values are masked in tails and hook output; `--env` refuses them |
 | `retention` | `30d` | terminal jobs whose `ended_at` is older than this are pruned by each pass; `null` keeps them |
@@ -753,13 +767,13 @@ Config is per invocation, while the state directory is shared: a job added with 
 | `hooks_strip_env` | `[]` | variables removed from hook environments |
 | `busy_timeout` | `5s` | SQLite busy timeout |
 | `me.name` | OS user name | for the default actor |
-| `queues.<name>.cap` | `default_cap` | integer ≥ 0 or `null` (0 holds the queue: nothing starts) |
+| `queues.<name>.cap` | `default_cap` | 0..2147483647 or `null` (0 holds the queue: nothing starts) |
 | `queues.<name>.priority` | `0` | [Selection](#selection), -1000..1000 |
 | `queues.<name>.timeout` | `null` | [Timeouts](#timeouts) |
 | `queues.<name>.max_retries` | `0` | [Automatic retry](#automatic-retry), 0..100 |
 | `queues.<name>.retry_delay` | `60s` | |
-| `queues.<name>.kill_grace` | global value | |
-| `queues.<name>.tail_bytes`, `tail_lines` | global values | |
+| `queues.<name>.kill_grace` | global value | absent: the global value (`null` is refused) |
+| `queues.<name>.tail_bytes`, `tail_lines` | global values | absent: the global values (`null` is refused); ranges as the global keys |
 
 ## Environment
 
@@ -810,6 +824,7 @@ Every TUI action is a CLI command.
 
 - **Linux and WSL:** identity from `/proc` ([Process identity](#process-identity)); the shim is a child subreaper; exact signals use pidfds where available ([Signal sequence](#signal-sequence)), and a `shim_lost` group signal uses `PIDFD_SIGNAL_PROCESS_GROUP` on Linux 6.9 or later ([Signal sequence](#signal-sequence)). Shutting down the WSL VM ends every shim and job; the next pass sees a new boot id and marks their jobs `lost`. A shutdown or a logout with `KillUserProcesses` sends SIGTERM to the shims, so their jobs end `failed` (`terminated`). Cron runs only if the distribution runs `cron`.
 - **macOS:** identity through `libproc` and `sysctl` (`kern.bootsessionuuid`); no subreaper, so [leftovers](#leftovers) are counted only by probing the job's process group; no pidfds, so signals to processes jobsctl did not spawn are checked immediately before sending, and `PR_SET_DUMPABLE` does not exist.
+- **Hidden `/proc`:** with `hidepid=2` (or `invisible`) on `/proc`, other users' processes are inconclusive, never dead: a missing `/proc/<pid>` reads as unknown and a group probe is incomplete.
 - **Cron:** cron's environment is minimal and its `python3` may be older than 3.12; [`cron install`](#cron-install--cron-uninstall) writes the absolute path of `jobsctl`, an explicit `PATH` and the `XDG_*` directories set at install.
 - **Requirements:** Python ≥ 3.12; SQLite ≥ 3.35.
 
