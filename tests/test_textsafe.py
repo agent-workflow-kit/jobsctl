@@ -135,3 +135,11 @@ def test_strip_escapes_mapped_matches_strip_escapes_and_locates_characters() -> 
 )
 def test_echo_input_cuts_at_the_first_equals(text: str, shown: str) -> None:
     assert echo_input(text) == shown
+
+
+def test_remove_escapes_keeps_the_text_before_a_carriage_return_unlike_strip_escapes() -> None:
+    from jobsctl.textsafe import remove_escapes
+
+    assert remove_escapes("\x1b[31mold\rnew\x1b[0m") == "old\rnew"
+    assert strip_escapes("\x1b[31mold\rnew\x1b[0m") == "new"
+    assert remove_escapes("a\x1b]0;title\x07b") == "ab"

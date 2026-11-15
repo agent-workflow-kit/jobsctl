@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 
 from jobsctl.config import Config
+from jobsctl.config_files import load_config
 from jobsctl.leases import identity_text, own_identity, parse_identity
 from jobsctl.proc_host import default_host
 from jobsctl.proc_identity import Identity, identify
@@ -37,10 +38,22 @@ WAIT = 60
 
 @dataclass
 class RealShims:
+    """`config` and `config_path` default to a file with `auto_run: false`: a real shim requests a
+    pass after its final commit, and a real detached pass would outlive the test. A test that
+    needs `auto_run: true` calls :meth:`configure` with it explicitly."""
+
     config: Config = field(default_factory=Config)
     config_path: Path | None = None
     handles: list[subprocess.Popen[bytes]] = field(default_factory=list)
     extras: list[Identity] = field(default_factory=list)
+
+    def configure(self, directory: Path, **raw: Any) -> None:
+        """Write `directory/config.yaml` with `raw` (over `auto_run: false`) and use it."""
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "config.yaml"
+        path.write_text(json.dumps({"auto_run": False, **raw}))
+        self.config_path = path
+        self.config = load_config(path)
 
     def seed_and_spawn(
         self, argv: list[str], *, job_id: str = JOB, record_identity: bool = True, **seed: Any
@@ -127,8 +140,9 @@ class RealShims:
 
 
 @pytest.fixture
-def real_shims() -> Iterator[RealShims]:
+def real_shims(tmp_path_factory: pytest.TempPathFactory) -> Iterator[RealShims]:
     kit = RealShims()
+    kit.configure(tmp_path_factory.mktemp("shim-config"))
     try:
         yield kit
     finally:

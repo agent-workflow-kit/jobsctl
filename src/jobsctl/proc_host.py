@@ -289,6 +289,7 @@ class DarwinHost(_SignalOps):
         return GroupScan(tuple(members), unreadable)
 
     def scan_children(self, ppid: int) -> GroupScan:
+        # TODO(#28): subreaper orphans cannot be found on macOS; leftovers probe the group only
         return GroupScan((), 0)  # macOS: only the process group is probed (interface.md)
 
     def pidfd_supported(self) -> bool:

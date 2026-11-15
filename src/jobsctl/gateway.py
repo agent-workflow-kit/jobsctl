@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import datetime as dt
 import fcntl
+import signal
 import subprocess
+import threading
 import time
 
 
@@ -46,6 +48,10 @@ def spawn_detached(argv: list[str], *, env: dict[str, str], cwd: str) -> subproc
     )
 
 
+def _noop_handler(signum: int, frame: object) -> None:
+    return None
+
+
 def spawn_job(
     argv: list[str], *, executable: str, env: dict[str, str], cwd: str
 ) -> subprocess.Popen[bytes]:
@@ -53,22 +59,44 @@ def spawn_job(
     `argv` keeps the job's own argv[0]; a **new process group** whose id is the job's PID (the
     group the shim may later signal, and only that one), exactly `env`, `cwd`, stdin
     ``/dev/null``, stdout and stderr on **one** pipe the caller reads, every other descriptor
-    closed. No new session: a job is not a daemon. Signal dispositions: SIGPIPE is restored to its
-    default by `Popen`; a handled signal is reset by exec, an ignored one would be inherited, so
-    the shim handles (rather than ignores) SIGHUP and SIGINT. `OSError` if the exec fails."""
-    return subprocess.Popen(
-        argv,
-        executable=executable,
-        env=env,
-        cwd=cwd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        close_fds=True,
-        process_group=0,
-        restore_signals=True,
-        shell=False,
-    )
+    closed. No new session: a job is not a daemon. Signal dispositions: a handled signal is reset
+    by exec but an ignored one would be inherited, so every signal the shim currently ignores is
+    *handled* by a function that does nothing while the child is forked, then ignored again; the
+    job starts with default dispositions (SIGPIPE is also restored by `Popen`). `OSError` if the
+    exec fails."""
+    ignored = _ignored_signals()
+    for number in ignored:
+        signal.signal(number, _noop_handler)
+    try:
+        return subprocess.Popen(
+            argv,
+            executable=executable,
+            env=env,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            close_fds=True,
+            process_group=0,
+            restore_signals=True,
+            shell=False,
+        )
+    finally:
+        for number in ignored:
+            signal.signal(number, signal.SIG_IGN)
+
+
+def _ignored_signals() -> list[int]:
+    """The signals this process ignores that a job must not inherit as ignored (none outside the
+    main thread, where dispositions cannot be changed)."""
+    if threading.current_thread() is not threading.main_thread():
+        return []
+    return [
+        number
+        for number in sorted(signal.valid_signals())
+        if number not in (signal.SIGKILL, signal.SIGSTOP)
+        and signal.getsignal(number) == signal.SIG_IGN
+    ]
 
 
 def sleep(seconds: float) -> None:

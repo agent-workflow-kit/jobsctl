@@ -408,8 +408,8 @@ def test_a_cancel_between_the_checks_and_the_start_transaction_wins(
 
 
 def test_a_cancel_after_the_start_transaction_sees_running(store: Store) -> None:
-    """The mirror of the race: once `running` is committed a cancel sees it (it is refused
-    without `--force`), and the job runs to its own end."""
+    """Once `running` is committed another connection sees it and the job runs to its own end
+    (the refusal a real `cancel` gets is `test_a_real_cancel_during_the_start_transaction_...`)."""
     seed_claimed(store, ["sleep", "1"])
     seen: list[str] = []
 
@@ -459,33 +459,73 @@ def test_the_shim_waits_for_a_live_lease_holder_then_proceeds(store: Store, slee
         expires_at="2099-01-01T00:00:00.000Z", is_alive=lambda h: None,
     )  # fmt: skip
 
+    before_release: list[tuple[str, str | None]] = []
+
     def release() -> None:
         time.sleep(0.6)
-        with Store.open() as other, other.write() as tx:
-            lease_release(tx, f"job:{JOB}", sleeper)
+        with Store.open() as other:
+            before_release.append(
+                (
+                    one(other, "SELECT status FROM jobs WHERE id = ?", [JOB])["status"],
+                    one(other, "SELECT effective FROM attempts WHERE job_id = ?", [JOB])[
+                        "effective"
+                    ],
+                )
+            )
+            with other.write() as tx:
+                lease_release(tx, f"job:{JOB}", sleeper)
 
     t = threading.Thread(target=release)
     t.start()
+    started = time.monotonic()
     make_shim(store).run()
     t.join()
+    assert time.monotonic() - started >= 0.5  # it waited for the release
+    assert before_release == [("starting", None)]  # and wrote nothing meanwhile
     assert job(store)["status"] == "done"
 
 
-def test_sigterm_after_the_lease_ends_a_starting_job_terminated(
+def test_sigterm_while_recording_the_effective_settings_exits_without_failing_the_job(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Still step 2, before the `pre-start` hooks: Signal sequence says it exits without writing
+    (reconcile ends the job), so no `terminated` failure is written."""
+    from jobsctl import gateway
     from jobsctl import shim as shim_module
 
+    spawned: list[object] = []
+    monkeypatch.setattr(gateway, "spawn_job", lambda *a, **k: spawned.append(1))
     seed_claimed(store, ["true"])
     shim = make_shim(store)
     real = shim_module.record_effective
 
     def record_then_term(*args: object, **kwargs: object) -> bool:
         out = real(*args, **kwargs)  # type: ignore[arg-type]
-        shim.request_stop()  # SIGTERM during the (future) pre-start hooks
+        shim.request_stop()
         return out
 
     monkeypatch.setattr(shim_module, "record_effective", record_then_term)
+    assert shim.run() == 0
+    assert spawned == [] and job(store)["status"] == "starting"
+    assert attempt(store)["exit"] is None and attempt(store)["running_at"] is None
+
+
+def test_sigterm_after_the_pre_start_seam_ends_a_starting_job_terminated(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_claimed(store, ["true"])
+    shim = make_shim(store)
+    real = shim._still_starting  # pyright: ignore[reportPrivateUsage]
+    calls: list[int] = []
+
+    def look_then_term() -> object:
+        out = real()
+        calls.append(1)
+        if len(calls) == 2:  # the look after the (future) pre-start hooks
+            shim.request_stop()
+        return out
+
+    monkeypatch.setattr(shim, "_still_starting", look_then_term)
     shim.run()
     row = job(store)
     assert (row["status"], row["reason"]) == ("failed", "terminated")
@@ -667,3 +707,413 @@ def test_a_job_spawned_but_not_recorded_is_killed_so_no_unknown_process_runs(
     assert popen.returncode == -signal.SIGKILL  # type: ignore[attr-defined]
     row = job(store)
     assert row["status"] == "starting" and attempt(store)["running_at"] is None
+
+
+# -- review round 1: supervision, retries and races -----------------------------------------------
+
+
+def run_watched(make: object, seconds: float = 60.0) -> list[int]:
+    """Run a shim built by `make(store)` in a thread with its own store, under a watchdog.
+    Returns `[exit code]`, or `[]` when it did not finish within `seconds`."""
+    from jobsctl.store_db import OpenMode
+
+    out: list[int] = []
+
+    def target() -> None:
+        with Store.open(mode=OpenMode.CLI) as own:
+            out.append(make(own).run())  # type: ignore[operator]
+
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    t.join(seconds)
+    return out
+
+
+def kill_recorded_job() -> None:
+    """Cleanup of a test that failed with a job still running: its recorded group only."""
+    with Store.open() as other:
+        row = other.query_one("SELECT pgid FROM attempts WHERE job_id = ?", [JOB])
+    if row is not None and row["pgid"]:
+        try:
+            os.killpg(int(row["pgid"]), signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def hold_write_lock(seconds: float) -> threading.Thread:
+    """Another connection holds the database write lock for `seconds` (returns once it does)."""
+    ready = threading.Event()
+
+    def hold() -> None:
+        with Store.open() as other, other.write():
+            ready.set()
+            time.sleep(seconds)
+
+    t = threading.Thread(target=hold)
+    t.start()
+    assert ready.wait(10)
+    return t
+
+
+def test_a_pump_failure_still_drains_the_pipe_and_ends_the_job(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback after a pump failure keeps reading (and discarding) the pipe: a job writing
+    more than the pipe holds is not left blocked forever."""
+    from jobsctl.output_capture import OutputCapture
+
+    def boom(self: object, data: bytes) -> None:
+        raise RuntimeError("feed failed")
+
+    monkeypatch.setattr(OutputCapture, "feed", boom)
+    seed_claimed(store, ["sh", "-c", "head -c 2000000 /dev/zero; echo done"])
+    done = run_watched(lambda own: make_shim(own), 60)
+    if not done:
+        kill_recorded_job()
+    assert done == [0]
+    row = job(store)
+    assert (row["status"], row["reason"]) == ("done", "exit")
+    assert exit_of(store) == {"kind": "exited", "code": 0, "signal": None, "core": False}
+
+
+def test_a_busy_database_at_the_start_transaction_is_retried_before_the_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jobsctl import shim as shim_module
+    from jobsctl.store_db import OpenMode
+
+    holders: list[threading.Thread] = []
+    real = shim_module.resolve_argv0
+
+    def resolve_then_lock(*args: object, **kwargs: object) -> str | None:
+        out = real(*args, **kwargs)  # type: ignore[arg-type]
+        holders.append(hold_write_lock(1.0))  # longer than the shim's busy_timeout
+        return out
+
+    monkeypatch.setattr(shim_module, "resolve_argv0", resolve_then_lock)
+    with Store.open(mode=OpenMode.CLI, busy_timeout=0.2) as small:
+        seed_claimed(small, ["true"])
+        assert make_shim(small).run() == 0
+        assert job(small)["status"] == "done"
+    holders[0].join()
+
+
+def test_a_busy_database_at_the_confirm_is_retried(store: Store) -> None:
+    from jobsctl.store_db import OpenMode
+
+    seed_claimed(store, ["true"])
+    with Store.open(mode=OpenMode.CLI, busy_timeout=0.2) as small:
+        holder = hold_write_lock(1.0)
+        assert make_shim(small).run() == 0
+        holder.join()
+    assert job(store)["status"] == "done" and attempt(store)["shim_confirmed_at"] is not None
+
+
+def test_sigterm_before_the_start_transaction_ends_the_job_terminated_without_a_spawn(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl import gateway
+    from jobsctl import shim as shim_module
+
+    spawned: list[object] = []
+    monkeypatch.setattr(gateway, "spawn_job", lambda *a, **k: spawned.append(1))
+    seed_claimed(store, ["true"])
+    shim = make_shim(store)
+    real = shim_module.resolve_argv0
+
+    def resolve_then_term(*args: object, **kwargs: object) -> str | None:
+        out = real(*args, **kwargs)  # type: ignore[arg-type]
+        shim.request_stop()  # after the cwd, environment and argv[0] steps
+        return out
+
+    monkeypatch.setattr(shim_module, "resolve_argv0", resolve_then_term)
+    shim.run()
+    row = job(store)
+    assert spawned == [] and (row["status"], row["reason"]) == ("failed", "terminated")
+    assert attempt(store)["exit"] is None and attempt(store)["running_at"] is None
+
+
+def test_sigterm_inside_the_start_transaction_ends_the_job_terminated_without_a_spawn(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl import gateway
+    from jobsctl import shim as shim_module
+
+    spawned: list[object] = []
+    monkeypatch.setattr(gateway, "spawn_job", lambda *a, **k: spawned.append(1))
+    seed_claimed(store, ["true"])
+    shim = make_shim(store)
+    real = shim_module.read_claim_in
+
+    def read_then_term(*args: object, **kwargs: object) -> object:
+        out = real(*args, **kwargs)  # type: ignore[arg-type]
+        shim.request_stop()  # the first in-transaction read is the start transaction's re-check
+        return out
+
+    monkeypatch.setattr(shim_module, "read_claim_in", read_then_term)
+    shim.run()
+    row = job(store)
+    assert spawned == [] and (row["status"], row["reason"]) == ("failed", "terminated")
+    assert attempt(store)["exit"] is None and attempt(store)["running_at"] is None
+
+
+def test_a_job_canceled_while_the_shim_waits_for_a_live_lease_holder_ends_the_wait(
+    store: Store, sleeper: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The holder stays alive and never releases: the wait still ends once the job is no longer
+    `starting`; nothing is written and the holder's lease is untouched."""
+    from jobsctl import gateway
+    from jobsctl.store_ops import take_lease
+
+    spawned: list[object] = []
+    monkeypatch.setattr(gateway, "spawn_job", lambda *a, **k: spawned.append(1))
+    seed_claimed(store, ["true"])
+    take_lease(
+        store, f"job:{JOB}", sleeper, now="2026-01-01T00:00:00.000Z",
+        expires_at="2099-01-01T00:00:00.000Z", is_alive=lambda h: None,
+    )  # fmt: skip
+
+    def cancel() -> None:
+        time.sleep(0.5)
+        with Store.open() as other, other.write() as tx:
+            tx.execute(
+                "UPDATE jobs SET status = 'canceled', reason = 'canceled', ended_at = ? "
+                "WHERE id = ?",
+                ["2026-01-01T00:00:00.000Z", JOB],
+            )
+
+    t = threading.Thread(target=cancel)
+    t.start()
+    done = run_watched(lambda own: make_shim(own), 30)
+    t.join()
+    assert done == [0] and spawned == []
+    assert attempt(store)["effective"] is None
+    lease = one(store, "SELECT holder_identity FROM leases WHERE name = ?", [f"job:{JOB}"])
+    assert lease["holder_identity"] == sleeper
+
+
+def test_a_job_that_left_its_group_before_the_check_is_still_killed(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`getpgid` disagrees (the job moved to another group) and the group kill finds no such
+    group: the shim kills its unreaped child by PID."""
+    from jobsctl import gateway, gateway_proc
+    from jobsctl import shim as shim_module
+
+    seed_claimed(store, ["sleep", "60"])
+    spawned: list[object] = []
+    real_spawn = gateway.spawn_job
+
+    def spawn_spy(*args: object, **kwargs: object) -> object:
+        popen = real_spawn(*args, **kwargs)  # type: ignore[arg-type]
+        spawned.append(popen)
+        return popen
+
+    def no_such_group(pgid: int, sig: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(gateway, "spawn_job", spawn_spy)
+    monkeypatch.setattr(shim_module.os, "getpgid", lambda pid: pid + 1)
+    monkeypatch.setattr(gateway_proc, "killpg", no_such_group)
+    with pytest.raises(JobsctlError):
+        make_shim(store).run()
+    (popen,) = spawned
+    assert popen.returncode == -signal.SIGKILL  # type: ignore[attr-defined]
+    assert job(store)["status"] == "starting" and attempt(store)["running_at"] is None
+
+
+def test_the_final_commit_is_retried_after_any_error(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl import shim as shim_module
+
+    seed_claimed(store, ["true"])
+    real = shim_module.finish_running
+    calls: list[int] = []
+
+    def flaky(*args: object, **kwargs: object) -> object:
+        calls.append(1)
+        if len(calls) <= 2:
+            raise RuntimeError("not a database error")
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(shim_module, "finish_running", flaky)
+    assert make_shim(store).run() == 0
+    assert len(calls) == 3 and job(store)["status"] == "done"
+    assert list(shims_dir().glob("*.result*")) == []
+
+
+def test_a_final_commit_that_never_succeeds_exits_1_leaves_the_result_and_reaps_the_job(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl import gateway
+    from jobsctl import shim as shim_module
+
+    seed_claimed(store, ["sh", "-c", "echo out; exit 3"])
+    spawned: list[object] = []
+    real_spawn = gateway.spawn_job
+
+    def spawn_spy(*args: object, **kwargs: object) -> object:
+        popen = real_spawn(*args, **kwargs)  # type: ignore[arg-type]
+        spawned.append(popen)
+        return popen
+
+    def always_fails(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("not a database error")
+
+    monkeypatch.setattr(gateway, "spawn_job", spawn_spy)
+    monkeypatch.setattr(shim_module, "finish_running", always_fails)
+    monkeypatch.setattr(shim_module, "FINAL_COMMIT_SECONDS", 0.5)
+    assert make_shim(store).run() == 1
+    (popen,) = spawned
+    assert popen.returncode == 3 and popen.stdout.closed  # type: ignore[attr-defined]
+    assert len(list(shims_dir().glob("*.result"))) == 1
+    assert job(store)["status"] == "running"
+
+
+def test_a_nul_in_the_argv_fails_spawn_failed_instead_of_crashing(store: Store) -> None:
+    run_job(store, ["sh", "-c", "echo a\x00b"])
+    row = job(store)
+    assert (row["status"], row["reason"]) == ("failed", "spawn_failed")
+    assert exit_of(store) == {"kind": "spawn_failed", "code": None, "signal": None, "core": False}
+    assert attempt(store)["running_at"] is None
+
+
+def test_a_lease_that_cannot_be_renewed_is_reported_and_no_longer_held(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed_claimed(store, ["true"])
+    shim = make_shim(store)
+    shim._ident = "someone:1:1"  # pyright: ignore[reportPrivateUsage]
+    shim._lease_held = True  # pyright: ignore[reportPrivateUsage]  # but no such lease row exists
+    shim._tick()  # pyright: ignore[reportPrivateUsage]
+    assert shim._lease_held is False  # pyright: ignore[reportPrivateUsage]
+    assert "taken over" in capsys.readouterr().err
+
+
+def test_an_inconclusive_claiming_pass_is_waited_out_for_60_seconds_then_the_shim_exits(
+    store: Store, sleeper: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl import gateway
+    from jobsctl import shim as shim_module
+    from jobsctl.proc_identity import Liveness, LivenessResult
+
+    seed_claimed(store, ["true"], shim_identity="", claimed_by=sleeper)
+    clock = [0.0]
+    monkeypatch.setattr(gateway, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(gateway, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + 1.0))
+    monkeypatch.setattr(
+        shim_module, "check_identity", lambda *a, **k: LivenessResult(Liveness.UNKNOWN, "x")
+    )
+    assert make_shim(store).run() == 0
+    assert 60 <= clock[0] < 70
+    assert job(store)["status"] == "starting" and attempt(store)["shim_confirmed_at"] is None
+
+
+def test_a_conclusive_answer_resets_the_inconclusive_clock(
+    store: Store, sleeper: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl import gateway
+    from jobsctl import shim as shim_module
+    from jobsctl.proc_identity import Liveness, LivenessResult
+
+    seed_claimed(store, ["true"], shim_identity="", claimed_by=sleeper)
+    clock = [0.0]
+    monkeypatch.setattr(gateway, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(gateway, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + 1.0))
+
+    def check(*args: object, **kwargs: object) -> LivenessResult:
+        state = Liveness.ALIVE if 40 <= clock[0] < 41 else Liveness.UNKNOWN
+        return LivenessResult(state, "x")
+
+    monkeypatch.setattr(shim_module, "check_identity", check)
+    assert make_shim(store).run() == 0
+    assert clock[0] >= 100  # 40 s + a fresh 60 s, not 60 s in total
+
+
+def test_a_job_started_by_a_shim_with_ignored_signals_gets_default_dispositions(
+    store: Store,
+) -> None:
+    """In process: whatever the shim ignores (here SIGQUIT and SIGUSR1) the job must not inherit."""
+    previous = {n: signal.signal(n, signal.SIG_IGN) for n in (signal.SIGQUIT, signal.SIGUSR1)}
+    try:
+        run_job(store, ["sh", "-c", "grep SigIgn /proc/self/status"])
+        assert signal.getsignal(signal.SIGQUIT) == signal.SIG_IGN  # the shim still ignores them
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+    ignored = int((tail_of(store) or "").split()[1], 16)
+    for number in (signal.SIGQUIT, signal.SIGUSR1):
+        assert not ignored & (1 << (number - 1)), number.name
+
+
+def test_a_real_cancel_during_the_start_transaction_sees_running(
+    store: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A `cancel` that starts while the shim spawns inside its transaction waits for the lock,
+    then sees `running`: refused without `--force`. The job is never canceled."""
+    from jobsctl import gateway
+    from jobsctl.cli import main
+
+    seed_claimed(store, ["sleep", "1"])
+    real_spawn = gateway.spawn_job
+    in_spawn = threading.Event()
+
+    def slow_spawn(*args: object, **kwargs: object) -> object:
+        in_spawn.set()  # the transaction is open: the write lock is held
+        time.sleep(0.6)
+        return real_spawn(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(gateway, "spawn_job", slow_spawn)
+    done = []
+
+    def run_shim() -> None:
+        done.extend(run_watched(lambda own: make_shim(own), 60))
+
+    t = threading.Thread(target=run_shim)
+    t.start()
+    assert in_spawn.wait(30)
+    code = main(["--json", "cancel", JOB])
+    out = capsys.readouterr().out
+    t.join()
+    assert code == 20
+    assert f"{JOB} is running; cancel --force stops it" in json.loads(out)["error"]["message"]
+    row = job(store)
+    assert (row["status"], row["reason"]) == ("done", "exit")
+
+
+def test_a_shell_reporting_a_terminated_child_exits_143_and_is_not_signaled(store: Store) -> None:
+    """Spike A6: `wait` reports a SIGTERM'ed child as 143, which is an ordinary exit."""
+    run_job(store, ["sh", "-c", "sleep 30 & kill -TERM $!; wait $!"])
+    row = job(store)
+    assert (row["status"], row["reason"]) == ("failed", "exit")
+    assert exit_of(store) == {"kind": "exited", "code": 143, "signal": None, "core": False}
+
+
+def test_a_shim_on_an_older_schema_writes_nothing(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `_shim` command against a database older than this jobsctl knows exits before it
+    writes (Upgrades): the job stays `starting`, unconfirmed."""
+    from jobsctl.cli import main
+    from jobsctl.commands import internal
+    from jobsctl.store_schema import MIGRATIONS
+
+    seed_claimed(store, ["true"])
+    store.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    newer = MIGRATIONS + (("ALTER TABLE jobs ADD COLUMN score INTEGER NOT NULL DEFAULT 7",),)
+
+    class Newer:
+        @staticmethod
+        def open(**kwargs: object) -> Store:
+            return Store.open(migrations=newer, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(internal, "Store", Newer)
+    monkeypatch.setattr(internal, "prepare_process", lambda stop: None)
+    monkeypatch.setattr(internal, "disable_dumpable", lambda: None)
+    monkeypatch.setattr(internal, "install", lambda path: None)
+    before = (job(store)["status"], attempt(store)["shim_confirmed_at"])
+    assert main(["_shim", JOB, "claim-aaaaaaaaaaaaaaaaaaaaaaaaaaaa"]) != 0
+    assert (job(store)["status"], attempt(store)["shim_confirmed_at"]) == before
+    assert before == ("starting", None)
+    assert store.current_version() == len(MIGRATIONS)  # not migrated either

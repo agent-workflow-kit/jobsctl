@@ -12,8 +12,8 @@
 10. delivery of the job's events (seam, TODO(#24)).
 
 Every write is a compare-and-set on the attempt's `claim_id` (`shim_store`). The shim signals
-nothing in this issue: the signal sequence, the timeout and the force-request reaction are the
-seams marked `TODO(#19)`.
+nothing in this issue except the group it just created when the start cannot be recorded: the
+signal sequence, the timeout and the force-request reaction are the seams marked `TODO(#19)`.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ from jobsctl.result_file import (
     write_result,
 )
 from jobsctl.shim_exit import SPAWN_FAILED_EXIT, ExitRecord, exit_record, natural_outcome
-from jobsctl.shim_pump import Pump
+from jobsctl.shim_pump import DiscardCapture, Pump
 from jobsctl.shim_store import (
     ClaimView,
     begin_running,
@@ -83,6 +83,7 @@ FINAL_COMMIT_SECONDS = 600.0  # the final transaction is retried with backoff fo
 BACKOFF_START = 0.2
 BACKOFF_MAX = 10.0
 PRE_START_BUSY_SECONDS = 120.0
+CONFIRM_UNKNOWN_SECONDS = 60.0  # the claiming pass's identity may be inconclusive this long
 
 
 def _noop_handler(signum: int, frame: object) -> None:
@@ -111,6 +112,13 @@ def prepare_process(stop: StopSignal) -> None:
     signal.signal(signal.SIGTERM, lambda signum, frame: stop.set())
     set_child_subreaper(True)
     set_undumpable()
+
+
+@dataclass
+class _StartState:
+    """What one attempt of the start transaction spawned (nothing is retried after a spawn)."""
+
+    popen: Any = None
 
 
 @dataclass
@@ -203,14 +211,14 @@ class Shim:
         )
 
     def _retrying(self, action: Callable[[], Any], seconds: float) -> Any:
-        """Run a database action, retrying with backoff while the database is busy or erring, for
-        at most `seconds`; the last error is raised."""
+        """Run a database action, retrying with backoff on any error (a busy database, an I/O
+        failure, anything else), for at most `seconds`; the last error is raised."""
         deadline = gateway.monotonic() + seconds
         delay = BACKOFF_START
         while True:
             try:
                 return action()
-            except (JobsctlError, sqlite3.Error):
+            except Exception:  # any error: the final commit is retried until the deadline
                 if gateway.monotonic() + delay >= deadline:
                     raise
                 self._tick()
@@ -221,13 +229,17 @@ class Shim:
 
     def _take_lease(self) -> bool:
         """Hold `job:<id>` for the shim's whole life. While a live process holds it the shim
-        waits, without a deadline, and writes nothing; `False` if SIGTERM arrives first."""
+        waits, without a deadline, and writes nothing; `False` if SIGTERM arrives first or the job
+        stops being `starting` under this claim while it waits (canceled, say)."""
         probe = liveness_probe(self.host)
         while not self.terminated:
             if self._try_lease(probe):
                 self._lease_held = True
                 self._last_renew = gateway.monotonic()
                 return True
+            if self._still_starting() is None:
+                self._diag("the job is no longer starting under this claim; not waiting longer")
+                return False
             gateway.sleep(POLL_SECONDS * 2)
         return False
 
@@ -251,8 +263,11 @@ class Shim:
             return
         try:
             with self.store.write() as tx:
-                lease_renew(tx, self._lease, self._ident, expiry(self.clock()))
+                renewed = lease_renew(tx, self._lease, self._ident, expiry(self.clock()))
             self._last_renew = gateway.monotonic()
+            if not renewed:
+                self._lease_held = False
+                self._diag("the job lease was taken over by another holder; not renewing it")
         except (JobsctlError, sqlite3.Error) as exc:
             self._diag(f"the job lease was not renewed ({type(exc).__name__})")
 
@@ -282,7 +297,10 @@ class Shim:
     def _confirm(self) -> ClaimView | None:
         """Step 2, the identity. Polls every 100 ms while the claiming pass is alive and has not
         recorded the shim; exits when a different identity is recorded, the `claim_id` differs, or
-        the claiming pass died without recording one."""
+        the claiming pass died without recording one. An inconclusive identity check of the pass
+        (`UNKNOWN`) is waited out for at most `CONFIRM_UNKNOWN_SECONDS` of continuous
+        inconclusiveness, then treated like a dead pass (docs/interface.md, Start sequence 2)."""
+        unknown_since: float | None = None
         while not self.terminated:
             view = read_claim(self.store, self.job_id, self.claim_id)
             if view is None or view.status != "starting":
@@ -290,13 +308,27 @@ class Shim:
             recorded = view.shim_identity
             if recorded is None:
                 claimer = parse_identity(view.claimed_by)
-                if claimer is None or check_identity(self.host, claimer).state is Liveness.DEAD:
+                if claimer is None:
                     return None
+                state = check_identity(self.host, claimer).state
+                if state is Liveness.DEAD:
+                    return None
+                if state is Liveness.UNKNOWN:
+                    if unknown_since is None:
+                        unknown_since = gateway.monotonic()
+                    if gateway.monotonic() - unknown_since >= CONFIRM_UNKNOWN_SECONDS:
+                        self._diag("the claiming pass stayed inconclusive; exiting unconfirmed")
+                        return None
+                else:
+                    unknown_since = None
                 gateway.sleep(POLL_SECONDS)
                 continue
             if recorded != self._ident:
                 return None
-            if confirm(self.store, self.job_id, self.claim_id, self._ident, self._now()):
+            if self._retrying(
+                lambda: confirm(self.store, self.job_id, self.claim_id, self._ident, self._now()),
+                PRE_START_BUSY_SECONDS,
+            ):
                 return view
             # the claim changed under us (canceled, requeued): look again, then exit
             if read_claim(self.store, self.job_id, self.claim_id) is None:
@@ -343,6 +375,8 @@ class Shim:
             PRE_START_BUSY_SECONDS,
         ):
             return self._leave_unstarted()
+        if self.terminated:  # still step 2, before the hooks: exit without writing
+            return 0
         # TODO(#25), TODO(#23): run the `pre-start` hooks here (veto -> canceled/vetoed,
         # escalation -> held/escalated, `override_hooks`, decision ids). Before each hook and
         # while one runs call `_still_starting()`; a canceled job stops the hook's process group.
@@ -444,6 +478,9 @@ class Shim:
         capture = OutputCapture(
             masking, tail_bytes=settings.tail_bytes, tail_lines=settings.tail_lines
         )
+        if self.terminated:  # from the hooks on, SIGTERM ends the job `terminated`
+            self._fail(view, "terminated", exit_record=None)
+            return 0
         job = self._start(view, argv, resolved, dict(job_env.values), cwd, capture)
         if job is None:
             return 0
@@ -461,7 +498,34 @@ class Shim:
         """Step 7: re-check, spawn and set `running` in one `BEGIN IMMEDIATE` transaction. The
         only process spawn inside a transaction: a `cancel` that loses the race sees `running`,
         and one that wins keeps the job from ever being spawned."""
-        popen: Any = None
+        deadline = gateway.monotonic() + PRE_START_BUSY_SECONDS
+        delay = BACKOFF_START
+        while True:
+            state = _StartState()
+            try:
+                return self._start_once(view, argv, resolved, env, cwd, capture, state)
+            except (JobsctlError, sqlite3.Error):
+                # The transaction could not be had (busy, I/O): retry, but only while nothing was
+                # spawned; once a job exists the failure is final (it was aborted above).
+                if state.popen is not None or gateway.monotonic() + delay >= deadline:
+                    raise
+                self._tick()
+                gateway.sleep(delay)
+                delay = min(delay * 2, BACKOFF_MAX)
+                if self.terminated:
+                    self._fail(view, "terminated", exit_record=None)
+                    return None
+
+    def _start_once(
+        self,
+        view: ClaimView,
+        argv: list[str],
+        resolved: str,
+        env: dict[str, str],
+        cwd: str,
+        capture: OutputCapture,
+        state: _StartState,
+    ) -> _Job | None:
         committed = False
         records: list[LogRecord] = []
         try:
@@ -469,57 +533,79 @@ class Shim:
                 fresh = read_claim_in(tx, self.job_id, self.claim_id)
                 if fresh is None or fresh.status != "starting":
                     return None
-                try:
-                    popen = gateway.spawn_job(argv, executable=resolved, env=env, cwd=cwd)
-                except OSError as exc:
-                    self._diag(f"the job could not be started ({exc.strerror})")
+                if self.terminated:  # SIGTERM after the checks: end `terminated`, spawn nothing
                     _, records = fail_starting(
                         tx,
                         self.config,
                         fresh,
                         self.claim_id,
-                        reason="spawn_failed",
-                        exit_record=SPAWN_FAILED_EXIT,
-                        resolved_path=resolved,
+                        reason="terminated",
+                        exit_record=None,
                         now=self._now(),
                     )
                     failed = True
                 else:
-                    failed = False
-                    pgid = os.getpgid(popen.pid)
-                    if pgid != popen.pid:
-                        raise JobsctlError("internal", "the job did not lead its own group")
-                    won, records = begin_running(
-                        tx,
-                        self.config,
-                        fresh,
-                        self.claim_id,
-                        job_identity=identity_text(self.host, popen.pid),
-                        pgid=pgid,
-                        resolved_path=resolved,
-                        now=self._now(),
-                    )
-                    if not won:
-                        raise JobsctlError("internal", "the claim was lost inside its own lock")
+                    try:
+                        state.popen = gateway.spawn_job(argv, executable=resolved, env=env, cwd=cwd)
+                    except (OSError, ValueError) as exc:
+                        # ValueError: an embedded NUL or an illegal environment entry
+                        detail = exc.strerror if isinstance(exc, OSError) else str(exc)
+                        self._diag(f"the job could not be started ({detail})")
+                        _, records = fail_starting(
+                            tx,
+                            self.config,
+                            fresh,
+                            self.claim_id,
+                            reason="spawn_failed",
+                            exit_record=SPAWN_FAILED_EXIT,
+                            resolved_path=resolved,
+                            now=self._now(),
+                        )
+                        failed = True
+                    else:
+                        failed = False
+                        popen = state.popen
+                        pgid = os.getpgid(popen.pid)
+                        if pgid != popen.pid:
+                            raise JobsctlError("internal", "the job did not lead its own group")
+                        won, records = begin_running(
+                            tx,
+                            self.config,
+                            fresh,
+                            self.claim_id,
+                            job_identity=identity_text(self.host, popen.pid),
+                            pgid=pgid,
+                            resolved_path=resolved,
+                            now=self._now(),
+                        )
+                        if not won:
+                            raise JobsctlError("internal", "the claim was lost inside its own lock")
             committed = True
         except BaseException:
-            if popen is not None and not committed:
-                self._abort_unrecorded(popen)
+            if state.popen is not None and not committed:
+                self._abort_unrecorded(state.popen)
             raise
         self._emit(records)
         if failed:
             self._request_pass()
             return None
-        return _Job(popen, popen.pid, capture)
+        return _Job(state.popen, state.popen.pid, capture)
 
     def _abort_unrecorded(self, popen: Any) -> None:
         """A job was spawned but `running` was not committed: stop it, so that no process runs
         that the database does not know. The leader is our unreaped child, so its group id is
-        reserved and the signal can only reach the group the shim created."""
+        reserved and the signal can only reach the group the shim created; the child itself is
+        also signaled directly, in case it left that group before the start was checked (a group
+        the shim did not create is never signaled)."""
         try:
             gateway_proc.killpg(popen.pid, signal.SIGKILL)
         except OSError:
             pass
+        try:
+            gateway_proc.kill(popen.pid, signal.SIGKILL)  # our unreaped child: the PID is ours
+        except OSError:
+            pass
+        self._diag("the start was not recorded; the job it spawned was killed")
         try:
             popen.wait(timeout=10)
         except Exception:
@@ -559,10 +645,12 @@ class Shim:
             self._log_leftovers(view, leftovers)
         tail = job.capture.snapshot(final=True)
         outcome = natural_outcome(record)
-        self._write_result(view, record, outcome, leftovers, tail)
-        committed = self._finish(job, record, outcome, leftovers, tail)
-        self._reap(job)
-        popen.stdout.close()
+        try:
+            self._write_result(view, record, outcome, leftovers, tail)
+            committed = self._finish(job, record, outcome, leftovers, tail)
+        finally:
+            self._reap(job)
+            popen.stdout.close()
         if committed is None:
             return 1  # the result file stays for reconcile
         self._delete_result(view)
@@ -570,13 +658,25 @@ class Shim:
         return 0
 
     def _wait_blind(self, job: _Job) -> ExitRecord:
-        """After a pump failure: wait for the leader (unreaped), without capturing output. If its
-        status cannot be read either, no exit status was observed (`unknown`)."""
+        """After a pump failure: keep reading (and discarding) the pipe so the job cannot block on
+        a full one, keep the lease renewed, and watch the unreaped leader without blocking; the
+        pipe is drained for a bounded time after the exit. If its status cannot be read, no exit
+        status was observed (`unknown`)."""
+        assert job.popen.stdout is not None
         try:
-            waited = gateway_proc.waitid_nowait(job.pid)
-            assert waited is not None
+            pump = Pump(
+                job.popen.stdout.fileno(),
+                job.pid,
+                DiscardCapture(),
+                interval=float(self.config.tail_flush_interval),
+                periodic=lambda: None,
+                tick=self._tick,
+            )
+            waited = pump.run()
+            pump.drain()
             return exit_record(waited.si_code, waited.si_status)
-        except Exception:
+        except Exception as exc:
+            self._diag(f"the exit status could not be read ({type(exc).__name__})")
             return ExitRecord("unknown")
 
     def _flush(self, job: _Job) -> None:
@@ -593,7 +693,9 @@ class Shim:
         # timeout (`effective.timeout`) and a SIGTERM to the shim (`self.terminated`) start it.
         if self.terminated and not self._term_noted:
             self._term_noted = True
-            self._diag("SIGTERM received while the job runs (TODO(#19): signal sequence)")
+            self._diag(
+                "SIGTERM received while the job runs; the signal sequence is not implemented yet"
+            )
 
     def _log_leftovers(self, view: ClaimView, leftovers: Leftovers) -> None:
         self._log(
@@ -664,7 +766,7 @@ class Shim:
                 ),
                 FINAL_COMMIT_SECONDS,
             )
-        except (JobsctlError, sqlite3.Error) as exc:
+        except Exception as exc:  # any error, until the deadline (Start sequence step 9)
             self._diag(f"the final commit failed ({type(exc).__name__}); the result file stays")
             return None
         self._emit(result.records)

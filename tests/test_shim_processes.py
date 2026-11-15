@@ -61,6 +61,32 @@ def test_the_shim_survives_sighup_and_sigint_and_the_job_gets_default_dispositio
     assert popen.wait(timeout=60) == 0
 
 
+def test_the_job_does_not_inherit_signals_the_shims_spawner_ignored(
+    real_shims: RealShims, tmp_path: Path
+) -> None:
+    """The shim is started with SIGQUIT and SIGUSR1 ignored (as a spawner may leave them); the
+    kernel's SigIgn mask of the job shows them at their defaults."""
+    gate = tmp_path / "gate"
+    previous = {n: signal.signal(n, signal.SIG_IGN) for n in (signal.SIGQUIT, signal.SIGUSR1)}
+    try:
+        script = f"while [ ! -e {gate} ]; do sleep 0.05; done; grep SigIgn /proc/self/status"
+        popen = real_shims.seed_and_spawn(["sh", "-c", script])
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+    real_shims.wait_status("running")
+    with open(f"/proc/{popen.pid}/status") as status:
+        (shim_line,) = [x for x in status if x.startswith("SigIgn:")]
+    assert int(shim_line.split()[1], 16) & (1 << (signal.SIGQUIT - 1))  # the premise holds
+    gate.touch()
+    real_shims.wait_status("done")
+    tail = bytes(real_shims.row("SELECT tail FROM outputs WHERE job_id = ?", JOB)["tail"])
+    ignored = int(tail.decode().split()[1], 16)
+    for number in (signal.SIGQUIT, signal.SIGUSR1):
+        assert not ignored & (1 << (number - 1)), number.name
+    assert popen.wait(timeout=60) == 0
+
+
 def test_the_shim_is_non_dumpable_and_the_job_is_not(real_shims: RealShims, tmp_path: Path) -> None:
     """Spike C4: the shim's /proc/<pid>/environ is unreadable to another process; the flag resets
     on exec, so the job's is readable."""

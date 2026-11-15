@@ -39,8 +39,11 @@ def test_death_by_signal_is_signaled_with_the_signal_number() -> None:
 
 
 def test_a_shell_reporting_a_killed_child_is_an_ordinary_exit_143() -> None:
+    """Spike A6: the child really dies of SIGTERM; the shell's `wait` reports 143 and the shell
+    exits 143 normally, so the record is `exited`, never `signaled`."""
     got = _wait(
-        "import subprocess; raise SystemExit(subprocess.call(['/bin/sh', '-c', 'exit 143']))"
+        "import subprocess; raise SystemExit(subprocess.call("
+        "['/bin/sh', '-c', 'sleep 30 & kill -TERM $!; wait $!']))"
     )
     assert exit_record(got.si_code, got.si_status) == ExitRecord("exited", code=143)
 

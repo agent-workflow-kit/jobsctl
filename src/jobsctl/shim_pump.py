@@ -12,14 +12,26 @@ from __future__ import annotations
 import os
 import select
 from collections.abc import Callable
+from typing import Protocol
 
 from jobsctl import gateway, gateway_proc
-from jobsctl.output_capture import OutputCapture
 
 READ_SIZE = 64 * 1024
 READS_PER_WAKE = 16  # at most 1 MiB between two looks at the clock and the leader
 POLL_SECONDS = 0.1
 DRAIN_SECONDS = 2.0
+
+
+class _Feed(Protocol):
+    def feed(self, data: bytes) -> object: ...
+
+
+class DiscardCapture:
+    """Reads that keep a pipe from filling up without keeping what was read."""
+
+    def feed(self, data: bytes) -> None:
+        return None
+
 
 WaitExit = Callable[[int], os.waitid_result | None]
 
@@ -33,7 +45,7 @@ class Pump:
         self,
         fd: int,
         leader_pid: int,
-        capture: OutputCapture,
+        capture: _Feed,
         *,
         interval: float,
         periodic: Callable[[], None],
