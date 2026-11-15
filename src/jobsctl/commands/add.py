@@ -128,12 +128,12 @@ def build_request(ctx: Context) -> Request:
     name_conflict: str | None = None
     for name, value in args.env:
         if name in env and name_conflict is None:
-            name_conflict = f"--env {name} is given more than once"
+            name_conflict = "an --env name is given more than once"
         env[name] = value
     pass_env = list(dict.fromkeys(args.pass_env))  # a repeated name is the same name
     for name in pass_env:
         if name in env and name_conflict is None:
-            name_conflict = f"{name} is given with both --env and --pass-env"
+            name_conflict = "a name is given with both --env and --pass-env"
     if args.cwd is not None:
         cwd_given = args.cwd
         cwd = normalize_cwd(cwd_given)

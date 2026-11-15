@@ -119,17 +119,6 @@ def echo(value: str, limit: int = 80) -> str:
     return clean if len(clean) <= limit else clean[:limit] + "..."
 
 
-def echo_input(text: str, limit: int = 80) -> str:
-    """A user input echoed in a message: cut at the first `=` (shown as `=...`), then `echo`.
-
-    A mistyped `--env` flag can push `NAME=secret` into any argument, so what follows an `=` is
-    never echoed; only `unique_key` and label values legitimately contain `=`, and losing their
-    tail is harmless.
-    """
-    name, eq, _ = text.partition("=")
-    return echo(name, limit) + ("=..." if eq else "")
-
-
 def strip_escapes(text: str) -> str:
     """Masking and sanitizing step 3 alone: remove terminal escape sequences and keep the last
     segment of `\\r`-rewritten lines. Captured output is masked between this and `escape_unsafe`

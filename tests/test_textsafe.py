@@ -8,7 +8,6 @@ import pytest
 
 from jobsctl.textsafe import (
     echo,
-    echo_input,
     escape_unsafe,
     incomplete_escape_start,
     sanitize,
@@ -120,21 +119,6 @@ def test_strip_escapes_mapped_matches_strip_escapes_and_locates_characters() -> 
         assert stripped == strip_escapes(raw), raw
         assert len(origin) == len(stripped) and origin == sorted(set(origin))
         assert all(raw[i] == ch for i, ch in zip(origin, stripped, strict=True)), raw
-
-
-@pytest.mark.parametrize(
-    ("text", "shown"),
-    [
-        ("plain", "plain"),
-        ("API_KEY=hunter2", "API_KEY=..."),
-        ("a=b=c", "a=..."),
-        ("=x", "=..."),
-        ("\x1b[31mk\n=v", "k\\n=..."),
-        ("k" * 100 + "=v", "k" * 80 + "...=..."),
-    ],
-)
-def test_echo_input_cuts_at_the_first_equals(text: str, shown: str) -> None:
-    assert echo_input(text) == shown
 
 
 def test_mask_runs_after_escape_removal_and_before_control_escaping() -> None:

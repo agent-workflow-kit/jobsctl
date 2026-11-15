@@ -134,10 +134,10 @@ def test_no_command_is_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_human_error_message_sanitizes_echoed_input(capsys: pytest.CaptureFixture[str]) -> None:
-    # An unrecognized argument is echoed raw by us (not repr-escaped by argparse).
+    # An unrecognized argument is not echoed at all: only its position.
     res = run_cli(capsys, "list", "\x1b]0;pwned\x07\x1b[31mred\x1b[0m\u202e\x01")
     assert res.code == 2
-    assert res.err == "jobsctl: error: unrecognized argument: red\\u202e\\u0001\n"
+    assert res.err == "jobsctl: error: unrecognized argument at position 2\n"
 
 
 def test_print_error_sanitizes_its_message_and_candidates(
@@ -157,25 +157,24 @@ def test_print_error_cannot_forge_or_erase_an_error_line(
     assert len(err.splitlines()) == 1
 
 
-def test_echoed_input_cannot_forge_a_second_error_line(capsys: pytest.CaptureFixture[str]) -> None:
-    res = run_cli(capsys, "list", "x\njobsctl: error: forged\roverwrite")
-    assert res.code == 2
-    assert len(res.err.splitlines()) == 1
-
-
-@pytest.mark.parametrize("argv", [["list", "--status", "x\n\r"], ["show", "jb-\nabcd"]])
-def test_value_errors_escape_line_breaks(
-    capsys: pytest.CaptureFixture[str], argv: list[str]
+def test_rejected_input_with_line_breaks_yields_one_fixed_error_line(
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    res = run_cli(capsys, *argv)
+    res = run_cli(capsys, "list", "x\njobsctl: error: forged\roverwrite")
+    assert res.err == "jobsctl: error: unrecognized argument at position 2\n"
+
+
+def test_value_errors_with_line_breaks_stay_on_one_line(capsys: pytest.CaptureFixture[str]) -> None:
+    res = run_cli(capsys, "list", "--status", "x\n\rforged")
     assert res.code == 2
-    assert len(res.err.splitlines()) == 1
+    assert res.err.startswith("jobsctl: error: argument --status: invalid choice")
+    assert res.err.count("\n") == 1 and "forged" not in res.err
 
 
 def test_surrogate_escaped_argv_does_not_crash(capsys: pytest.CaptureFixture[str]) -> None:
     res = run_cli(capsys, "show", "bad\udcff")
     assert res.code == 2
-    assert "\\xff" in res.err
+    assert "\udcff" not in res.err and "\\xff" not in res.err
     res = run_cli(capsys, "list", "--status", "bad\udcff")
     assert res.code == 2
 
@@ -389,37 +388,32 @@ def test_env_values_are_never_echoed_in_any_error(
         validate_against("cli/error.json", res.envelope())
 
 
-def test_unrecognized_argument_names_only_the_first_token_up_to_equals(
+def test_unrecognized_argument_is_given_by_position_not_text(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     res = run_cli(capsys, "--json", "add", "--evn", "SECRET=v", "--other", "--", "x")
     message = res.envelope()["error"]["message"]
-    assert message == "unrecognized argument: --evn"
+    assert message == "unrecognized argument at position 3"
     res = run_cli(capsys, "--json", "add", "--envv=TOKEN=v", "--", "x")
-    assert res.envelope()["error"]["message"] == "unrecognized argument: --envv"
-
-
-def test_unrecognized_argument_is_capped(capsys: pytest.CaptureFixture[str]) -> None:
-    res = run_cli(capsys, "list", "x" * 5000)
-    assert res.code == 2
-    assert len(res.err) < 200
+    assert res.envelope()["error"]["message"] == "unrecognized argument at position 3"
 
 
 def test_unknown_command_lists_only_visible_commands(capsys: pytest.CaptureFixture[str]) -> None:
     res = run_cli(capsys, "--json", "bogus")
     assert res.code == 2
     message = res.envelope()["error"]["message"]
-    assert message.startswith("unknown command 'bogus': choose from add, list, show, ")
+    assert message.startswith("unknown command: choose from add, list, show, ")
     assert "_shim" not in message
     assert "_deliver" not in message
     assert "_kill" not in message
     assert "queues" in message
 
 
-def test_unknown_command_echo_is_sanitized(capsys: pytest.CaptureFixture[str]) -> None:
+def test_unknown_command_is_not_echoed(capsys: pytest.CaptureFixture[str]) -> None:
     res = run_cli(capsys, "\x1b[31mbad\n\u202e")
     assert res.code == 2
-    assert res.err.startswith("jobsctl: error: unknown command 'bad\\n\\u202e': choose from ")
+    assert res.err.startswith("jobsctl: error: unknown command: choose from ")
+    assert "bad" not in res.err
     assert len(res.err.splitlines()) == 1
 
 
@@ -532,11 +526,11 @@ def test_env_values_pushed_into_positional_slots_are_never_echoed(
 def test_choice_error_lists_the_real_choices(capsys: pytest.CaptureFixture[str]) -> None:
     res = run_cli(capsys, "--json", "label", "bogus")
     message = res.envelope()["error"]["message"]
-    assert "'bogus'" in message
+    assert "bogus" not in message
     assert "add" in message and "remove" in message
     res = run_cli(capsys, "--json", "list", "--status", "bogus")
     message = res.envelope()["error"]["message"]
-    assert "'bogus'" in message
+    assert "bogus" not in message
     assert "queued" in message and "canceled" in message
 
 

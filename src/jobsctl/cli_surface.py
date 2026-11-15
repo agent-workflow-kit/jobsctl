@@ -8,15 +8,14 @@ flag-combination rules (exit 2) that argparse cannot express. Behavior lives in
 from __future__ import annotations
 
 import argparse
-import ast
 import re
+import sys
 from collections.abc import Callable
 from typing import Any
 
 from jobsctl import __version__
 from jobsctl import cli_values as v
 from jobsctl.errors import usage_error
-from jobsctl.textsafe import echo
 
 STATUSES = ("queued", "starting", "running", "held", "done", "failed", "canceled")
 MAX_ARGV_ITEMS = 4096
@@ -26,52 +25,114 @@ MAX_LABELS = 32
 _INVALID_CHOICE = re.compile(
     r"argument (.+?): invalid choice: (.*) \(choose from (.*)\)", re.DOTALL
 )
+# argparse messages that quote the input; each becomes "argument <name>: <text>".
+_ECHOING = (
+    (re.compile(r"argument (\S+): ignored explicit argument .*", re.DOTALL), "takes no value"),
+    (re.compile(r"argument (\S+): invalid .+ value: .*", re.DOTALL), "invalid value"),
+)
+# Marks an error raised by one of our own `type=` callables (see Parser._get_value): their text
+# states a rule and never quotes input. argv cannot contain NUL, so input cannot forge it.
+_OWN = "\x00"
+_OWN_ERROR = re.compile(r"argument (\S+): \x00(.*)", re.DOTALL)
+# The only argparse wording passed through unchanged: it names declared arguments, never input.
+_SAFE = tuple(
+    re.compile(pattern, re.DOTALL)
+    for pattern in (
+        r"the following arguments are required: [\w<>|.,= -]+",
+        r"one of the arguments [\w<>|.,= -]+ is required",
+        r"argument \S+: expected (one argument|at least one argument|\d+ arguments)",
+        r"argument \S+: not allowed with argument \S+",
+    )
+)
+GENERIC_MESSAGE = "invalid command line"
+_MAX_POSITIONS = 8
 
 
 class Parser(argparse.ArgumentParser):
     """An ArgumentParser whose errors are usage errors, not a print-and-exit.
 
-    Messages are built here, not by argparse, wherever argparse would echo input beyond what is
-    needed: an unrecognized argument names only the first token up to `=` (a mistyped
-    `--env` must not leak its value), an unknown command lists only the visible commands, and
-    any other invalid choice is cut at `=`, sanitized and capped.
+    No message quotes input: a secret can sit in any argument before config and the masking set
+    exist. Messages are built here wherever argparse would echo input. An unrecognized argument
+    is named only when it is an option name some jobsctl command declares, and is otherwise
+    given by its position; an unknown command or invalid choice lists the valid choices without
+    the input; an explicit argument given to a switch (`--top=x`) and a type failure name the
+    option only.
     """
 
     def parse_args(  # pyright: ignore[reportIncompatibleMethodOverride]
         self, args: Any = None, namespace: Any = None
     ) -> Any:
-        parsed, extras = self.parse_known_args(args, namespace)
+        tokens = list(sys.argv[1:] if args is None else args)
+        parsed, extras = self.parse_known_args(tokens, namespace)
         if extras:
-            self.error("unrecognized argument: " + echo(extras[0].partition("=")[0]))
+            # `--` is argparse's own marker: report the stray token after it, if there is one.
+            first = next((e for e in extras if e != "--"), extras[0])
+            raise usage_error(self._unrecognized(first, tokens))  # ours: never filtered
         return parsed
+
+    def _unrecognized(self, token: str, tokens: list[str]) -> str:
+        name = token.partition("=")[0]
+        if name in _declared_options(self):
+            return "unrecognized argument: " + name
+        # The same text can sit at several positions: name them all rather than guess one.
+        # Past _MAX_POSITIONS the rest is counted, not listed, so the message stays short.
+        found = [str(i) for i, t in enumerate(tokens, 1) if t == token]
+        if len(found) > _MAX_POSITIONS:
+            shown = ", ".join(found[:_MAX_POSITIONS])
+            where = f"{shown}, or later ({len(found)} occurrences in total)"
+        else:
+            where = ", ".join(found[:-1]) + " or " + found[-1] if len(found) > 1 else found[0]
+        return f"unrecognized argument at position {where}"
 
     def error(self, message: str) -> Any:
         raise usage_error(self._message(message))
 
     def _message(self, message: str) -> str:
-        if message.startswith("ambiguous option: "):
-            option = message[len("ambiguous option: ") :].rsplit(" could match ", 1)[0]
-            return "ambiguous option: " + echo(option.partition("=")[0])
+        own = _OWN_ERROR.fullmatch(message)
+        if own is not None:
+            return f"argument {own.group(1)}: {own.group(2)}"
         match = _INVALID_CHOICE.match(message)
-        if match is None:
+        if match is not None:
+            argument, _, choices = match.groups()
+            if argument == "<command>":
+                return "unknown command: choose from " + ", ".join(self._visible())
+            return f"argument {argument}: invalid choice (choose from {choices})"
+        for pattern, text in _ECHOING:
+            found = pattern.match(message)
+            if found is not None:
+                return f"argument {found.group(1)}: {text}"
+        if any(safe.fullmatch(message) for safe in _SAFE):
             return message
-        argument, token, choices = match.groups()
-        try:  # argparse quotes the input with repr()
-            literal = ast.literal_eval(token)
-        except (ValueError, SyntaxError):
-            literal = token
-        token = literal if isinstance(literal, str) else token
-        name, eq, _ = token.partition("=")  # a mistyped `--env` must not leak its value
-        shown = echo(name) + ("=..." if eq else "")
-        if argument == "<command>":
-            return f"unknown command '{shown}': choose from " + ", ".join(self._visible())
-        return f"argument {argument}: invalid choice: '{shown}' (choose from {choices})"
+        return GENERIC_MESSAGE  # wording this code does not know may quote input: say nothing
+
+    def _get_value(self, action: argparse.Action, arg_string: str) -> Any:
+        try:
+            return super()._get_value(action, arg_string)
+        except argparse.ArgumentError as exc:
+            # argparse raises this from inside the `except ArgumentTypeError` block, so the
+            # context is our callable's error; mark it as ours, with its text intact.
+            if isinstance(exc.__context__, argparse.ArgumentTypeError):
+                raise argparse.ArgumentError(action, _OWN + str(exc.__context__)) from None
+            raise
 
     def _visible(self) -> list[str]:
         for action in self._actions:
             if isinstance(action, argparse._SubParsersAction):
                 return [name for name in action.choices if not name.startswith("_")]
         return []
+
+
+def _parsers(parser: argparse.ArgumentParser) -> list[argparse.ArgumentParser]:
+    found = [parser]
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for child in action.choices.values():
+                found.extend(_parsers(child))
+    return found
+
+
+def _declared_options(parser: argparse.ArgumentParser) -> set[str]:
+    return {opt for p in _parsers(parser) for a in p._actions for opt in a.option_strings}
 
 
 def _global_flags(parser: argparse.ArgumentParser, *, suppress: bool) -> None:
