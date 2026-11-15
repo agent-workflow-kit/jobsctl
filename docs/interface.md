@@ -528,7 +528,7 @@ Blocks until the job is terminal or `held`, checking about once a second, then p
 | 22 | `wait`'s own `--timeout` expired first (the job is printed in its current status) |
 | 130 | interrupted by Ctrl-C (the job is printed in its current status) |
 
-A job waiting for an automatic retry is `queued`, so `wait` keeps waiting. Exit 22 (`wait_timeout`) is jobsctl's only tool-specific exit code; it is an exit code only, with no `--json` error envelope and so no error `code` (the job is printed). Output: `schemas/cli/show.json` (exits 0, 12, 13, 20, 22, 130). If jobsctl is upgraded to a newer schema while `wait` waits, it exits 12 with the error `version_skew` instead ([Upgrades](#upgrades), [Errors](#errors)).
+A job waiting for an automatic retry is `queued`, so `wait` keeps waiting. `wait` opens the database read-only (it creates no state directory and writes nothing) and ends on `held` of every hold reason. SIGTERM and SIGHUP interrupt a wait like Ctrl-C: the job is printed and the exit is 130, without a traceback; interrupting a wait never changes the job. A job pruned while `wait` waits (or an id that does not exist) exits 10 (`not_found`). A stored output tail that cannot be read is printed as `output: null` with a warning on stderr, so the exit code still reports the job's status. Exit 22 (`wait_timeout`) is jobsctl's only tool-specific exit code; it is an exit code only, with no `--json` error envelope and so no error `code` (the job is printed). Output: `schemas/cli/show.json` (exits 0, 12, 13, 20, 22, 130). If jobsctl is upgraded to a newer schema while `wait` waits, it exits 12 with the error `version_skew` instead ([Upgrades](#upgrades), [Errors](#errors)).
 
 ### `move`
 
