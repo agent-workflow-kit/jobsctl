@@ -47,9 +47,13 @@
                 "secret_in_queue",
                 "secret_in_unique_key",
                 "secret_in_label",
-                "secret_in_cwd"
+                "secret_in_cwd",
+                "secret_in_actor",
+                "secret_in_decision_id",
+                "secret_in_env_name",
+                "secret_in_pass_env_name"
               ],
-              "description": "usage from add: secret_in_argv (with index), secret_in_env (with variable), secret_in_queue, secret_in_unique_key, secret_in_cwd, or secret_in_label (with label, unless the key itself holds the secret)."
+              "description": "usage from add: secret_in_argv (with index), secret_in_env (with variable), secret_in_queue, secret_in_unique_key, secret_in_cwd, secret_in_label (with label, unless the key itself holds the secret), or secret_in_actor, secret_in_decision_id, secret_in_env_name, secret_in_pass_env_name (no further details: the name is the secret)."
             },
             "index": {
               "type": "integer",
