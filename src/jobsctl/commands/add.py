@@ -29,7 +29,7 @@ from jobsctl.ids import generate_job_id
 from jobsctl.job_view import job_object, job_row
 from jobsctl.log_records import argv_sha256
 from jobsctl.log_writer import RecordWriter
-from jobsctl.positions import head_position, tail_position
+from jobsctl.order import head_position, tail_position
 from jobsctl.store_db import OpenMode, Store, Tx
 from jobsctl.store_dir import resolve_state_dir
 from jobsctl.store_ops import insert_job
@@ -379,11 +379,7 @@ def decide(
     if not write:
         return out
     assert tx is not None
-    position = (
-        head_position(tx, req.queue, pinned=req.pin, priority=req.priority)
-        if req.top
-        else tail_position(tx, req.queue)
-    )
+    position = head_position(tx, req.queue) if req.top else tail_position(tx, req.queue)
     job_id = generate_job_id(lambda candidate: _taken(tx, candidate))
     if not insert_job(tx, _job_values(req, job_id, position, now)):
         raced = _holder(tx, req.unique_key)  # the partial index decided: reuse that job
