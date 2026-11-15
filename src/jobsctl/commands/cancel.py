@@ -124,22 +124,58 @@ def _run(
 def _deliver_and_wait(
     ctx: Context, done: list[Applied], targets: list[cancel_force.ForceTarget]
 ) -> list[Applied]:
-    """After the commit: wake each requested job's shim and wait (`--wait-timeout 0`: don't)."""
+    """After the commit: wake each requested job's shim and wait (`--wait-timeout 0`: don't).
+    A failure of the delivery itself (the request is committed) is a warning, not the outcome:
+    the wait, or `cancel_pending`, follows. `version_skew` passes through."""
     for target in targets:
-        kill = cancel_force.deliver_request(ctx, target)
+        kill = None
+        try:
+            kill = cancel_force.deliver_request(ctx, target)
+        except (OSError, JobsctlError) as exc:
+            if isinstance(exc, JobsctlError) and exc.code == "version_skew":
+                raise
+            sys.stderr.write(
+                f"jobsctl: warning: the delivery for {target.job_id} failed "
+                f"({type(exc).__name__}); its force request stays committed\n"
+            )
+            sys.stderr.flush()
         wait = ctx.args.wait_timeout
         if wait == 0:
             continue
         cancel_force.wait_until_ended(
             ctx, target, cancel_force.default_timeout(target) if wait is None else wait, kill=kill
         )
-    refreshed = {t.job_id for t in targets}
+    return _refreshed(ctx, done, {t.job_id for t in targets})
+
+
+def _refreshed(ctx: Context, done: list[Applied], refreshed: set[str]) -> list[Applied]:
     return [
         Applied(d.changed, cancel_force.fresh_job(ctx, d.job["id"]), d.previous_status)
         if d.job["id"] in refreshed
         else d
         for d in done
     ]
+
+
+def _interrupted(
+    ctx: Context, done: list[Applied], targets: list[cancel_force.ForceTarget]
+) -> list[Applied]:
+    """The jobs to print after Ctrl-C, or the error to raise. A request is committed once the
+    transaction returned, which can be just before its after-commit callback filled `targets`:
+    so with no target the committed state is looked up. A job that ended meanwhile is reported
+    as ended (the normal path); otherwise `cancel_pending` (exit 12), the request kept."""
+    args = ctx.args
+    if targets:
+        job_id: str | None = targets[0].job_id
+    elif args.force and not args.dry_run:
+        job_id = cancel_force.committed_request(ctx, args.id)
+    else:
+        job_id = None
+    if job_id is None:
+        raise JobsctlError("interrupted", "interrupted") from None
+    if done and cancel_force.job_status(ctx, job_id) not in ("running", None):
+        return _refreshed(ctx, done, {job_id})
+    raise cancel_force.cancel_pending(job_id, "was interrupted") from None
 
 
 @command("cancel")
@@ -154,10 +190,7 @@ def cancel_command(ctx: Context) -> int:
             if targets and not args.dry_run:
                 done = _deliver_and_wait(ctx, done, targets)
     except KeyboardInterrupt:
-        # the request is committed exactly when its after-commit callback ran
-        if targets:
-            raise cancel_force.cancel_pending(targets[0].job_id, "was interrupted") from None
-        raise JobsctlError("interrupted", "interrupted") from None
+        done = _interrupted(ctx, done, targets)
     if not args.dry_run and any(d.changed and d.previous_status == "starting" for d in done):
         request_pass_from_command(ctx.config, ctx.config_path, quiet=ctx.quiet)  # a slot is free
     _print(ctx, done, refusals)

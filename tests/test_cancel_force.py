@@ -304,6 +304,31 @@ def test_the_default_wait_is_twice_the_kill_grace_plus_ten_seconds(
     assert seen == [24, 300]
 
 
+def test_the_default_wait_falls_back_to_the_configured_kill_grace(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[int] = []
+    monkeypatch.setattr(
+        cancel_force, "wait_until_ended", lambda c, t, timeout, **k: seen.append(timeout)
+    )
+    monkeypatch.setattr(cancel_force, "deliver_request", lambda *a, **k: None)
+    base = {"timeout": None, "max_retries": 0}
+    bad = (None, json.dumps({**base, "kill_grace": None}), json.dumps({**base, "kill_grace": True}))
+    for effective in bad:
+        job_id = running_job(capsys, "--kill-grace", "7s")
+        sql("UPDATE attempts SET effective = ? WHERE job_id = ?", effective, job_id)
+        res = force(capsys, job_id)
+        assert res.code == 0, res.out + res.err
+    job_id = running_job(capsys)
+    sql(
+        "UPDATE attempts SET effective = ? WHERE job_id = ?",
+        json.dumps({**base, "kill_grace": 7.5}),
+        job_id,
+    )
+    assert force(capsys, job_id).code == 0
+    assert seen == [24, 24, 24, 25]
+
+
 def test_a_repeated_request_is_idempotent_and_resends_the_wake_up(
     capsys: pytest.CaptureFixture[str], procs: list[Any], tmp_path: Path
 ) -> None:
@@ -425,9 +450,12 @@ def test_an_unusable_shim_identity_signals_nothing(
     job_id = running_job(capsys)
     bystander, log = start_fake_shim(procs, tmp_path, job_id, finalize=False)
     sql("UPDATE attempts SET shim_identity = ? WHERE job_id = ?", recorded, job_id)
-    doc_of(force(capsys, job_id, "--wait-timeout", "0"))
+    res = force(capsys, job_id, "--wait-timeout", "0")
+    doc_of(res)
     time.sleep(0.2)
-    assert lines(log) == [] and bystander.poll() is None and spawned_kills == [job_id]
+    # unproven gone, like UNKNOWN: a warning, no signal, no _kill (only shim_lost goes to _kill)
+    assert lines(log) == [] and bystander.poll() is None and spawned_kills == []
+    assert "warning" in res.err
 
 
 def test_a_shim_lost_job_gets_a_kill_process_and_no_signal(
@@ -497,6 +525,61 @@ def test_a_gone_shim_job_that_ended_meanwhile_spawns_no_kill(
     assert spawned_kills == []
 
 
+def test_a_spawn_failure_after_the_commit_is_cancel_pending_not_generic(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_id = running_job(capsys)
+    sql("UPDATE jobs SET shim_lost = 1 WHERE id = ?", job_id)
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise OSError("no fork")
+
+    monkeypatch.setattr(cancel_force, "spawn_internal", boom)
+    zero = force(capsys, job_id, "--wait-timeout", "0")
+    assert doc_of(zero)["jobs"][0]["status"] == "running"
+    assert "warning" in zero.err
+    err = error_of(force(capsys, job_id, "--wait-timeout", "1s"), 12, "cancel_pending")
+    assert err["details"] == {"job_id": job_id}
+    assert attempt_row(job_id)["force_requested_by"] == "human:kim"
+
+
+def test_a_store_failure_in_the_delivery_is_cancel_pending(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl.errors import JobsctlError
+
+    job_id = running_job(capsys)
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise JobsctlError("busy", "database is locked")
+
+    monkeypatch.setattr(cancel_force, "_needs_kill", boom)
+    sql("UPDATE jobs SET shim_lost = 1 WHERE id = ?", job_id)
+    err = error_of(force(capsys, job_id, "--wait-timeout", "1s"), 12, "cancel_pending")
+    assert err["details"] == {"job_id": job_id}
+
+
+def test_a_newer_schema_while_waiting_is_version_skew_and_keeps_the_request(
+    capsys: pytest.CaptureFixture[str],
+    procs: list[Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sqlite3
+
+    job_id = running_job(capsys)
+    start_fake_shim(procs, tmp_path, job_id, finalize=False)
+
+    def upgrade(seconds: float) -> None:
+        conn = sqlite3.connect(resolve_state_dir() / "state.db")
+        conn.execute("PRAGMA user_version = 99")
+        conn.close()
+
+    monkeypatch.setattr(cancel_force.gateway, "sleep", upgrade)
+    error_of(force(capsys, job_id, "--wait-timeout", "5m"), 12, "version_skew")
+    assert attempt_row(job_id)["force_requested_by"] == "human:kim"
+
+
 # -- audit not lost ------------------------------------------------------------------------------
 
 
@@ -551,6 +634,52 @@ def test_an_interrupt_before_the_commit_is_not_reported_as_a_request(
     assert attempt_row(job_id)["force_requested_by"] is None
 
 
+def test_an_interrupt_after_the_commit_before_the_callback_is_cancel_pending(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl.commands import cancel as cancel_cmd
+
+    job_id = running_job(capsys)
+    real = cancel_cmd._run
+
+    def run_then_interrupt(ctx: Any, targets: list[Any]) -> Any:
+        real(ctx, targets)  # committed
+        targets.clear()  # the interrupt came before the callback filled it
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cancel_cmd, "_run", run_then_interrupt)
+    err = error_of(force(capsys, job_id), 12, "cancel_pending")
+    assert err["details"] == {"job_id": job_id}
+    assert attempt_row(job_id)["force_requested_by"] == "human:kim"
+
+
+def test_an_interrupt_after_the_job_ended_reports_it_ended(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl.commands import cancel as cancel_cmd
+
+    job_id = running_job(capsys)
+
+    def end_then_interrupt(*args: Any, **kwargs: Any) -> None:
+        sql(
+            "UPDATE attempts SET status = 'canceled', reason = 'forced', "
+            "ended_at = '2026-01-01T00:00:09.000Z', leftovers = 0, "
+            'exit = \'{"kind": "unknown", "code": null, "signal": null, '
+            '"core": false}\' WHERE job_id = ?',
+            job_id,
+        )
+        sql(
+            "UPDATE jobs SET status = 'canceled', reason = 'forced', "
+            "ended_at = '2026-01-01T00:00:09.000Z' WHERE id = ?",
+            job_id,
+        )
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cancel_cmd, "_deliver_and_wait", end_then_interrupt)
+    doc = doc_of(force(capsys, job_id))
+    assert doc["jobs"][0]["status"] == "canceled"
+
+
 # -- whole flow with a real shim -----------------------------------------------------------------
 
 
@@ -579,3 +708,27 @@ def test_force_cancel_of_a_real_job_through_a_real_shim(
     assert audit["action"] == "cancel_force"
     assert any(r["to"] == "canceled" and r["reason"] == "forced" for r in log_records("transition"))
     assert outbox() == [] or all(e["hook"] == "post-cancel" for e in outbox())
+
+
+def test_an_interrupt_during_the_audit_append_still_writes_the_remaining_records() -> None:
+    from types import SimpleNamespace
+
+    from jobsctl import transitions_manual
+
+    written: list[str] = []
+
+    class Writer:
+        def audit(self, **fields: Any) -> None:
+            if fields["action"] == "first":
+                raise KeyboardInterrupt
+            written.append(fields["action"])
+
+        def log(self, event: str, **kwargs: Any) -> None:
+            written.append(event)
+
+    op = SimpleNamespace(
+        audits=[{"action": "first"}, {"action": "second"}], logs=[("evt", {}, "info")]
+    )
+    with pytest.raises(KeyboardInterrupt):
+        transitions_manual._emit(Writer(), op)  # type: ignore[arg-type]
+    assert written == ["second", "evt"]

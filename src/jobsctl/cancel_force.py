@@ -20,6 +20,7 @@ Nothing here ever signals a PID taken from the database without the identity che
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import subprocess
 import sys
@@ -30,7 +31,8 @@ from jobsctl import gateway
 from jobsctl.cli_registry import Context
 from jobsctl.env_file import load_env_file
 from jobsctl.errors import JobsctlError
-from jobsctl.job_view import job_object
+from jobsctl.job_lookup import find_job, select_live_jobs
+from jobsctl.job_view import effective_settings, job_object
 from jobsctl.leases import live_holder, parse_identity
 from jobsctl.log_files import check_appendable
 from jobsctl.proc_host import default_host
@@ -43,7 +45,6 @@ from jobsctl.timestamps import format_timestamp
 from jobsctl.transitions_manual import Applied, Op, job_audit_inputs
 
 POLL_SECONDS: Final = 1.0
-DEFAULT_KILL_GRACE: Final = 30
 _TERM: Final = 15  # signal.SIGTERM
 
 
@@ -54,7 +55,7 @@ class ForceTarget:
     job_id: str
     shim_identity: str | None
     shim_lost: bool
-    kill_grace: int
+    kill_grace: float
 
 
 def apply_reconcile(op: Op, row: sqlite3.Row) -> sqlite3.Row:
@@ -69,16 +70,21 @@ def apply_reconcile(op: Op, row: sqlite3.Row) -> sqlite3.Row:
 
 
 def default_timeout(target: ForceTarget) -> int:
-    """2 x the effective `kill_grace` (the shim's snapshot) + 10 seconds."""
-    return 2 * target.kill_grace + 10
+    """2 x the effective `kill_grace` (the shim's snapshot) + 10 seconds, rounded up."""
+    return math.ceil(2 * target.kill_grace + 10)
 
 
-def _kill_grace(attempt: sqlite3.Row) -> int:
+def _kill_grace(op: Op, job: sqlite3.Row, attempt: sqlite3.Row) -> float:
+    """The attempt's snapshot value (the shim does `float(...)` of it); an absent, null or
+    malformed snapshot falls back to the job's configured value (queue settings and overrides)."""
     try:
         grace = json.loads(attempt["effective"] or "{}").get("kill_grace")
     except (ValueError, AttributeError):
         grace = None
-    return grace if isinstance(grace, int) and not isinstance(grace, bool) else DEFAULT_KILL_GRACE
+    if isinstance(grace, (int, float)) and not isinstance(grace, bool) and math.isfinite(grace):
+        return grace
+    configured = effective_settings(op.config, job["queue"], json.loads(job["overrides"]), None)
+    return configured["kill_grace"]
 
 
 def request_force(op: Op, row: sqlite3.Row, targets: list[ForceTarget]) -> Applied:
@@ -96,7 +102,10 @@ def request_force(op: Op, row: sqlite3.Row, targets: list[ForceTarget]) -> Appli
         raise JobsctlError("internal", f"{row['id']} is running but has no attempt")
     existing = attempt["force_requested_by"]
     target = ForceTarget(
-        str(row["id"]), attempt["shim_identity"], bool(row["shim_lost"]), _kill_grace(attempt)
+        str(row["id"]),
+        attempt["shim_identity"],
+        bool(row["shim_lost"]),
+        _kill_grace(op, row, attempt),
     )
     if existing is not None:  # the first requester stays; no new audit record
         if op.write:
@@ -157,6 +166,9 @@ def deliver_request(ctx: Context, target: ForceTarget) -> subprocess.Popen[bytes
     """Wake the shim, or start `_kill` when no live shim can be woken. Returns the `_kill`
     handle when one was started."""
     ident = None if target.shim_lost else parse_identity(target.shim_identity or "")
+    if ident is None and not target.shim_lost:  # nothing to verify: like UNKNOWN, not proven gone
+        _warn(f"the shim of {target.job_id} has no usable recorded identity; nothing was sent")
+        return None
     if ident is not None:
         outcome = signal_process(default_host(), ident, _TERM)
         if outcome.sent:
@@ -225,3 +237,39 @@ def wait_until_ended(
             if kill is not None:
                 kill.poll()  # reaps it once it exited
             gateway.sleep(min(POLL_SECONDS, remaining))
+
+
+def job_status(ctx: Context, job_id: str) -> str | None:
+    """The job's status now (read-only); `None` when it is gone."""
+    with Store.open(busy_timeout=ctx.config.busy_timeout, mode=OpenMode.READ_ONLY) as store:
+        found = store.query_one("SELECT status FROM jobs WHERE id = ?", [job_id])
+    return None if found is None else str(found["status"])
+
+
+def committed_request(ctx: Context, job_id: str | None) -> str | None:
+    """After an interrupt that left no delivery target: the id of the running job that carries a
+    committed force request, selected like the command did (`None`: no request is committed).
+    Read-only; any failure to look means `None`."""
+    args = ctx.args
+    try:
+        with Store.open(busy_timeout=ctx.config.busy_timeout, mode=OpenMode.READ_ONLY) as store:
+            with store.read() as tx:
+                rows = (
+                    [find_job(tx, job_id)]
+                    if job_id is not None
+                    else select_live_jobs(
+                        tx, queue=args.queue, labels=args.label or (), unique_key=args.unique_key
+                    )
+                )
+                for row in rows:
+                    if row["status"] != "running":
+                        continue
+                    attempt = tx.one(
+                        "SELECT force_requested_by FROM attempts WHERE job_id = ? AND n = ?",
+                        [row["id"], row["attempt"]],
+                    )
+                    if attempt is not None and attempt["force_requested_by"] is not None:
+                        return str(row["id"])
+    except (JobsctlError, sqlite3.Error, OSError):
+        return None
+    return None

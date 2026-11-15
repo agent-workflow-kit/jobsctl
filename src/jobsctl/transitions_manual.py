@@ -97,22 +97,29 @@ def _emit(writer: RecordWriter, op: Op) -> None:
     exception's type."""
     failed = 0
     last = ""
+    interrupt: BaseException | None = None  # an interrupt must not skip the remaining records
     for audit in op.audits:
         try:
             writer.audit(**audit)
         except Exception as exc:
             failed, last = failed + 1, type(exc).__name__
+        except BaseException as exc:
+            interrupt = interrupt or exc
     for event, fields, level in op.logs:
         try:
             writer.log(event, level=level, fields=fields)
         except Exception as exc:
             failed, last = failed + 1, type(exc).__name__
+        except BaseException as exc:
+            interrupt = interrupt or exc
     if failed:
         sys.stderr.write(
             f"jobsctl: warning: the change was committed but appending to the log or audit "
             f"file failed ({last}); {failed} record(s) were not written\n"
         )
         sys.stderr.flush()
+    if interrupt is not None:
+        raise interrupt
 
 
 def run_manual[T](ctx: Context, body: Callable[[Op], T], *, load_env: Callable[[], EnvFile]) -> T:
