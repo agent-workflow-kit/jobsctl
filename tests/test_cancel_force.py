@@ -31,6 +31,7 @@ from tests.manual_helpers import (
     add_job,
     attempt_row,
     audit_records,
+    config_file,
     log_records,
     make_done,
     make_held,
@@ -732,3 +733,40 @@ def test_an_interrupt_during_the_audit_append_still_writes_the_remaining_records
     with pytest.raises(KeyboardInterrupt):
         transitions_manual._emit(Writer(), op)  # type: ignore[arg-type]
     assert written == ["second", "evt"]
+
+
+# -- review fixes: pre-existing request, removed queue -------------------------------------------
+
+
+def test_an_interrupt_before_the_write_with_another_requesters_request_is_130(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """alice's request is already committed; bob's invocation committed nothing."""
+    job_id = running_job(capsys)
+    sql("UPDATE attempts SET force_requested_by = 'human:alice' WHERE job_id = ?", job_id)
+
+    def interrupted(*args: Any, **kwargs: Any) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cancel_force, "request_force", interrupted)
+    res = force(capsys, job_id)
+    assert res.code == 130 and res.envelope()["error"]["code"] == "interrupted"
+    assert attempt_row(job_id)["force_requested_by"] == "human:alice"
+
+
+def test_a_removed_queue_with_a_null_snapshot_falls_back_to_the_global_kill_grace(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[int] = []
+    monkeypatch.setattr(
+        cancel_force, "wait_until_ended", lambda c, t, timeout, **k: seen.append(timeout)
+    )
+    monkeypatch.setattr(cancel_force, "deliver_request", lambda *a, **k: None)
+    with_queue = config_file(tmp_path, queues={"gone": {"cap": 1}}, kill_grace="9s")
+    job_id = add_job(capsys, "--queue", "gone", config=with_queue)
+    make_running(job_id)
+    sql("UPDATE attempts SET effective = NULL, resolved_path = '/bin/x' WHERE job_id = ?", job_id)
+    without = config_file(tmp_path, kill_grace="9s")  # the queue was removed from the config
+    res = run_cli(capsys, "--config", without, "--json", "cancel", job_id, "--force", *HUMAN)
+    assert res.code == 0, res.out + res.err
+    assert seen == [28]  # 2 x 9 + 10

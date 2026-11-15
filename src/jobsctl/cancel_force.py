@@ -246,11 +246,12 @@ def job_status(ctx: Context, job_id: str) -> str | None:
     return None if found is None else str(found["status"])
 
 
-def committed_request(ctx: Context, job_id: str | None) -> str | None:
-    """After an interrupt that left no delivery target: the id of the running job that carries a
-    committed force request, selected like the command did (`None`: no request is committed).
-    Read-only; any failure to look means `None`."""
+def committed_requests(ctx: Context, job_id: str | None) -> list[str]:
+    """The ids of the running jobs that carry a committed force request, selected like the
+    command does. Read-only; any failure to look means none. Taken before the command's write
+    and again after an interrupt, the difference is what this invocation committed."""
     args = ctx.args
+    found: list[str] = []
     try:
         with Store.open(busy_timeout=ctx.config.busy_timeout, mode=OpenMode.READ_ONLY) as store:
             with store.read() as tx:
@@ -269,7 +270,7 @@ def committed_request(ctx: Context, job_id: str | None) -> str | None:
                         [row["id"], row["attempt"]],
                     )
                     if attempt is not None and attempt["force_requested_by"] is not None:
-                        return str(row["id"])
+                        found.append(str(row["id"]))
     except (JobsctlError, sqlite3.Error, OSError):
-        return None
-    return None
+        return []
+    return found

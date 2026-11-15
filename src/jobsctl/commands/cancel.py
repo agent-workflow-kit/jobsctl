@@ -158,17 +158,23 @@ def _refreshed(ctx: Context, done: list[Applied], refreshed: set[str]) -> list[A
 
 
 def _interrupted(
-    ctx: Context, done: list[Applied], targets: list[cancel_force.ForceTarget]
+    ctx: Context,
+    done: list[Applied],
+    targets: list[cancel_force.ForceTarget],
+    already: list[str],
 ) -> list[Applied]:
     """The jobs to print after Ctrl-C, or the error to raise. A request is committed once the
     transaction returned, which can be just before its after-commit callback filled `targets`:
-    so with no target the committed state is looked up. A job that ended meanwhile is reported
+    so with no target the committed state is looked up: a request counts only when it was absent
+    before this invocation (`already`: those present at the start), else the interrupt is plain
+    (130), nothing having been committed here. A job that ended meanwhile is reported
     as ended (the normal path); otherwise `cancel_pending` (exit 12), the request kept."""
     args = ctx.args
     if targets:
         job_id: str | None = targets[0].job_id
     elif args.force and not args.dry_run:
-        job_id = cancel_force.committed_request(ctx, args.id)
+        new = [j for j in cancel_force.committed_requests(ctx, args.id) if j not in already]
+        job_id = new[0] if new else None
     else:
         job_id = None
     if job_id is None:
@@ -184,13 +190,16 @@ def cancel_command(ctx: Context) -> int:
     targets: list[cancel_force.ForceTarget] = []
     refusals: list[dict[str, str]] = []
     done: list[Applied] = []
+    already = (
+        cancel_force.committed_requests(ctx, args.id) if args.force and not args.dry_run else []
+    )
     try:
         with interrupts_as_keyboard_interrupt() if args.force else nullcontext():
             done, refusals = _run(ctx, targets)
             if targets and not args.dry_run:
                 done = _deliver_and_wait(ctx, done, targets)
     except KeyboardInterrupt:
-        done = _interrupted(ctx, done, targets)
+        done = _interrupted(ctx, done, targets, already)
     if not args.dry_run and any(d.changed and d.previous_status == "starting" for d in done):
         request_pass_from_command(ctx.config, ctx.config_path, quiet=ctx.quiet)  # a slot is free
     _print(ctx, done, refusals)
