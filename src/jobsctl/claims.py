@@ -229,6 +229,7 @@ def fail_spawn(
             "ended_at": now,
             "status_changed_at": now,
             "spawn_failures": failures,
+            "override_hooks": "[]",
         },
     )
     if not won:
