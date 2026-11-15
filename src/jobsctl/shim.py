@@ -494,6 +494,10 @@ class Shim:
             verdict = pre.run(view)
         except Exception as exc:  # fail closed: nothing is written, the job is not started
             self._diag(f"the pre-start hooks failed unexpectedly ({type(exc).__name__}: {exc})")
+            try:  # a verdict that already committed keeps its transition records
+                self._emit(pre.records)
+            except Exception:  # emission must not raise out of the fail-closed path
+                pass
             return Verdict.INTERNAL
         self._emit(pre.records)
         return verdict

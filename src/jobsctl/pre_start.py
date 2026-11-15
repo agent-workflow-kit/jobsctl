@@ -140,6 +140,7 @@ class PreStart:
         override = set(json.loads(view.row["override_hooks"]))
         tally = _Tally()
         for chosen in selected:
+            self._read_failing_since = None  # the unreadable-row timer is per hook
             early = self._stop_reason()
             if early in ("canceled", "internal"):
                 return self._cut_short(

@@ -552,3 +552,60 @@ def test_release_with_override_escalation_lets_the_next_start_through(
     assert runs.read_text().split() == ["x", "x"]
     assert marker.exists() and job(store)["status"] == "done"
     assert job(store)["override_hooks"] == "[]"
+
+
+def test_a_failed_read_late_in_one_hook_does_not_count_toward_the_next_hook(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unreadable-row timer restarts per hook: one failed read at the top of hook 2, long
+    after a failed read in hook 1, is not `READ_FAILURE_SECONDS` of continuous failure."""
+    import sqlite3
+    import types
+
+    from jobsctl import pre_start
+
+    argv, marker = marker_job(tmp_path)
+    seed_claimed(store, argv)
+    now = [0.0]
+    monkeypatch.setattr(pre_start, "time", types.SimpleNamespace(monotonic=lambda: now[0]))
+    real = pre_start.read_claim
+    calls = [0]
+
+    def flaky(*args: Any, **kwargs: Any) -> Any:
+        calls[0] += 1
+        if calls[0] == 2:  # inside hook 1, at t=0
+            raise sqlite3.OperationalError("database is locked")
+        if calls[0] == 3:  # top of hook 2, long after
+            now[0] = 100.0
+            raise sqlite3.OperationalError("database is locked")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pre_start, "read_claim", flaky)
+
+    def runner(**kwargs: Any) -> HookResult:
+        if calls[0] < 2:
+            kwargs["stop"]()
+        return fake_result("pre-start", kwargs["hook_id"])
+
+    cfg = config(sh("a", "true"), sh("b", "true"))
+    assert make_shim(store, cfg, hook_runner=runner).run() == 0
+    assert calls[0] >= 3 and job(store)["status"] == "done"
+
+
+def test_the_transition_records_are_emitted_even_if_the_hooks_fail_after_the_commit(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    argv, marker = marker_job(tmp_path)
+    seed_claimed(store, argv)
+    real = PreStart._finish
+
+    def commit_then_boom(self: PreStart, view: Any, tally: Any) -> Any:
+        real(self, view, tally)
+        assert self.records
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(PreStart, "_finish", commit_then_boom)
+    cfg = config(sh("v", "echo no >&2; exit 2"))
+    assert make_shim(store, cfg, hook_tuning=FAST).run() == 1
+    assert job(store)["status"] == "canceled"
+    assert [r for r in log_records("transition") if r["to"] == "canceled"]
