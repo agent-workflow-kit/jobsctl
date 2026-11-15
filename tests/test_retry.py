@@ -54,7 +54,10 @@ def test_a_terminal_job_returns_to_queued_keeping_its_attempts(
     other = add_job(capsys)
     job_id = add_job(capsys)
     make_done(job_id, status)
-    sql("UPDATE jobs SET resolved_by = 'human:x', note = 'n', not_before = NULL WHERE id = ?", job_id)
+    sql(
+        "UPDATE jobs SET resolved_by = 'human:x', note = 'n', not_before = NULL WHERE id = ?",
+        job_id,
+    )
     doc = change(retry_cli(capsys, job_id, *HUMAN, "--decision-id", "d1"))
     job = doc["job"]
     assert doc["changed"] is True and job["status"] == "queued"
@@ -215,7 +218,7 @@ def test_a_later_attempt_makes_an_older_attempt_number_a_noop(
     sql(
         "UPDATE attempts SET status = 'failed', reason = 'exit', leftovers = 0, "
         "ended_at = '2026-01-01T00:00:09.000Z', "
-        "\"exit\" = '{\"kind\":\"exited\",\"code\":1,\"signal\":null,\"core\":false}' "
+        '"exit" = \'{"kind":"exited","code":1,"signal":null,"core":false}\' '
         "WHERE job_id = ? AND n = 2",
         job_id,
     )
