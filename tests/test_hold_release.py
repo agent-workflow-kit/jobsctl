@@ -167,9 +167,9 @@ def test_hook_selectors_decide_whether_an_event_is_written(
         tmp_path,
         hooks={
             "post-held": [
-                {"cmd": "true", "queues": ["other"]},
-                {"cmd": "true", "exclude_queues": ["default"]},
-                {"cmd": "true", "labels": ["team=b"]},
+                {"name": "a", "cmd": "true", "queues": ["other"]},
+                {"name": "b", "cmd": "true", "exclude_queues": ["default"]},
+                {"name": "c", "cmd": "true", "labels": ["team=b"]},
             ]
         },
     )

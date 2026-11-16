@@ -22,7 +22,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 | `config.py` | 0 | YAML + `config.d` merge, Pydantic models, defaults equal to `config.example.yaml`, unknown-queue-selector warnings, absolute `--config` propagation |
 | `validate.py`, `durations.py`, `timestamps.py` | 0 | grammars (queues, labels and the 32-label set, unique keys, env names, decision ids; actors stay in `actors.py`, hook names come with the hooks issue), durations, UTC millisecond timestamps |
 | `ids.py` | 0 | `jb-` id generation with a pluggable `taken` predicate (jobs and `pruned_ids`, supplied by the store), prefix resolution (2/10/21) with a pluggable lookup |
-| `gateway.py` | 0 | the single boundary for subprocess calls (`run`, `spawn_detached`) and the `sleep`, `monotonic`, `utc_now` and `flock` seams |
+| `gateway.py` | 0 | the single boundary for subprocess calls (`run`, `spawn`, `spawn_detached`) and the `sleep`, `monotonic`, `utc_now` and `flock` seams |
 | `gateway_proc.py` | 0 | raw process syscalls through `os` and `ctypes`: `kill`/`killpg` with argument validation, pidfds and the allow-listed `syscall()` fallback, `prctl`, `waitid`/`waitpid`, libproc, `sysctl` |
 | `proc_host.py`, `proc_identity.py`, `proc_signal.py`, `proc_group.py`, `proc_linux.py` | 0 | the `Host` seam (`/proc` reads, libproc); process identity (Linux `/proc` field 22, boot id; macOS `libproc`, `kern.bootsessionuuid`), liveness, pidfd with the allow-listed ctypes `syscall()` fallback and the re-check before `kill` without pidfds, dumpability, group probing |
 | `store.py` | 0 | connection setup, additive migrations at open for CLI commands, `user_version` checks for long-lived and internal processes, compare-and-set helpers, outbox writes |
@@ -38,7 +38,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 | `output_capture.py`, `output_tail.py`, `output_store.py`, `textsafe.py` | 2 | ring buffer; tail rendering (window rules, masking, sanitizing, live flush); compression and the `outputs` table; the shared sanitizer |
 | `kill.py` | 3 | `_kill` for force-cancel after a shim loss |
 | `reconcile.py` | 3 | reconcile rules and findings |
-| `hooks.py`, `deliver.py` | 4 | hook processes (WNOWAIT reservation, timeout, interrupted CLI commands), selectors, outbox delivery, `_deliver` and its async hooks |
+| `hook_run.py`, `hook_output.py`, `hook_env.py`, `hook_payload.py`, `hook_select.py`, `hook_interrupt.py`, `deliver.py` | 4 | hook processes (WNOWAIT reservation, timeout, interrupted CLI commands), selectors, outbox delivery, `_deliver` and its async hooks |
 | `cron.py` | 5 | `cron install`/`uninstall` block |
 | `tui/` | 6 | `browse` (Textual, `tui` extra) |
 
@@ -49,7 +49,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 **Tests**:
 
 - argparse: every command and flag of interface.md "Commands" and "Global flags"; flag-combination usage errors (`--wait-timeout` without `--wait`/`--force`, `cancel --all` without a selector, id plus selectors, `--dry-run` with `--wait`, `--actor auto:jobsctl`).
-- config: defaults equal `config.example.yaml`; drop-in merge; hook entries (duration timeouts, duplicate `name` → `config_invalid`); no `JOBSCTL_<KEY>` variables read.
+- config: defaults equal `config.example.yaml`; drop-in merge; hook entries (duration timeouts, duplicate `name` or identity (`name`, else `cmd`) → `config_invalid`); no `JOBSCTL_<KEY>` variables read.
 - grammars, durations (`none` where allowed), timestamps; ids and prefixes (short → 2, ambiguous → 21, unknown or pruned → 10).
 - store: connection setup per spike B1 pitfalls; `BEGIN IMMEDIATE`; a migration adds a column with a default; long-lived processes see `version_skew`.
 - audit/log: 10 concurrent writers × 300 lines give strictly increasing, gap-free `seq` in file order (spike C6); no append inside a write transaction.
@@ -63,7 +63,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 **Success Criteria**: `add`, `list`, `show`, `move`, `pin`, `unpin`, `priority`, `hold`, `release` (manual holds), `cancel` (queued and held, selectors), `label`, `capacity`, `queues`, `prune` and `export` behave as interface.md specifies, with golden `--json` outputs.
 **Tests**:
 
-- `add`: implicit queues and `queue_created`, `strict_queues`, unique keys across queues (racing adds create one job), `existing_job_held` and `pass_env_undefined` warnings, secret refusals (`secret_in_argv`, `secret_in_env`, `--env` names defined in `env_file`), size limits, `--dry-run` projection.
+- `add`: implicit queues and `queue_created`, `strict_queues`, unique keys across queues (racing adds create one job), `existing_job_held` and `pass_env_undefined` warnings, secret refusals (`secret_in_argv`, `secret_in_env`, `--env` names defined in `env_file`, and secrets in the queue, unique key, labels, cwd, actor, decision ids and variable names), size limits, `--dry-run` projection.
 - `env_file`: ancestor checks, symlink and FIFO rejection (spike C5), format rules (CRLF, invalid lines, duplicates, ignored names), unavailable vs. not configured.
 - ordering: pin > priority > position; `move --before/--after` adopts the neighbor's priority and pin; self-move no-op; held jobs keep their place; `rank`.
 - selection (pure function): queue priority, oldest head, caps, `global_cap`, `not_before`, skipped `--pass-env` jobs, tie-breakers; capacity (`free`, global ready count, `effective_free ≤ free`, `cap: null`, `blocked_by` incl. `global_paused`).

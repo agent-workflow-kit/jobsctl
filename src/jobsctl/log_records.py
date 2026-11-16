@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Final
 
 from jobsctl.ids import is_job_id
-from jobsctl.textsafe import echo, is_invisible, remove_escapes, sanitize
+from jobsctl.textsafe import echo, is_invisible, remove_escape_sequences, sanitize
 
 LEVELS: Final = frozenset({"info", "warn", "error"})
 LOG_EVENTS: Final = frozenset(
@@ -170,7 +170,7 @@ def normalize_key(key: str) -> str:
     surrogates, separators) are dropped, the rest NFKC-normalized, case-folded and stripped of
     surrounding whitespace, and ``-`` reads as ``_``.
     """
-    text = "".join(ch for ch in remove_escapes(key) if not is_invisible(ch))
+    text = "".join(ch for ch in remove_escape_sequences(key) if not is_invisible(ch))
     text = "".join(ch for ch in unicodedata.normalize("NFKC", text) if not is_invisible(ch))
     return text.casefold().strip().replace("-", "_")
 
