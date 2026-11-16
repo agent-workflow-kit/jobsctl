@@ -8,7 +8,6 @@ import pytest
 
 from jobsctl.textsafe import (
     echo,
-    echo_input,
     escape_unsafe,
     incomplete_escape_start,
     sanitize,
@@ -122,24 +121,17 @@ def test_strip_escapes_mapped_matches_strip_escapes_and_locates_characters() -> 
         assert all(raw[i] == ch for i, ch in zip(origin, stripped, strict=True)), raw
 
 
-@pytest.mark.parametrize(
-    ("text", "shown"),
-    [
-        ("plain", "plain"),
-        ("API_KEY=hunter2", "API_KEY=..."),
-        ("a=b=c", "a=..."),
-        ("=x", "=..."),
-        ("\x1b[31mk\n=v", "k\\n=..."),
-        ("k" * 100 + "=v", "k" * 80 + "...=..."),
-    ],
-)
-def test_echo_input_cuts_at_the_first_equals(text: str, shown: str) -> None:
-    assert echo_input(text) == shown
+def test_remove_escape_sequences_keeps_the_text_before_a_carriage_return() -> None:
+    from jobsctl.textsafe import remove_escape_sequences
 
-
-def test_remove_escapes_keeps_the_text_before_a_carriage_return_unlike_strip_escapes() -> None:
-    from jobsctl.textsafe import remove_escapes
-
-    assert remove_escapes("\x1b[31mold\rnew\x1b[0m") == "old\rnew"
+    assert remove_escape_sequences("\x1b[31mold\rnew\x1b[0m") == "old\rnew"
     assert strip_escapes("\x1b[31mold\rnew\x1b[0m") == "new"
-    assert remove_escapes("a\x1b]0;title\x07b") == "ab"
+    assert remove_escape_sequences("a\x1b]0;title\x07b") == "ab"
+
+
+def test_mask_runs_after_escape_removal_and_before_control_escaping() -> None:
+    secret = "s3cr3t-value"
+    # an escape sequence inside the secret is removed first, so the masked text is still found
+    text = f"a {secret[:4]}\x1b[31m{secret[4:]} b\x07\x1b[0m"
+    out = sanitize(text, mask=lambda t: t.replace(secret, "***"))
+    assert out == "a *** b\\u0007"

@@ -1,0 +1,109 @@
+{
+  "jobs": [
+    {
+      "id": "jb-aaaaaa22",
+      "queue": "q",
+      "status": "queued",
+      "reason": null,
+      "hold_reason": null,
+      "argv": [
+        "echo",
+        "hi"
+      ],
+      "cwd": "/work",
+      "env": {
+        "MODE": "fast"
+      },
+      "pass_env": [
+        "TOKEN"
+      ],
+      "labels": [
+        "a=1",
+        "owner=ticket-work"
+      ],
+      "unique_key": "KEY-1",
+      "priority": 2,
+      "pinned": false,
+      "rank": 1,
+      "attempt": 0,
+      "retried_from_attempt": null,
+      "overrides": {
+        "timeout": "none",
+        "max_retries": 1
+      },
+      "effective": {
+        "timeout": null,
+        "max_retries": 1,
+        "kill_grace": 30
+      },
+      "not_before": null,
+      "blocked_by": null,
+      "force_requested_by": null,
+      "override_hooks": [],
+      "shim_lost": false,
+      "created_at": "2026-03-10T10:00:00.000Z",
+      "enqueued_at": "2026-03-10T10:00:00.000Z",
+      "status_changed_at": "2026-03-10T10:00:00.000Z",
+      "claimed_at": null,
+      "ended_at": null,
+      "actor": "human:test",
+      "decision_ids": [
+        "d1"
+      ],
+      "exit": null,
+      "leftovers": null,
+      "resolved_path": null,
+      "resolved_by": null,
+      "note": null
+    },
+    {
+      "id": "jb-aaaaaa23",
+      "queue": "q",
+      "status": "failed",
+      "reason": "exit",
+      "hold_reason": null,
+      "argv": [
+        "true"
+      ],
+      "cwd": "/",
+      "env": {},
+      "pass_env": [],
+      "labels": [],
+      "unique_key": null,
+      "priority": 0,
+      "pinned": false,
+      "rank": null,
+      "attempt": 1,
+      "retried_from_attempt": null,
+      "overrides": {},
+      "effective": {
+        "timeout": null,
+        "max_retries": 0,
+        "kill_grace": 30
+      },
+      "not_before": null,
+      "blocked_by": null,
+      "force_requested_by": null,
+      "override_hooks": [],
+      "shim_lost": false,
+      "created_at": "2026-03-10T09:00:00.000Z",
+      "enqueued_at": "2026-03-10T09:00:00.000Z",
+      "status_changed_at": "2026-03-10T11:00:00.000Z",
+      "claimed_at": "2026-03-10T10:00:00.000Z",
+      "ended_at": "2026-03-10T11:00:00.000Z",
+      "actor": "human:test",
+      "decision_ids": [],
+      "exit": {
+        "kind": "exited",
+        "code": 1,
+        "signal": null,
+        "core": false
+      },
+      "leftovers": 0,
+      "resolved_path": "/bin/true",
+      "resolved_by": null,
+      "note": null
+    }
+  ],
+  "truncated": false
+}
