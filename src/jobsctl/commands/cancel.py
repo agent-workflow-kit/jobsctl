@@ -38,7 +38,7 @@ def _force_running(
     (before anything is written), then the Reconcile rules, then the request."""
     ctx.require_human("cancel --force")
     row = cancel_force.apply_reconcile(op, row)
-    if row["status"] != "running":  # reconcile finalized it (TODO(#22)): nothing to request
+    if row["status"] != "running":  # reconcile ended it: nothing to request
         return unchanged(op, row)
     return cancel_force.request_force(op, row, targets)
 

@@ -15,11 +15,13 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from jobsctl import cancel_force
+from jobsctl.config import Config
 from jobsctl.leases import format_identity, identity_text
 from jobsctl.proc_host import default_host
 from jobsctl.proc_identity import Identity
@@ -425,7 +427,7 @@ def test_a_shim_identity_that_does_not_match_the_live_process_is_never_signaled(
     assert attempt_row(job_id)["force_requested_by"] == "human:kim"
 
 
-def test_a_shim_identity_from_another_boot_is_never_signaled(
+def test_a_shim_identity_from_another_boot_is_never_signaled_and_the_job_is_lost(
     capsys: pytest.CaptureFixture[str],
     procs: list[Any],
     tmp_path: Path,
@@ -435,7 +437,29 @@ def test_a_shim_identity_from_another_boot_is_never_signaled(
     bystander, log = start_fake_shim(procs, tmp_path, job_id, finalize=False)
     ident = Identity("0000-other-boot", bystander.pid, 1)
     sql("UPDATE attempts SET shim_identity = ? WHERE job_id = ?", format_identity(ident), job_id)
-    doc_of(force(capsys, job_id, "--wait-timeout", "0"))
+    doc = doc_of(force(capsys, job_id, "--wait-timeout", "0"))
+    time.sleep(0.3)
+    # reconcile (`boot_changed`) ends the attempt first: no request, no wake-up, no `_kill`
+    assert lines(log) == [] and bystander.poll() is None and spawned_kills == []
+    assert doc["jobs"][0]["status"] == "failed" and doc["jobs"][0]["reason"] == "lost"
+    assert doc["changed"] is False
+
+
+def test_deliver_request_itself_never_signals_a_shim_of_another_boot(
+    capsys: pytest.CaptureFixture[str],
+    procs: list[Any],
+    tmp_path: Path,
+    spawned_kills: list[str],
+) -> None:
+    """Without reconcile in front of it (which would end such a job first), the delivery's own
+    identity check still refuses a recorded shim from another boot."""
+    job_id = running_job(capsys)
+    bystander, log = start_fake_shim(procs, tmp_path, job_id, finalize=False)
+    ident = Identity("0000-other-boot", bystander.pid, 1)
+    target = cancel_force.ForceTarget(job_id, format_identity(ident), False, 30.0)
+    ctx: Any = SimpleNamespace(config=Config())
+
+    assert cancel_force.deliver_request(ctx, target) is None
     time.sleep(0.3)
     assert lines(log) == [] and bystander.poll() is None and spawned_kills == [job_id]
 
@@ -618,7 +642,7 @@ def test_ctrl_c_during_the_wait_keeps_the_request_and_reports_it(
     assert attempt_row(job_id)["force_requested_by"] == "human:kim"
     assert row(job_id)["status"] == "running" and len(audit_records()) == 1
     assert signal.getsignal(signal.SIGINT) is before  # handlers restored
-    assert lines(log) == ["human:kim"]
+    assert wait_lines(log, 1) == ["human:kim"]
 
 
 def test_an_interrupt_before_the_commit_is_not_reported_as_a_request(

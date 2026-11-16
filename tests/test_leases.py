@@ -23,6 +23,7 @@ from jobsctl.proc_identity import Identity, identify
 from jobsctl.store_db import Store
 from jobsctl.store_ops import lease_release, lease_since, take_lease
 from jobsctl.timestamps import format_timestamp
+from tests.proc_fakes import FakeHost, proc
 
 T0 = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
 
@@ -94,3 +95,51 @@ def test_stuck_means_five_expiries_without_a_renewal() -> None:
     holder = Holder("x", 1, "s", expiry(last_renewed))
     assert not holder.stuck(T0 + dt.timedelta(seconds=299))
     assert holder.stuck(T0 + dt.timedelta(seconds=301))
+
+
+# -- takeover rules (spike B3): the identity check decides; expiry only if it is inconclusive ---
+
+
+def _takeover(store: Store, host: FakeHost, *, holder: str, minute: int) -> bool:
+    """`new:9:9` tries to take `runner`, held by `holder` since minute 0, at minute `minute`."""
+    first = T0
+    with store.write() as tx:
+        tx.execute("DELETE FROM leases")
+    assert take_lease(
+        store, "runner", holder, now=format_timestamp(first), expires_at=expiry(first),
+        is_alive=lambda _h: False,
+    )  # fmt: skip
+    now = T0 + dt.timedelta(minutes=minute)
+    return take_lease(
+        store, "runner", "new:9:9", now=format_timestamp(now), expires_at=expiry(now),
+        is_alive=liveness_probe(host),
+    )  # fmt: skip
+
+
+def _host() -> FakeHost:
+    return FakeHost(procs={500: proc(500, 1000)}, boot="boot-1")
+
+
+def test_a_live_holder_is_never_taken_over_even_long_after_expiry(store: Store) -> None:
+    assert not _takeover(store, _host(), holder="boot-1:500:1000", minute=30)
+
+
+def test_a_dead_holder_frees_the_lease_before_it_expires(store: Store) -> None:
+    host = _host()
+    del host.procs[500]
+    assert _takeover(store, host, holder="boot-1:500:1000", minute=0)
+
+
+def test_a_reused_pid_frees_the_lease(store: Store) -> None:
+    assert _takeover(store, _host(), holder="boot-1:500:999", minute=0)
+
+
+def test_a_holder_of_an_earlier_boot_frees_the_lease_at_once(store: Store) -> None:
+    assert _takeover(store, _host(), holder="boot-0:500:1000", minute=0)
+
+
+def test_expiry_decides_only_when_the_identity_check_is_inconclusive(store: Store) -> None:
+    host = _host()
+    host.info_errors[500] = PermissionError("hidepid")
+    assert not _takeover(store, host, holder="boot-1:500:1000", minute=0)  # not yet expired
+    assert _takeover(store, host, holder="boot-1:500:1000", minute=2)  # expired

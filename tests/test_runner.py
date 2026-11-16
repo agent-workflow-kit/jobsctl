@@ -504,7 +504,7 @@ def test_a_shim_child_that_exits_unconfirmed_is_requeued_as_claim_orphaned(
     )
 
 
-def test_a_confirmed_shim_that_exits_is_left_to_reconcile(
+def test_a_confirmed_shim_that_exits_is_failed_lost_by_reconcile(
     store: Store, runners: list[Runner]
 ) -> None:
     (job_id,) = job_ids(1)
@@ -515,8 +515,11 @@ def test_a_confirmed_shim_that_exits_is_left_to_reconcile(
         tx.execute("UPDATE attempts SET shim_confirmed_at = ?", ["2026-01-01T00:00:00.000Z"])
     runner.children[0].popen.wait(timeout=10)
     result = runner.run_pass()
-    assert result.reconciled == []
-    assert job_row(store, job_id)["status"] == "starting"  # TODO(#22): shim_dead
+    assert result.reconciled == [
+        {"job_id": job_id, "finding": "shim_dead", "action": "failed_lost"}
+    ]
+    row = job_row(store, job_id)
+    assert (row["status"], row["reason"]) == ("failed", "lost")
 
 
 def test_a_busy_identity_write_of_one_claim_does_not_stop_the_others(

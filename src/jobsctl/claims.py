@@ -260,11 +260,12 @@ def fail_spawn(
 
 
 def requeue_orphaned(
-    tx: Tx, job_id: str, claim_id: str, *, now: str
+    tx: Tx, job_id: str, claim_id: str, *, now: str, finding: str = "claim_orphaned"
 ) -> tuple[bool, list[LogRecord]]:
-    """A shim this pass spawned exited without confirming its identity (`claim_orphaned`,
-    `requeued`): the job is `queued` again, position and `enqueued_at` kept, attempt deleted, no
-    spawn failure counted. Only while the shim has not confirmed (`shim_confirmed_at` null)."""
+    """A shim that never confirmed its identity is gone (`claim_orphaned`, or `boot_changed` after
+    a reboot; action `requeued`): the job is `queued` again, position and `enqueued_at` kept,
+    attempt deleted, no spawn failure counted. Only while the shim has not confirmed
+    (`shim_confirmed_at` null) and the job is still `starting` with this `claim_id`."""
     row = _starting_row(tx, job_id, claim_id)
     if row is None:
         return False, []
@@ -285,7 +286,7 @@ def requeue_orphaned(
                 "job_id": job_id,
                 "queue": queue,
                 "attempt": number,
-                "finding": "claim_orphaned",
+                "finding": finding,
                 "action": "requeued",
             },
         )

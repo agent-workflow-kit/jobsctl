@@ -1,12 +1,12 @@
 """Automatic retry (interface.md, Automatic retry): the one place that decides whether a failed
 attempt returns its job to `queued` instead of ending it `failed`.
 
-Every process that ends an attempt (the shim today; `_kill` and reconcile later, TODO(#22)) asks
-`plan_requeue` inside the transaction that records the failure. The decision uses the
-`max_retries` the attempt recorded (`effective`), or the current config when it recorded none, and
-the job's count of automatic retries since the last `retry` or `release`. The plan is only the job
-columns of the requeue; the caller owns the compare-and-set, the attempt row, the post-fail event
-and the log record (`retry_pending: true`).
+Every process that ends an attempt (the shim and reconcile; `_kill` never asks: a forced end is
+never retried) asks `plan_requeue` inside the transaction that records the failure. The decision
+uses the `max_retries` the attempt recorded (`effective`), or the current config when it recorded
+none, and the job's count of automatic retries since the last `retry` or `release`. The plan is
+only the job columns of the requeue; the caller owns the compare-and-set, the attempt row, the
+post-fail event and the log record (`retry_pending: true`).
 """
 
 from __future__ import annotations

@@ -75,18 +75,26 @@ def request_pass_from_command(
             sys.stderr.flush()
 
 
+def redeliverable_jobs(tx: Tx, host: Host, now: dt.datetime) -> list[str]:
+    """The jobs with undelivered synchronous events and no live `job:<id>` lease holder
+    (`hooks_redelivered`), in id order."""
+    jobs = []
+    for row in tx.all(
+        "SELECT DISTINCT job_id FROM hook_outbox WHERE delivered_at IS NULL AND async = 0 "
+        "ORDER BY job_id"
+    ):
+        lease = tx.one(LEASE_COLUMNS, [f"job:{row['job_id']}"])
+        if holder_of(lease, host, now) is None:
+            jobs.append(str(row["job_id"]))
+    return jobs
+
+
 def has_undelivered(tx: Tx, host: Host, now: dt.datetime) -> bool:
     """Whether a pass should request delivery: an undelivered `async` event of any job, or an
     undelivered synchronous event of a job with no live `job:<id>` lease holder."""
     if tx.one("SELECT 1 FROM hook_outbox WHERE delivered_at IS NULL AND async = 1 LIMIT 1"):
         return True
-    for row in tx.all(
-        "SELECT DISTINCT job_id FROM hook_outbox WHERE delivered_at IS NULL AND async = 0"
-    ):
-        lease = tx.one(LEASE_COLUMNS, [f"job:{row['job_id']}"])
-        if holder_of(lease, host, now) is None:
-            return True
-    return False
+    return bool(redeliverable_jobs(tx, host, now))
 
 
 def request_delivery(
