@@ -126,7 +126,7 @@ Interim behavior until the dependent issues land: `_kill` ends a forced cancel a
 
 - `cron install`: `PATH` filtering, XDG variables, quoting, `%` escaping, `path_entry_dropped`, replacing an existing block; `live`: a real cron pass starts a queued job and a shim outlives it (spike A2), crontab restored byte-identically.
 - upgrades: an old shim against a migrated database finishes normally; a new shim against an older database exits before confirming without counting a spawn failure; `run --loop` re-execs on a newer schema and on a changed installed version; long-lived commands exit 12 `version_skew`.
-- macOS checklist (`live`, manual): identity via `libproc`, `kern.bootsessionuuid`, group probing without a subreaper, `cancel --force`, cron.
+- macOS checklist (`live`, manual): identity via `libproc`, `kern.bootsessionuuid`, group probing without a subreaper, `cancel --force`, cron. The checklist is [macos-checklist.md](macos-checklist.md) (static audit, manual steps, results template); its automated part is `tests/test_macos_live.py` (`make live-macos`). Written and checked on Linux only; a human run on a Mac is still to do (#28).
 - diagnostics files created on first write and pruned after 7 days.
 
 **Status**: Not Started
