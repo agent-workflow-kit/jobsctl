@@ -155,11 +155,11 @@ def test_usage_message_is_sanitized() -> None:
     assert "\x1b" not in exc.value.message and "\n" not in exc.value.message
 
 
-def test_usage_message_never_echoes_a_value_after_equals() -> None:
+def test_usage_message_never_echoes_the_input() -> None:
     with pytest.raises(JobsctlError) as exc:
         ids.resolve_job_id("abcd=S3CRET", finder())
     assert exc.value.code == "usage"
-    assert "'abcd=...'" in exc.value.message
+    assert "abcd" not in exc.value.message
     assert "S3CRET" not in exc.value.message
 
 
