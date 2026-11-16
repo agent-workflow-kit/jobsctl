@@ -43,9 +43,17 @@
             "code": {
               "enum": [
                 "secret_in_argv",
-                "secret_in_env"
+                "secret_in_env",
+                "secret_in_queue",
+                "secret_in_unique_key",
+                "secret_in_label",
+                "secret_in_cwd",
+                "secret_in_actor",
+                "secret_in_decision_id",
+                "secret_in_env_name",
+                "secret_in_pass_env_name"
               ],
-              "description": "usage from add: secret_in_argv (with index) or secret_in_env (with variable)."
+              "description": "usage from add: secret_in_argv (with index), secret_in_env (with variable), secret_in_queue, secret_in_unique_key, secret_in_cwd, secret_in_label (with label, unless the key itself holds the secret), or secret_in_actor, secret_in_decision_id, secret_in_env_name, secret_in_pass_env_name (no further details: the name is the secret); from label add and label remove: secret_in_label (with label for a value hit, without it for a key hit)."
             },
             "index": {
               "type": "integer",
@@ -55,6 +63,10 @@
             "variable": {
               "$ref": "../defs.json#/$defs/env_name",
               "description": "secret_in_env: the --env name; never its value."
+            },
+            "label": {
+              "$ref": "../defs.json#/$defs/label_key",
+              "description": "secret_in_label: the key of the label whose value holds a secret; never the value (from add, label add and label remove). Absent when the key itself holds the secret."
             }
           },
           "additionalProperties": {},
@@ -94,7 +106,7 @@
               }
             }
           ],
-          "description": "Optional, code-specific (e.g. job_id for duplicate_key and cancel_pending, status for not_held from resolve, limit for the label limit, code for a secret refused by add)."
+          "description": "Optional, code-specific (e.g. job_id for duplicate_key and cancel_pending, status for not_held from resolve, limit for the label limit, code for a secret refused by add, with index, variable or label)."
         }
       },
       "additionalProperties": false,
