@@ -407,9 +407,10 @@
             "empty",
             "relative",
             "temporary",
-            "missing"
+            "missing",
+            "control"
           ],
-          "description": "env_file_unsafe: mode, size, owner, not_regular, ancestor, open, path or read; path_entry_dropped from PATH cleaning: empty, relative, temporary or missing."
+          "description": "env_file_unsafe: mode, size, owner, not_regular, ancestor, open, path or read; path_entry_dropped from cron install: empty, relative, temporary, missing or control (a control character) for a PATH entry, relative or control for an XDG_* variable."
         }
       },
       "additionalProperties": false,
@@ -536,7 +537,8 @@
                   "empty",
                   "relative",
                   "temporary",
-                  "missing"
+                  "missing",
+                  "control"
                 ]
               }
             }
