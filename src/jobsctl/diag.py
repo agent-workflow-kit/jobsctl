@@ -45,12 +45,16 @@ class DiagFile(io.TextIOBase):
             try:
                 self._fd = open_append(self._path)
                 self._written = os.fstat(self._fd).st_size
+                if self._ends_full():
+                    self._full = True
+                    return size
             except Exception:  # diagnostics are best-effort; never fail the process for them
                 self._failed = True
                 return size
-        room = max(self._limit - self._written, 0)
+        room = max(self._limit - len(_MARKER) - self._written, 0)
         if len(data) > room:
-            data = data[:room] + _MARKER
+            # cut on a character boundary: a partial trailing sequence is dropped
+            data = data[:room].decode("utf-8", "ignore").encode("utf-8") + _MARKER
             self._full = True
         try:
             os.write(self._fd, data)
@@ -58,6 +62,18 @@ class DiagFile(io.TextIOBase):
             self._failed = True
         self._written += len(data)
         return size
+
+    def _ends_full(self) -> bool:
+        """A reopened file that already holds the marker (or is at the cap) takes nothing more."""
+        if self._fd is None or self._written == 0:
+            return False
+        if self._written >= self._limit:
+            return True
+        try:
+            tail = os.pread(self._fd, len(_MARKER), max(self._written - len(_MARKER), 0))
+        except OSError:
+            return False
+        return tail == _MARKER
 
     def flush(self) -> None:
         return None

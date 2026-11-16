@@ -57,7 +57,13 @@ class RealShims:
         self.config = load_config(path)
 
     def seed_and_spawn(
-        self, argv: list[str], *, job_id: str = JOB, record_identity: bool = True, **seed: Any
+        self,
+        argv: list[str],
+        *,
+        job_id: str = JOB,
+        record_identity: bool = True,
+        python: str | None = None,
+        **seed: Any,
     ) -> subprocess.Popen[bytes]:
         """Claim a job as a pass would (claimed_by: this live process), spawn the real `_shim`,
         and record its identity on the attempt (what the pass does right after the spawn)."""
@@ -71,7 +77,12 @@ class RealShims:
                 **seed,
             )
         popen = spawn_internal(
-            resolve_state_dir(), self.config, self.config_path, "_shim", [job_id, CLAIM]
+            resolve_state_dir(),
+            self.config,
+            self.config_path,
+            "_shim",
+            [job_id, CLAIM],
+            python=python,
         )
         self.handles.append(popen)
         if record_identity:

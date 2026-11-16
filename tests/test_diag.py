@@ -36,6 +36,9 @@ def test_the_file_is_private_and_appended(tmp_path: Path) -> None:
     assert path.read_text(encoding="utf-8") == "one\ntwo ünï\n"
 
 
+MARKER = "[diagnostics truncated at 1 MiB]\n"
+
+
 def test_the_file_stops_at_the_cap_with_one_marker(tmp_path: Path) -> None:
     path = tmp_path / "d.log"
     diag = DiagFile(path, limit=100)
@@ -43,8 +46,41 @@ def test_the_file_stops_at_the_cap_with_one_marker(tmp_path: Path) -> None:
         diag.write("x" * 30)
     diag.close()
     text = path.read_text(encoding="utf-8")
-    assert text.startswith("x" * 100) and text.endswith("[diagnostics truncated at 1 MiB]\n")
-    assert text.count("truncated") == 1
+    assert text.endswith(MARKER) and text.count("truncated") == 1
+    assert text.startswith("x" * (100 - len(MARKER)))
+
+
+def test_the_file_never_exceeds_the_cap_marker_included(tmp_path: Path) -> None:
+    path = tmp_path / "d.log"
+    diag = DiagFile(path, limit=100)
+    diag.write("x" * 500)
+    diag.close()
+    assert path.stat().st_size <= 100
+
+
+def test_a_cut_never_splits_a_multibyte_character(tmp_path: Path) -> None:
+    path = tmp_path / "d.log"
+    limit = len(MARKER) + 5  # room for 5 content bytes: two 3-byte characters do not fit twice
+    diag = DiagFile(path, limit=limit)
+    diag.write("\u20ac\u20ac\u20ac")  # 9 bytes
+    diag.close()
+    raw = path.read_bytes()
+    text = raw.decode("utf-8")  # strict: raises on a split sequence
+    assert text == "\u20ac" + MARKER
+    assert len(raw) <= limit
+
+
+def test_a_full_file_reopened_gets_no_second_marker(tmp_path: Path) -> None:
+    path = tmp_path / "d.log"
+    first = DiagFile(path, limit=100)
+    first.write("x" * 500)
+    first.close()
+    size = path.stat().st_size
+    second = DiagFile(path, limit=100)
+    second.write("more")
+    second.close()
+    assert path.stat().st_size == size
+    assert path.read_text(encoding="utf-8").count("truncated") == 1
 
 
 def test_the_default_cap_is_one_mebibyte() -> None:

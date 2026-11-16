@@ -20,13 +20,14 @@ spawned are polled (``Popen.poll`` waits for that exact PID).
 from __future__ import annotations
 
 import datetime as dt
+import os
 import sqlite3
 import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from jobsctl import gateway
 from jobsctl.claims import (
@@ -49,9 +50,11 @@ from jobsctl.leases import (
     identity_text,
     liveness_probe,
     own_identity,
+    parse_identity,
 )
 from jobsctl.log_writer import RecordWriter
 from jobsctl.proc_host import Host, default_host
+from jobsctl.proc_identity import Liveness, check_identity
 from jobsctl.reconcile import Finding, Reconciler, run_rules
 from jobsctl.retention import run_retention
 from jobsctl.spawn import spawn_internal
@@ -126,11 +129,28 @@ class PassResult:
         }
 
 
+class AdoptedShim:
+    """A shim spawned by the previous image of a re-exec'd `run --loop`: still this process's
+    child, polled by its exact PID. `ours` is `False` once the PID turned out not to be a child
+    (the shim belongs to another process: nothing may be concluded from its exit)."""
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.ours = True
+
+    def poll(self) -> int | None:
+        ours, status = gateway.reap_child(self.pid)
+        self.ours = ours
+        if not ours:
+            return 0
+        return status
+
+
 @dataclass
 class Child:
     """A process this runner spawned. `claim_id` is set for a shim."""
 
-    popen: subprocess.Popen[bytes]
+    popen: subprocess.Popen[bytes]  # an AdoptedShim after a re-exec (`poll` and `pid` only)
     kind: str
     job_id: str | None = None
     claim_id: str | None = None
@@ -437,6 +457,8 @@ class Runner:
                 continue
             if child.kind != "shim":
                 continue
+            if isinstance(child.popen, AdoptedShim) and not child.popen.ours:
+                continue  # not our child after all: its exit says nothing about its attempt
             assert child.job_id is not None and child.claim_id is not None
             now = format_timestamp(self.clock())
             with self.store.write() as tx:
@@ -447,6 +469,37 @@ class Runner:
                     {"job_id": child.job_id, "finding": "claim_orphaned", "action": "requeued"}
                 )
         self.children = still
+
+    def adopt_shims(self) -> None:
+        """After a re-exec: the shims of attempts in `starting` or `running` that the previous
+        image spawned are this process's children; reap them by the PIDs recorded on the attempts
+        (their recorded identity must still match, so a reused PID is never touched). A shim that
+        already exited is a zombie child: it is adopted too (only the exact pid is waited on, never
+        signaled), so the next `reap` collects it and its attempt follows the normal exit
+        handling. A recorded pid that is not our child is dropped by `reap` without a conclusion.
+
+        todo(#28): on macOS the identity read of a zombie (libproc / sysctl start time) is
+        unverified; if it fails the shim is simply not adopted and stays a zombie until exit."""
+        known = {child.popen.pid for child in self.children}
+        rows = self.store.query_all(
+            "SELECT job_id, claim_id, shim_identity FROM attempts "
+            "WHERE status IN ('starting', 'running') AND shim_identity IS NOT NULL"
+        )
+        for row in rows:
+            ident = parse_identity(str(row["shim_identity"]))
+            if ident is None or ident.pid in known or ident.pid == os.getpid():
+                continue
+            if check_identity(self.host, ident, allow_zombie=True).state is not Liveness.ALIVE:
+                continue
+            known.add(ident.pid)
+            self.children.append(
+                Child(
+                    cast("subprocess.Popen[bytes]", AdoptedShim(ident.pid)),
+                    "shim",
+                    str(row["job_id"]),
+                    str(row["claim_id"]),
+                )
+            )
 
     def spawn_kill(self, job_id: str) -> subprocess.Popen[bytes]:
         popen = spawn_internal(

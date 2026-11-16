@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import signal
+import sqlite3
 import sys
 from collections.abc import Callable
 from types import FrameType
@@ -19,6 +20,7 @@ from jobsctl.store_db import OpenMode, Store
 from jobsctl.store_dir import resolve_state_dir
 from jobsctl.textsafe import sanitize
 from jobsctl.triggers import spawn_pass
+from jobsctl.upgrade import UpgradeWatch
 
 BUSY_BACKOFF_SECONDS = 2.0
 _SLEEP_SLICE = 0.2
@@ -89,11 +91,18 @@ def _loop(ctx: Context, runner: Runner) -> int:
         nonlocal stop
         stop = True
 
-    old = {s: signal.signal(s, on_signal) for s in (signal.SIGTERM, signal.SIGINT)}
+    watch = UpgradeWatch()
+    old = {s: signal.signal(s, on_signal) for s in _STOP_SIGNALS}
+    if watch.previous is not None:  # started by a re-exec of ours
+        # the previous image may have left SIGTERM/SIGINT blocked with one pending: deliver it
+        # now that the handlers are installed
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, _STOP_SIGNALS)
+        _adopt(runner)
     interval = ctx.args.interval if ctx.args.interval is not None else ctx.config.run_interval
     try:
         while not stop:
-            # TODO(#27): re-exec after an upgrade (a newer schema or a different installed version)
+            if not _reexec_if_upgraded(watch, runner, lambda: stop):
+                break  # a stop arrived around the exec: no further pass
             try:
                 result = runner.run_pass(max_starts=ctx.args.max_starts)
             except LeaseLost as err:
@@ -112,6 +121,51 @@ def _loop(ctx: Context, runner: Runner) -> int:
         for number, handler in old.items():
             signal.signal(number, handler)
     return 0
+
+
+_STOP_SIGNALS = {signal.SIGTERM, signal.SIGINT}
+
+
+def _adopt(runner: Runner) -> None:
+    """After a re-exec the shims the previous image spawned are still this process's children."""
+    try:
+        runner.adopt_shims()
+    except (JobsctlError, sqlite3.Error) as err:
+        _warn(f"could not adopt the shims of the previous image ({err})")
+
+
+def _reexec_if_upgraded(watch: UpgradeWatch, runner: Runner, stopped: Callable[[], bool]) -> bool:
+    """Between passes (never inside one): replace this process after an upgrade (interface.md,
+    Upgrades). Returns `True` to go on with the next pass (nothing to do, or the exec failed and
+    the same reason is not tried again) and `False` when a stop was requested."""
+    if stopped():
+        return False
+    try:
+        reason = watch.check(runner.store)
+    except (JobsctlError, sqlite3.Error):
+        return True  # a busy database now: the next iteration checks again
+    if reason is None:
+        return True
+    _warn(f"re-executing after an upgrade ({reason})")
+    # a stop request must not be lost with this image: block the signals, and if one is already
+    # pending (or was handled meanwhile) stay; a later one is delivered by the new image
+    signal.pthread_sigmask(signal.SIG_BLOCK, _STOP_SIGNALS)
+    try:
+        if stopped() or _STOP_SIGNALS & signal.sigpending():
+            return False
+        try:
+            watch.reexec(reason)
+        except OSError as err:
+            watch.failed(reason)
+            _warn(f"re-exec failed ({err.strerror or err}); continuing with this image")
+    finally:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, _STOP_SIGNALS)  # delivers a pending signal
+    return not stopped()
+
+
+def _warn(message: str) -> None:
+    sys.stderr.write(f"jobsctl: warning: {message}\n")
+    sys.stderr.flush()
 
 
 def _pass_failed(message: str) -> None:
