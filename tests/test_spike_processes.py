@@ -26,10 +26,9 @@ from tests.spike_helpers import (
     Procs,
     alive,
     linux_only,
-    procs,  # noqa: F401  (fixture)
     read_line,
-    stat_fields,
     start_time,
+    stat_fields,
     wait_for,
 )
 
@@ -129,7 +128,9 @@ def test_a4_sigterm_to_a_shell_leaves_its_children_and_the_group_signal_stops_th
     procs: Procs,
 ) -> None:
     sh = procs.popen(
-        ["/bin/sh", "-c", "sleep 600 & echo $!; wait"], stdout=subprocess.PIPE, start_new_session=True
+        ["/bin/sh", "-c", "sleep 600 & echo $!; wait"],
+        stdout=subprocess.PIPE,
+        start_new_session=True,
     )
     sleeper = procs.adopt(int(read_line(sh)))
     os.kill(sh.pid, signal.SIGTERM)
@@ -203,8 +204,9 @@ def test_a6_signal_deaths_are_negative_and_a_shell_reports_143(procs: Procs) -> 
     p = procs.popen(["sleep", "600"])
     os.kill(p.pid, signal.SIGTERM)
     assert p.wait(timeout=15) == -signal.SIGTERM
-    sh = procs.popen(["/bin/sh", "-c", "sleep 600 & kill -TERM $!; wait $!; echo $?"],
-                     stdout=subprocess.PIPE)
+    sh = procs.popen(
+        ["/bin/sh", "-c", "sleep 600 & kill -TERM $!; wait $!; echo $?"], stdout=subprocess.PIPE
+    )
     assert read_line(sh) == "143"
     assert sh.wait(timeout=15) == 0
 
@@ -224,16 +226,16 @@ def test_a6_a_missing_program_raises_before_anything_starts(tmp_path: Path) -> N
 def test_a7_dev_null_stdin_is_a_clean_eof() -> None:
     res = subprocess.run(
         [*PY, "-c", "import sys; print(repr(sys.stdin.read()))"],
-        stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=30,
     )
     assert res.stdout.strip() == b"''" and res.returncode == 0
 
 
 def test_a7_a_closed_fd_0_breaks_programs() -> None:
     inner = shlex.join([sys.executable, "-I", "-c", "import sys; print(sys.stdin)"])
-    res = subprocess.run(
-        ["/bin/sh", "-c", f"exec 0<&-; {inner}"], capture_output=True, timeout=30
-    )
+    res = subprocess.run(["/bin/sh", "-c", f"exec 0<&-; {inner}"], capture_output=True, timeout=30)
     assert res.stdout.strip() == b"None"  # no stdin object at all, instead of an empty one
 
 
@@ -241,9 +243,7 @@ def test_a7_a_terminal_stdin_hands_the_keystrokes_to_the_program() -> None:
     master, slave = os.openpty()
     try:
         os.write(master, b"k\n")
-        res = subprocess.run(
-            ["head", "-c", "2"], stdin=slave, capture_output=True, timeout=30
-        )
+        res = subprocess.run(["head", "-c", "2"], stdin=slave, capture_output=True, timeout=30)
         assert res.stdout == b"k\n"  # why a detached job must not inherit it
     finally:
         os.close(master)
@@ -264,7 +264,10 @@ def raw_pidfd_open(pid: int) -> int:
 def raw_pidfd_send(fd: int, sig: int, flags: int = 0) -> None:
     res = LIBC.syscall(
         ctypes.c_long(SYS_PIDFD_SEND_SIGNAL),
-        ctypes.c_long(fd), ctypes.c_long(sig), ctypes.c_long(0), ctypes.c_long(flags),
+        ctypes.c_long(fd),
+        ctypes.c_long(sig),
+        ctypes.c_long(0),
+        ctypes.c_long(flags),
     )
     if res < 0:
         err = ctypes.get_errno()
@@ -316,7 +319,10 @@ def test_c1_pidfd_signals_a_non_child(procs: Procs) -> None:
         os.close(fd)
 
 
-@pytest.mark.skipif(not hasattr(os, "pidfd_open"), reason="this CPython build lacks os.pidfd_open (C1: the raw syscalls above are the fallback)")
+@pytest.mark.skipif(
+    not hasattr(os, "pidfd_open"),
+    reason="this CPython build lacks os.pidfd_open (C1: the raw syscalls above are the fallback)",
+)
 def test_c1_the_stdlib_pidfd_agrees_with_the_raw_syscall(procs: Procs) -> None:
     p = procs.popen(["sleep", "600"])
     fd = os.pidfd_open(p.pid)
@@ -430,8 +436,9 @@ def test_c4_undumpable_denies_environ_to_a_same_user_process_until_exec(procs: P
         time.sleep(600)
     """
     p = procs.popen(py(code), stdout=subprocess.PIPE)
-    me, forked, execd = (procs.adopt(int(x)) if int(x) != p.pid else p.pid
-                         for x in read_line(p).split())
+    me, forked, execd = (
+        procs.adopt(int(x)) if int(x) != p.pid else p.pid for x in read_line(p).split()
+    )
     for pid in (me, forked):  # the process itself and a fork-only child
         with pytest.raises(PermissionError):
             Path(f"/proc/{pid}/environ").read_bytes()

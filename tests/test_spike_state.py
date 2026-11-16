@@ -25,7 +25,6 @@ from tests.spike_helpers import (
     PY,
     Procs,
     linux_only,
-    procs,  # noqa: F401  (fixture)
     read_line,
     wait_for,
 )
@@ -37,9 +36,7 @@ def py(code: str, *args: str) -> list[str]:
 
 def run_all(procs: Procs, commands: list[list[str]], timeout: float = 120.0) -> list[str]:
     """Start all at once, wait for all (bounded), return stdouts; any non-zero exit fails."""
-    started = [
-        procs.popen(c, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for c in commands
-    ]
+    started = [procs.popen(c, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for c in commands]
     outs = []
     for p in started:
         out, err = p.communicate(timeout=timeout)
@@ -303,7 +300,9 @@ SEQ_WORKER = """
 def test_c6_flock_around_the_counter_and_one_append_gives_seq_in_file_order(
     procs: Procs, tmp_path: Path
 ) -> None:
-    make_db(tmp_path / "counter.db", "CREATE TABLE counter(v INTEGER); INSERT INTO counter VALUES (0);")
+    make_db(
+        tmp_path / "counter.db", "CREATE TABLE counter(v INTEGER); INSERT INTO counter VALUES (0);"
+    )
     run_all(procs, [py(SEQ_WORKER, str(tmp_path), "100", "20") for _ in range(6)])
     lines = (tmp_path / "log").read_bytes().split(b"\n")
     assert lines.pop() == b""  # the file ends in a newline: no torn tail
