@@ -38,7 +38,9 @@ For development, clone the repository and run `uv sync`, then `uv run jobsctl ..
 Everything below was run against a private, empty state directory. Ids differ on every run.
 
 ```sh
-# Optional: ~/.config/jobsctl/config.yaml (every key and default: config.example.yaml)
+# Optional: ~/.config/jobsctl/config.yaml (every key and default: config.example.yaml).
+# This overwrites an existing file: skip it if you already have a config.
+mkdir -p ~/.config/jobsctl
 cat > ~/.config/jobsctl/config.yaml <<'EOF'
 default_cap: 1
 queues:
@@ -53,7 +55,7 @@ jobsctl add --queue builds --label kind=build --unique-key build:main -- sleep 1
 jb-jp4rym5f
 ```
 
-`add` prints only the job id on stdout (the one stable human output). With `auto_run: true` (the default) it also starts a pass, so the job is already starting:
+`add` prints only the job id on stdout (the one stable human output). With `auto_run: true` (the default) it also starts a pass, so the job is already starting (the status in the next output may read `starting` or `running`):
 
 ```sh
 jobsctl list
@@ -119,6 +121,10 @@ Find the job again later with `jobsctl show --unique-key build:main --json` (exi
 
 A job's argv must never contain agent-generated or otherwise untrusted text. Pass such text in a file that the command reads. jobsctl cannot check this; it is your contract ([Jobs](docs/interface.md#jobs)).
 
+### What the job sees
+
+A job's environment is built from scratch, not inherited from the caller: the `env.inherit` allowlist of the canonical environment (`PATH`, `HOME`, `LANG`, `XDG_*` and a few more), then `env.set`, then the job's own `--env` values (non-secret only), then its `--pass-env` secrets, then `JOBSCTL_JOB_ID` and `JOBSCTL_ATTEMPT`. `TMUX`, `TMUX_PANE` and `SSH_AUTH_SOCK` are not inherited; list them in `env.inherit` if a job needs them. The working directory is `--cwd`, which must be absolute and defaults to the caller's directory. Details: [Job environment](docs/interface.md#job-environment).
+
 ### Check capacity before submitting
 
 ```sh
@@ -129,7 +135,7 @@ jobsctl capacity --queue builds --json
 {"queues": [{"queue": "builds", "known": true, "cap": 2, "running": 1, "queued": 0, "free": 1, "effective_free": 1}], "global": {"cap": null, "running": 1, "queued": 0, "free": null}}
 ```
 
-Start new work only while `effective_free` is greater than 0 (or `null`, which means unbounded). `effective_free` is the smaller of the queue's free slots and the global free slots, and it counts queued jobs against the cap, so a caller that submits one job per free slot does not overfill the queue. `capacity` exits 0 whenever it answers, also for an unknown queue (`"known": false`, with `default_cap` as its cap). Details: [`capacity`](docs/interface.md#capacity-1).
+Start new work only while `effective_free` is greater than 0 (or `null`, which means unbounded). `effective_free` is the smaller of the queue's free slots and the global free slots, and it counts queued jobs against the cap, so a caller that submits one job per free slot does not overfill the queue. `capacity` exits 0 whenever it answers, also for an unknown queue (`"known": false`, with `default_cap` as its cap). The check is advisory: counts are read at one moment and adding a job is a separate step, so check-then-add is not atomic. Over-submission is harmless, since extra jobs just queue; an `add` that hits an existing unique key takes no slot. Details: [`capacity`](docs/interface.md#capacity-1).
 
 ### Wait and read the result
 
@@ -162,7 +168,7 @@ The same table applies to every command; `wait` adds the job outcomes (Details: 
 |---|---|
 | 0 | success, including no-ops, `already_running`, and `add` on a held unique key |
 | 1 | internal error, or database busy |
-| 2 | usage error, invalid config, `browse` without the TUI extra (the TUI is not implemented yet) |
+| 2 | usage error, invalid config, `browse` without the TUI extra (`tui_missing`; until [#29](https://github.com/agent-workflow-kit/jobsctl/issues/29) lands, `browse` exits 1) |
 | 10 | not found, or unknown queue (only with `strict_queues`) |
 | 12 | `wait`: job failed; `cancel --force`: still pending; `wait`/`add --wait`/`cancel`: `version_skew` |
 | 13 | needs a human (`cancel --force`, `release --override-escalation`); `wait`: job held |
@@ -186,9 +192,9 @@ jobsctl: error: jb-iv3guk5r was escalated by a pre-start hook; release it with -
 
 Terminal and held outcomes are ended by their reason, not retried silently:
 
-- `retry <id>` requeues a `done`, `failed` or `canceled` job, or a job held because its own command exited 13, as a new attempt under the same id (so `JOBSCTL_JOB_ID` stays the same and a resume-aware command can find its earlier work). It goes to the bottom of its priority band (`--top` for the top). To make a retry idempotent, pass `--attempt N`, the attempt number you saw fail: a repeat call with the same N is a no-op (`changed: false`) once the retry has happened. Refused with `not_terminal` for queued, running and manually or escalation-held jobs, and with `duplicate_key` if another live job now holds the unique key ([`retry`](docs/interface.md#retry)).
+- `retry <id>` requeues a `done`, `failed` or `canceled` job, or a job held because its own command exited 13, as a new attempt under the same id (so `JOBSCTL_JOB_ID` stays the same and a resume-aware command can find its earlier work). The job process sees `JOBSCTL_JOB_ID` and `JOBSCTL_ATTEMPT` (the attempt number, from 1); use them to resume. It goes to the bottom of its priority band (`--top` for the top). To make a retry idempotent, pass `--attempt N`, the attempt number you saw fail: a repeat call with the same N is a no-op (`changed: false`) once the retry has happened, and so is a call when the job's attempt is already above N. Refused with `not_terminal` for queued, running and manually or escalation-held jobs, with `duplicate_key` if another live job now holds the unique key, and with `attempt_mismatch` (exit 20) if N is above the job's last attempt ([`retry`](docs/interface.md#retry)).
 - `resolve <id> [--as done|failed|canceled] [--note-file PATH|-]` closes a held job for good, with the reason `resolved` and an optional note. This is how a submitter finishes an exit-13 hold it has dealt with another way.
-- Exit 13 from the job's own command is the convention for "I need a decision". The job becomes `held` (`exit_13`); `release` is refused for it (exit 20). The submitter chooses `retry` (continue) or `resolve` (end).
+- Exit 13 from the job's own command is the convention for "I need a decision". The job becomes `held` (`exit_13`); `release` is refused for it (exit 20). The submitter chooses `retry` (continue) or `resolve` (end). A `wait` exit of 13 covers every hold reason, so read `hold_reason` in `show --json` first: only `exit_13` is the submitter's to retry or resolve. A `manual` or `escalated` hold belongs to a human or operator; `retry` on it is refused with `not_terminal` (exit 20), and a submitter should not resolve it.
 
 ```text
 $ jobsctl wait jb-l3kz7as7
@@ -207,7 +213,7 @@ Optional automatic retries: a queue with `max_retries` above 0 keeps a failed jo
 ### Cancel, hold, release, order
 
 - `cancel <id>` cancels a `queued`, `starting` or `held` job. A running job is refused (exit 20, reason `live`). Selectors (`--queue`, `--label`, `--unique-key`) cancel several: more than one match is exit 21 unless you add `--all`.
-- `cancel <id> --force` stops a running job with the signal sequence (SIGTERM to the job, then its process group, then SIGKILL, each after `kill_grace`). It is a human-only action: it needs a TTY on stdin or `--actor human:<user>`, otherwise it exits 13 without acting. Workflow tools should not claim a human actor; ask the person.
+- `cancel <id> --force` stops a running job with the signal sequence (SIGTERM to the job, then its process group, then SIGKILL, each after `kill_grace`). It is a human-only action: it needs a TTY on stdin or `--actor human:<user>`, otherwise it exits 13 without acting. Workflow tools should not claim a human actor, and `--actor human:...` does not belong in scripts or automation; ask the person.
 
 ```text
 $ jobsctl cancel jb-xhnk3ecp
@@ -318,12 +324,14 @@ The **pre-start gate** runs in the shim, after the claim and before the job star
 
 So a pre-start hook's `timeout` matters: a slow policy check that times out cancels the job. The default is 30 s. A veto is not an exit code of any jobsctl command (jobsctl never exits 11); it shows as the job's final status.
 
+Here a vetoing hook wrote `denied by policy` to stderr with `printf` (a trailing newline would show as a literal `\n`):
+
 ```text
 $ jobsctl show jb-6aw43ps4
 jb-6aw43ps4 canceled(vetoed) queue=gated -- echo hi
 ...
 attempt 1: canceled(vetoed) claimed 2026-11-16T14:41:30.238Z
-  hook gate veto: denied by policy\n
+  hook gate veto: denied by policy
 ```
 
 **Escalation override.** An escalated job waits for a person. `release` alone is refused; only `release --override-escalation` gets it past, and that flag is human-only (a TTY, or `--actor human:<user>`). The override applies to the hooks that escalated that attempt: on the next start they are still run, but their exit 13 counts as allow. Every other hook runs normally, and a veto still vetoes. It is audited (`release_override`).
@@ -348,7 +356,8 @@ The rule for everyone: a secret never goes in argv, `--env`, a label, the queue,
 ```yaml
 # config.yaml
 env_file: ~/.config/jobsctl/env
-mask_env: [DEPLOY_KEY]      # extra names to mask (values come from the environment)
+mask_env: [DEPLOY_KEY]      # extra names to mask; values come from the canonical environment,
+                            # so also list each name in env.inherit (else nothing is masked or refused)
 ```
 
 ```sh
@@ -381,7 +390,9 @@ jobsctl: error: the value of --label note contains a secret value
 [exit 2]
 ```
 
-- **`env_file` must be trustworthy.** It is a trust anchor: whoever can write it runs code as you. jobsctl uses it only if it is a regular file of at most 1 MiB, owned by you, with no group or other permissions, and every parent directory is owned by you or root and not writable by group or others. Otherwise it is treated as unavailable: jobs with `--pass-env` stay queued with `blocked_by: env_file_unavailable`, `jobsctl run --json` reports `env_file_unsafe` in `warnings`, and **the secret refusals above stop working** (jobsctl cannot know the values; only `mask_env` values are still refused). This also means a file under `/tmp` never qualifies (the sticky world-writable `/tmp` fails the ancestor check). Keep it at `~/.config/jobsctl/env` or another directory no agent session can write.
+These refusals only apply while `env_file` is available and trusted (see below).
+
+- **`env_file` must be trustworthy.** It is a trust anchor: whoever can write it runs code as you. jobsctl uses it only if it is a regular file of at most 1 MiB, owned by you, with no group or other permissions, and every parent directory is owned by you or root and not writable by group or others. Otherwise it is treated as unavailable: jobs with `--pass-env` stay queued with `blocked_by: env_file_unavailable`, `jobsctl run --json` reports `env_file_unsafe` in `warnings`, and **the secret refusals above stop working** (jobsctl cannot know the values; only `mask_env` values are still refused). This also means a file under `/tmp` never qualifies (the sticky world-writable `/tmp` fails the ancestor check). The `env_file_unsafe` warning in `run --json` carries no reason; the failed check (`owner`, `mode`, `ancestor` and so on) is in `details.reason` of the `env_file_unsafe` record from `jobsctl export --log`. Keep it at `~/.config/jobsctl/env` or another directory no agent session can write.
 - Masking is best-effort: values shorter than 8 characters, encoded forms (base64, hex), slices and secrets a job obtains itself are not masked. Treat tails as untrusted. See [Masking and sanitizing](docs/interface.md#masking-and-sanitizing) and [Residual risks](docs/interface.md#residual-risks).
 - jobsctl never logs argv, `--pass-env` or `env_file` values, or output tails; `export --log` and `export --audit` are safe to read, but not a place to look up what a job printed.
 
@@ -412,6 +423,10 @@ jobsctl export --log --after-seq 120   # incremental reads
 ```
 
 Actors are claims, not proof: with no TTY and no `--actor`, a command's actor is `auto:unknown`. The human gate is advisory ([Residual risks](docs/interface.md#residual-risks)).
+
+### Reconcile
+
+`jobsctl reconcile [--dry-run]` applies a pass's identity checks, hook delivery and retention without claiming any job. Run it after a crash or reboot to fix stuck or lost jobs at once instead of waiting for the next pass (`--dry-run` shows what it would do and writes nothing). Like `run`, it takes the pass lease: if another pass holds it, it exits 0 with `already_running: true` and does nothing ([`reconcile`](docs/interface.md#reconcile-1)).
 
 ### Upgrades
 
