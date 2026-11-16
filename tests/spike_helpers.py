@@ -17,6 +17,7 @@ from collections.abc import Callable, Iterator
 
 import pytest
 
+from jobsctl import gateway_proc
 from tests.kill_guard import allow
 
 PY = [sys.executable, "-I"]
@@ -95,13 +96,38 @@ class Procs:
         self.adopted.append((pid, started))
         return pid
 
-    def close(self) -> None:
-        for pid, started in self.adopted:
-            if start_time(pid) == started:  # still the process we recorded
+    @staticmethod
+    def _kill_if_still(pid: int, started: str) -> None:
+        """SIGKILL ``pid`` only while it is still the process recorded at ``started``.
+
+        With a pidfd the check and the signal act on the same process (no window in which the PID
+        could be reused); without one, fall back to checking the start time, then ``kill``.
+        """
+        try:
+            fd = gateway_proc.pidfd_open(pid)
+        except ProcessLookupError:
+            return
+        except OSError:
+            fd = None
+        if fd is None:
+            if start_time(pid) == started:
                 try:
                     os.kill(pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+            return
+        try:
+            if start_time(pid) == started:  # the pidfd pins this process: re-checked after open
+                try:
+                    gateway_proc.pidfd_send_signal(fd, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        finally:
+            os.close(fd)
+
+    def close(self) -> None:
+        for pid, started in self.adopted:
+            self._kill_if_still(pid, started)
         for p in self.popens:
             if p.returncode is None:
                 try:
@@ -115,7 +141,7 @@ class Procs:
 
 
 @pytest.fixture
-def procs() -> Iterator[Procs]:
+def spike_procs() -> Iterator[Procs]:
     p = Procs()
     try:
         yield p

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.kill_guard import guarded_pidfd_send
 from tests.spike_helpers import (
     PY,
     Procs,
@@ -72,13 +73,13 @@ A1_RUNNER = """
 
 
 def test_a1_popen_detach_survives_the_runner_hangup_and_closes_inherited_fds(
-    procs: Procs, tmp_path: Path
+    spike_procs: Procs, tmp_path: Path
 ) -> None:
     marker = tmp_path / "fdstate"
-    runner = procs.popen(
+    runner = spike_procs.popen(
         py(A1_RUNNER) + [str(marker)], stdout=subprocess.PIPE, start_new_session=True
     )
-    child = procs.adopt(int(read_line(runner)))
+    child = spike_procs.adopt(int(read_line(runner)))
     assert wait_for(marker.exists)
     assert wait_for(lambda: marker.read_text() != "")
     assert marker.read_text() == "closed"  # close_fds=True: a held descriptor does not leak
@@ -94,7 +95,7 @@ def test_a1_popen_detach_survives_the_runner_hangup_and_closes_inherited_fds(
 
 
 def test_a3_proc_start_time_is_stable_survives_zombies_and_parses_odd_names(
-    procs: Procs,
+    spike_procs: Procs,
 ) -> None:
     code = """
         import ctypes, sys, time
@@ -102,7 +103,7 @@ def test_a3_proc_start_time_is_stable_survives_zombies_and_parses_odd_names(
         print("ready", flush=True)
         time.sleep(600)
     """
-    p = procs.popen(py(code), stdout=subprocess.PIPE)
+    p = spike_procs.popen(py(code), stdout=subprocess.PIPE)
     assert read_line(p) == "ready"
     first = start_time(p.pid)
     assert first is not None and first.isdigit()
@@ -123,14 +124,14 @@ def test_a3_proc_start_time_is_stable_survives_zombies_and_parses_odd_names(
 
 
 def test_a4_sigterm_to_a_shell_leaves_its_children_and_the_group_signal_stops_them(
-    procs: Procs,
+    spike_procs: Procs,
 ) -> None:
-    sh = procs.popen(
-        ["/bin/sh", "-c", "sleep 600 & echo $!; wait"],
+    sh = spike_procs.popen(
+        ["/bin/sh", "-c", "sleep 60 & echo $!; wait"],
         stdout=subprocess.PIPE,
         start_new_session=True,
     )
-    sleeper = procs.adopt(int(read_line(sh)))
+    sleeper = spike_procs.adopt(int(read_line(sh)))
     os.kill(sh.pid, signal.SIGTERM)
     assert sh.wait(timeout=15) == -signal.SIGTERM
     assert alive(sleeper)  # orphaned, still running
@@ -141,7 +142,7 @@ def test_a4_sigterm_to_a_shell_leaves_its_children_and_the_group_signal_stops_th
 
 
 def test_a4_child_subreaper_adopts_an_orphan_that_left_its_group_unprivileged(
-    procs: Procs,
+    spike_procs: Procs,
 ) -> None:
     code = """
         import ctypes, os, time
@@ -164,24 +165,26 @@ def test_a4_child_subreaper_adopts_an_orphan_that_left_its_group_unprivileged(
         print(gpid, int(ppid) == os.getpid(), flush=True)
         time.sleep(600)
     """
-    p = procs.popen(py(code), stdout=subprocess.PIPE)
+    p = spike_procs.popen(py(code), stdout=subprocess.PIPE)
     gpid, adopted = read_line(p).split()
-    procs.adopt(int(gpid))
+    spike_procs.adopt(int(gpid))
     assert adopted == "True"
 
 
 # -- A5: shim death ------------------------------------------------------------------------------
 
 
-def test_a5_the_job_survives_sigkill_of_its_parent_no_hangup_no_pdeathsig(procs: Procs) -> None:
+def test_a5_the_job_survives_sigkill_of_its_parent_no_hangup_no_pdeathsig(
+    spike_procs: Procs,
+) -> None:
     shim_code = """
         import subprocess, time
-        job = subprocess.Popen(["sleep", "600"], process_group=0)
+        job = subprocess.Popen(["sleep", "60"], process_group=0)
         print(job.pid, flush=True)
         time.sleep(600)
     """
-    shim = procs.popen(py(shim_code), stdout=subprocess.PIPE, start_new_session=True)
-    job = procs.adopt(int(read_line(shim)))
+    shim = spike_procs.popen(py(shim_code), stdout=subprocess.PIPE, start_new_session=True)
+    job = spike_procs.adopt(int(read_line(shim)))
     os.kill(shim.pid, signal.SIGKILL)
     assert shim.wait(timeout=15) == -signal.SIGKILL
     assert wait_for(lambda: not alive(shim.pid))
@@ -198,12 +201,12 @@ def test_a6_exit_codes_pass_through(code: int) -> None:
     assert subprocess.run(["/bin/sh", "-c", f"exit {code}"], timeout=30).returncode == code
 
 
-def test_a6_signal_deaths_are_negative_and_a_shell_reports_143(procs: Procs) -> None:
-    p = procs.popen(["sleep", "600"])
+def test_a6_signal_deaths_are_negative_and_a_shell_reports_143(spike_procs: Procs) -> None:
+    p = spike_procs.popen(["sleep", "60"])
     os.kill(p.pid, signal.SIGTERM)
     assert p.wait(timeout=15) == -signal.SIGTERM
-    sh = procs.popen(
-        ["/bin/sh", "-c", "sleep 600 & kill -TERM $!; wait $!; echo $?"], stdout=subprocess.PIPE
+    sh = spike_procs.popen(
+        ["/bin/sh", "-c", "sleep 60 & kill -TERM $!; wait $!; echo $?"], stdout=subprocess.PIPE
     )
     assert read_line(sh) == "143"
     assert sh.wait(timeout=15) == 0
@@ -234,7 +237,10 @@ def test_a7_dev_null_stdin_is_a_clean_eof() -> None:
 def test_a7_a_closed_fd_0_breaks_programs() -> None:
     # Not a Python probe: CPython versions differ in how they paper over a closed fd 0.
     closed = subprocess.run(
-        ["/bin/sh", "-c", "exec 0<&-; exec cat"], capture_output=True, timeout=30
+        ["/bin/sh", "-c", "exec 0<&-; exec cat"],
+        capture_output=True,
+        timeout=30,
+        env={**os.environ, "LC_ALL": "C"},  # the message text is locale-dependent
     )
     assert closed.returncode != 0 and b"Bad file descriptor" in closed.stderr
     null = subprocess.run(["cat"], stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
@@ -264,6 +270,8 @@ def raw_pidfd_open(pid: int) -> int:
 
 
 def raw_pidfd_send(fd: int, sig: int, flags: int = 0) -> None:
+    if sig != 0:  # the same target check as every other signal a test sends
+        guarded_pidfd_send(lambda *a, **k: None)(fd, sig)
     res = LIBC.syscall(
         ctypes.c_long(SYS_PIDFD_SEND_SIGNAL),
         ctypes.c_long(fd),
@@ -281,9 +289,9 @@ def readable(fd: int, timeout: float) -> bool:
 
 
 def test_c1_pidfd_open_check_and_signal_work_for_a_child_and_become_readable_on_exit(
-    procs: Procs,
+    spike_procs: Procs,
 ) -> None:
-    p = procs.popen(["sleep", "600"])
+    p = spike_procs.popen(["sleep", "60"])
     before = start_time(p.pid)
     fd = raw_pidfd_open(p.pid)
     try:
@@ -303,14 +311,14 @@ def test_c1_pidfd_open_check_and_signal_work_for_a_child_and_become_readable_on_
     assert gone.value.errno == errno.ESRCH
 
 
-def test_c1_pidfd_signals_a_non_child(procs: Procs) -> None:
+def test_c1_pidfd_signals_a_non_child(spike_procs: Procs) -> None:
     code = """
         import subprocess, time
-        print(subprocess.Popen(["sleep", "600"]).pid, flush=True)
+        print(subprocess.Popen(["sleep", "60"]).pid, flush=True)
         time.sleep(600)
     """
-    parent = procs.popen(py(code), stdout=subprocess.PIPE)
-    grand = procs.adopt(int(read_line(parent)))
+    parent = spike_procs.popen(py(code), stdout=subprocess.PIPE)
+    grand = spike_procs.adopt(int(read_line(parent)))
     fd = raw_pidfd_open(grand)
     try:
         assert start_time(grand) is not None
@@ -322,11 +330,12 @@ def test_c1_pidfd_signals_a_non_child(procs: Procs) -> None:
 
 
 @pytest.mark.skipif(
-    not hasattr(os, "pidfd_open"),
-    reason="this CPython build lacks os.pidfd_open (C1: the raw syscalls above are the fallback)",
+    not (hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal")),
+    reason="this CPython build lacks os.pidfd_open or signal.pidfd_send_signal (C1: the raw "
+    "syscalls above are the fallback)",
 )
-def test_c1_the_stdlib_pidfd_agrees_with_the_raw_syscall(procs: Procs) -> None:
-    p = procs.popen(["sleep", "600"])
+def test_c1_the_stdlib_pidfd_agrees_with_the_raw_syscall(spike_procs: Procs) -> None:
+    p = spike_procs.popen(["sleep", "60"])
     fd = os.pidfd_open(p.pid)
     try:
         signal.pidfd_send_signal(fd, 0)
@@ -336,8 +345,8 @@ def test_c1_the_stdlib_pidfd_agrees_with_the_raw_syscall(procs: Procs) -> None:
         os.close(fd)
 
 
-def test_c1_pidfd_signal_flags_are_einval_before_linux_6_9(procs: Procs) -> None:
-    p = procs.popen(["sleep", "600"], process_group=0)
+def test_c1_pidfd_signal_flags_are_einval_before_linux_6_9(spike_procs: Procs) -> None:
+    p = spike_procs.popen(["sleep", "60"], process_group=0)
     fd = raw_pidfd_open(p.pid)
     try:
         if kernel() < (6, 9):
@@ -363,52 +372,56 @@ def members_of(pgid: int) -> list[tuple[int, str]]:
 
 
 def test_c2_a_held_zombie_leader_keeps_its_group_signalable_and_the_scan_finds_members(
-    procs: Procs,
+    spike_procs: Procs,
 ) -> None:
     code = """
         import subprocess, time
-        kids = [subprocess.Popen(["sleep", "600"]) for _ in range(3)]
+        kids = [subprocess.Popen(["sleep", "60"]) for _ in range(3)]
         print(*[k.pid for k in kids], flush=True)
         time.sleep(600)
     """
-    leader = procs.popen(py(code), stdout=subprocess.PIPE, process_group=0)
-    kids = [procs.adopt(int(x)) for x in read_line(leader).split()]
+    leader = spike_procs.popen(py(code), stdout=subprocess.PIPE, process_group=0)
+    kids = [spike_procs.adopt(int(x)) for x in read_line(leader).split()]
     os.kill(leader.pid, signal.SIGKILL)
-    info = os.waitid(os.P_PID, leader.pid, os.WEXITED | os.WNOWAIT)
-    assert info is not None and info.si_status == signal.SIGKILL
+    assert wait_for(lambda: (f := stat_fields(leader.pid)) is not None and f[0] == "Z")
+    info = os.waitid(os.P_PID, leader.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+    assert info is not None and info.si_status == signal.SIGKILL  # exited: ready at once
     fields = stat_fields(leader.pid)
     assert fields is not None and fields[0] == "Z"  # still a zombie: held, not reaped
     live = [pid for pid, state in members_of(leader.pid) if state != "Z" and pid != leader.pid]
     assert sorted(live) == sorted(kids)  # the /proc scan by pgrp finds the 3 members
     os.killpg(leader.pid, signal.SIGKILL)  # reaches members reparented away from the leader
     assert wait_for(lambda: not any(alive(k) for k in kids))
-    os.waitpid(leader.pid, 0)
+    assert os.waitpid(leader.pid, os.WNOHANG)[0] == leader.pid  # the zombie is ready
     assert leader.returncode is None  # Popen does not see a manual reap
 
 
-def test_c2_the_group_id_is_reserved_until_the_leader_is_reaped(procs: Procs) -> None:
-    leader = procs.popen(["sleep", "600"], process_group=0)
+def test_c2_the_group_id_is_reserved_until_the_leader_is_reaped(spike_procs: Procs) -> None:
+    leader = spike_procs.popen(["sleep", "60"], process_group=0)
     os.kill(leader.pid, signal.SIGKILL)
-    os.waitid(os.P_PID, leader.pid, os.WEXITED | os.WNOWAIT)
+    assert wait_for(lambda: (f := stat_fields(leader.pid)) is not None and f[0] == "Z")
+    held = os.waitid(os.P_PID, leader.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+    assert held is not None  # exited, left unreaped
     os.killpg(leader.pid, 0)  # the zombie leader still reserves the group
-    os.waitpid(leader.pid, 0)
+    assert os.waitpid(leader.pid, os.WNOHANG)[0] == leader.pid
     with pytest.raises(ProcessLookupError):  # gone only after the reap
         os.killpg(leader.pid, 0)
 
 
 # -- C3: group SIGTERM / SIGKILL with SIGTERM-ignoring members ---------------------------------
 
-C3_SCRIPT = (
-    "trap '' TERM; sleep 600 & echo $!; sleep 600 & echo $!; "
-    "sleep 600 & echo $!; sleep 600 & echo $!; echo ready; wait"
-)
+C3_SPAWN = "sleep 60 & echo $!; sleep 60 & echo $!; sleep 60 & echo $!; sleep 60 & echo $!; "
+C3_SCRIPT = "trap '' TERM; " + C3_SPAWN + "echo ready; wait"
+C3_PLAIN_SCRIPT = C3_SPAWN + "echo ready; wait"
 
 
 def test_c3_a_term_ignoring_shell_passes_the_ignore_to_its_children_so_only_sigkill_ends_them(
-    procs: Procs,
+    spike_procs: Procs,
 ) -> None:
-    leader = procs.popen(["/bin/sh", "-c", C3_SCRIPT], stdout=subprocess.PIPE, process_group=0)
-    kids = [procs.adopt(int(read_line(leader))) for _ in range(4)]
+    leader = spike_procs.popen(
+        ["/bin/sh", "-c", C3_SCRIPT], stdout=subprocess.PIPE, process_group=0
+    )
+    kids = [spike_procs.adopt(int(read_line(leader))) for _ in range(4)]
     assert read_line(leader) == "ready"
     for pid in kids:  # SigIgn has the SIGTERM bit (bit 14) set: inherited across exec
         status = Path(f"/proc/{pid}/status").read_text()
@@ -421,11 +434,27 @@ def test_c3_a_term_ignoring_shell_passes_the_ignore_to_its_children_so_only_sigk
     assert leader.wait(timeout=15) == -signal.SIGKILL
 
 
+def test_c3_without_the_ignore_sigterm_to_the_group_ends_every_member(
+    spike_procs: Procs,
+) -> None:
+    leader = spike_procs.popen(
+        ["/bin/sh", "-c", C3_PLAIN_SCRIPT], stdout=subprocess.PIPE, process_group=0
+    )
+    kids = [spike_procs.adopt(int(read_line(leader))) for _ in range(4)]
+    assert read_line(leader) == "ready"
+    os.killpg(leader.pid, signal.SIGTERM)  # the leader stays unreaped: the group id is reserved
+    assert wait_for(lambda: not any(alive(p) for p in [leader.pid, *kids]))
+    assert [pid for pid, state in members_of(leader.pid) if state != "Z"] == []  # group gone
+    assert leader.wait(timeout=15) == -signal.SIGTERM
+    with pytest.raises(ProcessLookupError):
+        os.killpg(leader.pid, 0)
+
+
 # -- C4: PR_SET_DUMPABLE -------------------------------------------------------------------------
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses the dumpable check")
-def test_c4_undumpable_denies_environ_to_a_same_user_process_until_exec(procs: Procs) -> None:
+def test_c4_undumpable_denies_environ_to_a_same_user_process_until_exec(spike_procs: Procs) -> None:
     code = """
         import ctypes, os, subprocess, time
         assert ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0  # PR_SET_DUMPABLE
@@ -433,13 +462,13 @@ def test_c4_undumpable_denies_environ_to_a_same_user_process_until_exec(procs: P
         if forked == 0:
             time.sleep(600)
             os._exit(0)
-        execd = subprocess.Popen(["sleep", "600"])
+        execd = subprocess.Popen(["sleep", "60"])
         print(os.getpid(), forked, execd.pid, flush=True)
         time.sleep(600)
     """
-    p = procs.popen(py(code), stdout=subprocess.PIPE)
+    p = spike_procs.popen(py(code), stdout=subprocess.PIPE)
     me, forked, execd = (
-        procs.adopt(int(x)) if int(x) != p.pid else p.pid for x in read_line(p).split()
+        spike_procs.adopt(int(x)) if int(x) != p.pid else p.pid for x in read_line(p).split()
     )
     for pid in (me, forked):  # the process itself and a fork-only child
         with pytest.raises(PermissionError):

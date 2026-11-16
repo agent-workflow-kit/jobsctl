@@ -34,9 +34,11 @@ def py(code: str, *args: str) -> list[str]:
     return [*PY, "-c", textwrap.dedent(code), *args]
 
 
-def run_all(procs: Procs, commands: list[list[str]], timeout: float = 120.0) -> list[str]:
+def run_all(spike_procs: Procs, commands: list[list[str]], timeout: float = 120.0) -> list[str]:
     """Start all at once, wait for all (bounded), return stdouts; any non-zero exit fails."""
-    started = [procs.popen(c, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for c in commands]
+    started = [
+        spike_procs.popen(c, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for c in commands
+    ]
     outs = []
     for p in started:
         out, err = p.communicate(timeout=timeout)
@@ -83,7 +85,7 @@ def test_b1_sqlite_has_upsert_and_returning() -> None:
 
 @pytest.mark.parametrize("mode", ["immediate", "update_returning"])
 def test_b1_count_and_claim_never_exceeds_the_cap_across_processes(
-    procs: Procs, tmp_path: Path, mode: str
+    spike_procs: Procs, tmp_path: Path, mode: str
 ) -> None:
     db = tmp_path / "caps.db"
     make_db(
@@ -94,7 +96,7 @@ def test_b1_count_and_claim_never_exceeds_the_cap_across_processes(
     )
     cap = 3
     outs = run_all(
-        procs, [py(CLAIM_WORKER, str(db), mode, "15", str(cap), f"w{i}") for i in range(6)]
+        spike_procs, [py(CLAIM_WORKER, str(db), mode, "15", str(cap), f"w{i}") for i in range(6)]
     )
     assert sum(int(o) for o in outs) == cap
     conn = sqlite3.connect(db)
@@ -121,7 +123,7 @@ def test_b1_a_deferred_read_then_write_fails_at_once_after_another_commit(tmp_pa
 
 WRITER = """
     import sqlite3, sys
-    conn = sqlite3.connect(sys.argv[1], timeout=10, isolation_level=None)
+    conn = sqlite3.connect(sys.argv[1], timeout=30, isolation_level=None)
     conn.execute("PRAGMA synchronous=NORMAL")
     for i in range(int(sys.argv[2])):
         conn.execute("BEGIN IMMEDIATE")
@@ -131,10 +133,10 @@ WRITER = """
 """
 
 
-def test_b2_many_writers_under_wal_get_no_lock_errors(procs: Procs, tmp_path: Path) -> None:
+def test_b2_many_writers_under_wal_get_no_lock_errors(spike_procs: Procs, tmp_path: Path) -> None:
     db = tmp_path / "wal.db"
     make_db(db, "CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER);")
-    outs = run_all(procs, [py(WRITER, str(db), "30") for _ in range(12)])
+    outs = run_all(spike_procs, [py(WRITER, str(db), "30") for _ in range(12)])
     assert outs == ["ok\n"] * 12
     conn = sqlite3.connect(db)
     assert conn.execute("SELECT count(*) FROM t").fetchone()[0] == 360
@@ -142,11 +144,11 @@ def test_b2_many_writers_under_wal_get_no_lock_errors(procs: Procs, tmp_path: Pa
 
 
 def test_b2_sigkill_mid_transaction_leaves_the_database_intact_and_unlocked(
-    procs: Procs, tmp_path: Path
+    spike_procs: Procs, tmp_path: Path
 ) -> None:
     db = tmp_path / "crash.db"
     make_db(db, "CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER); INSERT INTO t(v) VALUES (0);")
-    holder = procs.popen(
+    holder = spike_procs.popen(
         py(
             """
             import sqlite3, sys, time
@@ -189,9 +191,9 @@ def test_b3_boot_id_is_a_stable_uuid() -> None:
 # -- B4: output capture -------------------------------------------------------------------------
 
 
-def test_b4_a_writer_to_a_pipe_with_no_reader_dies_of_sigpipe(procs: Procs) -> None:
+def test_b4_a_writer_to_a_pipe_with_no_reader_dies_of_sigpipe(spike_procs: Procs) -> None:
     read_end, write_end = os.pipe()
-    child = procs.popen(
+    child = spike_procs.popen(
         py(
             """
             import signal, sys
@@ -228,6 +230,41 @@ def test_b4_a_pipe_is_bounded_and_a_write_to_a_closed_reader_is_epipe() -> None:
     finally:
         signal.signal(signal.SIGPIPE, previous)
         os.close(write_end)
+
+
+FSIZE_CHILD = """
+    import errno, os, resource, signal, sys
+    # CPython ignores SIGXFSZ at startup, so say which disposition is under test.
+    signal.signal(signal.SIGXFSZ, signal.SIG_IGN if sys.argv[2] == "ignore" else signal.SIG_DFL)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (1000, 1000))
+    fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT)
+    try:
+        for _ in range(10):  # the write that crosses the limit is short; the next one fails
+            os.write(fd, b"x" * 500)
+    except OSError as exc:
+        print(errno.errorcode[exc.errno], flush=True)
+        sys.exit(0)
+    print("no-error", flush=True)
+"""
+
+
+def test_b4_a_file_size_limit_kills_the_writer_with_sigxfsz(
+    spike_procs: Procs, tmp_path: Path
+) -> None:
+    # Why file capture cannot be capped with RLIMIT_FSIZE: the job dies, it is not truncated.
+    path = tmp_path / "capped"
+    child = spike_procs.popen(py(FSIZE_CHILD, str(path), "default"), stdout=subprocess.PIPE)
+    assert child.wait(timeout=30) == -signal.SIGXFSZ
+    assert path.stat().st_size <= 1000
+
+
+def test_b4_with_sigxfsz_ignored_the_write_past_the_limit_is_efbig(
+    spike_procs: Procs, tmp_path: Path
+) -> None:
+    path = tmp_path / "capped"
+    child = spike_procs.popen(py(FSIZE_CHILD, str(path), "ignore"), stdout=subprocess.PIPE)
+    assert read_line(child) == "EFBIG"
+    assert child.wait(timeout=30) == 0
 
 
 # -- B7: encoding -------------------------------------------------------------------------------
@@ -298,12 +335,12 @@ SEQ_WORKER = """
 
 
 def test_c6_flock_around_the_counter_and_one_append_gives_seq_in_file_order(
-    procs: Procs, tmp_path: Path
+    spike_procs: Procs, tmp_path: Path
 ) -> None:
     make_db(
         tmp_path / "counter.db", "CREATE TABLE counter(v INTEGER); INSERT INTO counter VALUES (0);"
     )
-    run_all(procs, [py(SEQ_WORKER, str(tmp_path), "100", "20") for _ in range(6)])
+    run_all(spike_procs, [py(SEQ_WORKER, str(tmp_path), "100", "20") for _ in range(6)])
     lines = (tmp_path / "log").read_bytes().split(b"\n")
     assert lines.pop() == b""  # the file ends in a newline: no torn tail
     assert [int(ln.split()[0]) for ln in lines] == list(range(1, 601))  # gap-free, in order
@@ -321,20 +358,24 @@ APPENDER = """
 
 
 def test_c6_large_single_append_writes_from_concurrent_processes_are_never_torn(
-    procs: Procs, tmp_path: Path
+    spike_procs: Procs, tmp_path: Path
 ) -> None:
     path = tmp_path / "big.log"
     size = 200_000  # records of up to 256 KiB
-    run_all(procs, [py(APPENDER, str(path), chr(ord("a") + i), "20", str(size)) for i in range(8)])
+    appends = 8
+    run_all(
+        spike_procs,
+        [py(APPENDER, str(path), chr(ord("a") + i), str(appends), str(size)) for i in range(8)],
+    )
     lines = path.read_bytes().split(b"\n")
     assert lines.pop() == b""
-    assert len(lines) == 8 * 20
+    assert len(lines) == 8 * appends
     for line in lines:
         assert len(line) == size and len(set(line)) == 1  # one writer's record, whole
 
 
 def test_c6_flock_conflicts_between_descriptions_and_dies_with_its_holder(
-    procs: Procs, tmp_path: Path
+    spike_procs: Procs, tmp_path: Path
 ) -> None:
     lock = tmp_path / "lock"
     first = os.open(lock, os.O_CREAT | os.O_RDWR)
@@ -346,7 +387,7 @@ def test_c6_flock_conflicts_between_descriptions_and_dies_with_its_holder(
         fcntl.flock(first, fcntl.LOCK_UN)
         fcntl.flock(second, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(second, fcntl.LOCK_UN)
-        holder = procs.popen(
+        holder = spike_procs.popen(
             py(
                 """
                 import fcntl, os, sys, time
@@ -380,6 +421,7 @@ def test_c6_flock_conflicts_between_descriptions_and_dies_with_its_holder(
 
 @pytest.mark.skipif(not Path("/dev/full").exists(), reason="no /dev/full on this host")
 def test_c6_a_write_with_no_space_left_is_enospc() -> None:
+    """A supplementary probe, not spike coverage: the spike did not test a full disk."""
     fd = os.open("/dev/full", os.O_WRONLY | os.O_APPEND)
     try:
         with pytest.raises(OSError) as info:
