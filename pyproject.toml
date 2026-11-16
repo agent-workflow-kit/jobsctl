@@ -10,6 +10,9 @@ dependencies = [
     "pyyaml>=6.0.3",
 ]
 
+[project.optional-dependencies]
+tui = ["textual>=8.1,<9"]
+
 [project.scripts]
 jobsctl = "jobsctl.cli:main"
 
@@ -28,6 +31,8 @@ dev = [
     "pymarkdownlnt>=0.9.41",
     "jsonschema>=4.26.0",
     "types-pyyaml>=6.0.12.20261103",
+    # The `tui` extra, installed by CI's plain `uv sync` so the browse tests run there.
+    "textual>=8.1,<9",
 ]
 
 [tool.ruff]

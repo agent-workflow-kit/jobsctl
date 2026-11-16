@@ -329,8 +329,7 @@ class Store:
         """Long-lived processes call this before each iteration or transaction.
 
         Raises `version_skew` (exit 12) when the schema is newer than this binary knows.
-
-        todo(#29): browse must call `Store.raise_if_newer()` per iteration and exit 12 version_skew
+        `browse` calls it before each refresh.
         """
         if self.current_version() > self.known_version:
             raise JobsctlError(

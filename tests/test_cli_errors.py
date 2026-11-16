@@ -193,8 +193,14 @@ def test_env_value_never_echoed(capsys: pytest.CaptureFixture[str]) -> None:
     assert "s3cretvalue" not in res.out
 
 
-def test_unimplemented_command_is_internal_error(capsys: pytest.CaptureFixture[str]) -> None:
-    res = run_cli(capsys, "--json", "browse")
+def test_unimplemented_command_is_internal_error(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl import cli_registry, commands
+
+    commands.load_all()
+    monkeypatch.delitem(cli_registry._HANDLERS, "capacity")  # a command with no handler
+    res = run_cli(capsys, "--json", "capacity")
     assert res.code == 1
     env = res.envelope()
     validate_against("cli/error.json", env)
