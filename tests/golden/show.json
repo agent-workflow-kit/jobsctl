@@ -1,0 +1,115 @@
+{
+  "id": "jb-aaaaaa22",
+  "queue": "q",
+  "status": "held",
+  "reason": null,
+  "hold_reason": "escalated",
+  "argv": [
+    "run",
+    "--x"
+  ],
+  "cwd": "/work",
+  "env": {},
+  "pass_env": [],
+  "labels": [
+    "owner=ticket-work"
+  ],
+  "unique_key": null,
+  "priority": 0,
+  "pinned": false,
+  "rank": null,
+  "attempt": 2,
+  "retried_from_attempt": null,
+  "overrides": {},
+  "effective": {
+    "timeout": null,
+    "max_retries": 0,
+    "kill_grace": 30
+  },
+  "not_before": null,
+  "blocked_by": null,
+  "force_requested_by": null,
+  "override_hooks": [],
+  "shim_lost": false,
+  "created_at": "2026-03-10T09:00:00.000Z",
+  "enqueued_at": "2026-03-10T09:00:00.000Z",
+  "status_changed_at": "2026-03-10T11:00:00.000Z",
+  "claimed_at": "2026-03-10T10:00:00.000Z",
+  "ended_at": null,
+  "actor": "human:test",
+  "decision_ids": [],
+  "exit": null,
+  "leftovers": null,
+  "resolved_path": null,
+  "resolved_by": null,
+  "note": null,
+  "attempts": [
+    {
+      "attempt": 1,
+      "status": "failed",
+      "reason": "exit",
+      "hold_reason": null,
+      "claimed_at": "2026-03-10T10:00:00.000Z",
+      "running_at": "2026-03-10T10:00:01.000Z",
+      "ended_at": "2026-03-10T11:00:00.000Z",
+      "exit": {
+        "kind": "exited",
+        "code": 1,
+        "signal": null,
+        "core": false
+      },
+      "leftovers": 0,
+      "resolved_path": "/bin/run",
+      "effective": {
+        "timeout": null,
+        "max_retries": 0,
+        "kill_grace": 10
+      },
+      "escalated_hooks": [],
+      "vetoed_by": null,
+      "hook_messages": [],
+      "decision_ids": [
+        "d1"
+      ],
+      "force_requested_by": null,
+      "resolved_by": null,
+      "note": null,
+      "jobsctl_version": "0.0.1"
+    },
+    {
+      "attempt": 2,
+      "status": "held",
+      "reason": null,
+      "hold_reason": "escalated",
+      "claimed_at": "2026-03-10T10:00:00.000Z",
+      "running_at": null,
+      "ended_at": "2026-03-10T11:00:00.000Z",
+      "exit": null,
+      "leftovers": null,
+      "resolved_path": null,
+      "effective": null,
+      "escalated_hooks": [
+        "pre-start:0"
+      ],
+      "vetoed_by": null,
+      "hook_messages": [
+        {
+          "hook_id": "pre-start:0",
+          "outcome": "escalate",
+          "message": "ask a human"
+        }
+      ],
+      "decision_ids": [],
+      "force_requested_by": null,
+      "resolved_by": null,
+      "note": null,
+      "jobsctl_version": "0.0.1"
+    }
+  ],
+  "output": {
+    "tail": "line 1\nline 2\n",
+    "bytes_seen": 14,
+    "truncated": false,
+    "updated_at": "2026-03-10T11:00:00.000Z"
+  }
+}

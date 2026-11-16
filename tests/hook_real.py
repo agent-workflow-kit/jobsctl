@@ -23,8 +23,7 @@ import pytest
 from jobsctl import gateway, gateway_proc
 from jobsctl.proc_host import LinuxHost
 from jobsctl.proc_identity import Identity, Liveness, check_identity, identify
-
-from . import kill_guard
+from tests.kill_guard import allow
 
 HOST = LinuxHost()
 
@@ -82,7 +81,7 @@ class HookTracker:
                 fd = gateway_proc.pidfd_open(pid)
             except (OSError, LookupError, ValueError):
                 continue
-            kill_guard.allow(pid)  # in the hook's group and identity-confirmed: ours to clean up
+            allow(pid)  # identity confirmed in the hook's group: teardown may signal it
             owner.adopted.append((ident, fd))
             found.append(ident)
         return found
