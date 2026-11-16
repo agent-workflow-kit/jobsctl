@@ -4,7 +4,7 @@
 
 1. (:func:`prepare_process`, by the command) signals, child subreaper, non-dumpable;
 2. confirm the identity the pass recorded, take the `job:<id>` lease, record `effective`;
-3. the `pre-start` hooks (seam, TODO(#25), TODO(#23));
+3. the `pre-start` hooks (`pre_start.PreStart`);
 4. cwd, 5. job environment, 6. `argv[0]`;
 7. the atomic start: re-check, spawn in a new process group and set `running` in one
    `BEGIN IMMEDIATE` transaction;
@@ -42,6 +42,7 @@ from jobsctl.env_job import MissingEnvError, build_job_env
 from jobsctl.env_logging import log_env_file_state, log_path_state
 from jobsctl.env_mask import masking_values
 from jobsctl.errors import JobsctlError
+from jobsctl.hook_run import HookTuning, run_hook
 from jobsctl.leases import (
     RENEW_SECONDS,
     expiry,
@@ -53,6 +54,7 @@ from jobsctl.leases import (
 from jobsctl.leftovers import Leftovers, count_leftovers
 from jobsctl.log_writer import RecordWriter
 from jobsctl.output_capture import OutputCapture, TailSnapshot
+from jobsctl.pre_start import PreStart, Verdict
 from jobsctl.proc_host import Host, default_host
 from jobsctl.proc_identity import Identity, Liveness, check_identity
 from jobsctl.proc_linux import reap_held_leader, set_child_subreaper, set_undumpable
@@ -168,7 +170,11 @@ class Shim:
         clock: Callable[[], Any] = gateway.utc_now,
         environ: Mapping[str, str] | None = None,
         stop: StopSignal | None = None,
+        hook_tuning: HookTuning | None = None,
+        hook_runner: Callable[..., Any] = run_hook,
     ) -> None:
+        self.hook_tuning = hook_tuning
+        self.hook_runner = hook_runner
         self.store = store
         self.config = config
         self.config_path = config_path
@@ -394,6 +400,8 @@ class Shim:
                 environ=self.environ,
                 clock=self.clock,
                 host=self.host,
+                tuning=self.hook_tuning,
+                runner=self.hook_runner,
                 diag=self._diag,
             )
             deliverer.deliver_sync(
@@ -436,16 +444,63 @@ class Shim:
         self._effective = effective
         if self.terminated:  # still step 2, before the hooks: exit without writing
             return 0
-        # TODO(#25), TODO(#23): run the `pre-start` hooks here (veto -> canceled/vetoed,
-        # escalation -> held/escalated, `override_hooks`, decision ids). Before each hook and
-        # while one runs call `_still_starting()`; a canceled job stops the hook's process group.
+        verdict = self._run_pre_start()
+        if verdict is Verdict.INTERNAL:
+            return 1  # nothing written: the job stays `starting` for reconcile
+        if verdict is Verdict.ENDED:
+            self._request_pass()
+            self._deliver_events()  # the `post-cancel` or `post-held`
+            return 0
         view = self._still_starting()
-        if view is None:
+        if view is None or verdict is Verdict.GONE:
             return self._leave_unstarted()
         if self.terminated:  # from the hooks on, SIGTERM ends the job `terminated`
             self._fail(view, "terminated", exit_record=None)
             return 0
         return self._start_and_supervise(view)
+
+    def _run_pre_start(self) -> Verdict:
+        view = self._still_starting()
+        if view is None:
+            return Verdict.GONE
+        try:
+            deliverer = Deliverer(
+                self.store,
+                self.config,
+                environ=self.environ,
+                clock=self.clock,
+                host=self.host,
+                tuning=self.hook_tuning,
+                runner=self.hook_runner,
+                diag=self._diag,
+            )
+        except Exception as exc:  # fail closed: hooks that cannot be set up do not allow
+            self._diag(f"the pre-start hooks could not be set up ({type(exc).__name__})")
+            return Verdict.INTERNAL
+        pre = PreStart(
+            self.store,
+            self.config,
+            deliverer,
+            self.job_id,
+            self.claim_id,
+            terminated=lambda: self.terminated,
+            tick=self._tick,
+            now=self._now,
+            retrying=self._retrying,
+            busy_seconds=FINAL_COMMIT_SECONDS,
+            diag=self._diag,
+        )
+        try:
+            verdict = pre.run(view)
+        except Exception as exc:  # fail closed: nothing is written, the job is not started
+            self._diag(f"the pre-start hooks failed unexpectedly ({type(exc).__name__}: {exc})")
+            try:  # a verdict that already committed keeps its transition records
+                self._emit(pre.records)
+            except Exception:  # emission must not raise out of the fail-closed path
+                pass
+            return Verdict.INTERNAL
+        self._emit(pre.records)
+        return verdict
 
     def _fail(
         self,

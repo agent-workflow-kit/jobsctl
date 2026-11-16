@@ -170,6 +170,31 @@ def test_a_spawn_failure_requeues_keeping_place_and_enqueue_time(store: Store) -
     assert [(r.event, r.level) for r in records] == [("shim_spawn_failed", "warn")]
 
 
+def _seed_override(store: Store, job_id: str) -> None:
+    with store.write() as tx:
+        tx.execute("UPDATE jobs SET override_hooks = '[\"ask\"]' WHERE id = ?", [job_id])
+
+
+def test_a_requeued_spawn_failure_keeps_override_hooks(store: Store) -> None:
+    (job_id,) = job_ids(1)
+    add_queued(store, job_id)
+    _seed_override(store, job_id)
+    (c,), _ = claim(store, config())
+    fail(store, job_id, c.claim_id)
+    assert job_row(store, job_id)["override_hooks"] == '["ask"]'
+
+
+def test_a_final_spawn_failure_clears_override_hooks(store: Store) -> None:
+    (job_id,) = job_ids(1)
+    add_queued(store, job_id)
+    _seed_override(store, job_id)
+    for _ in range(SPAWN_FAILURE_LIMIT):
+        (c,), _ = claim(store, config())
+        fail(store, job_id, c.claim_id)
+    row = job_row(store, job_id)
+    assert (row["status"], row["override_hooks"]) == ("failed", "[]")
+
+
 def test_the_third_consecutive_failure_is_final_and_keeps_the_attempt(store: Store) -> None:
     (job_id,) = job_ids(1)
     add_queued(store, job_id)

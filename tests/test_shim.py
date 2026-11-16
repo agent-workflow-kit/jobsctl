@@ -546,7 +546,7 @@ def test_sigterm_while_recording_the_effective_settings_exits_without_failing_th
     assert attempt(store)["exit"] is None and attempt(store)["running_at"] is None
 
 
-def test_sigterm_after_the_pre_start_seam_ends_a_starting_job_terminated(
+def test_sigterm_after_the_pre_start_hooks_end_a_starting_job_terminated(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seed_claimed(store, ["true"])
@@ -557,7 +557,7 @@ def test_sigterm_after_the_pre_start_seam_ends_a_starting_job_terminated(
     def look_then_term() -> object:
         out = real()
         calls.append(1)
-        if len(calls) == 2:  # the look after the (future) pre-start hooks
+        if len(calls) == 2:  # the look after the pre-start hooks
             shim.request_stop()
         return out
 

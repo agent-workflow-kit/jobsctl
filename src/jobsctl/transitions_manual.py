@@ -11,7 +11,7 @@ built from the row with the changes merged in; nothing is written.
 A changed `release` and a `cancel` that ended a `starting` job free a start: the commands
 request a pass after the commit (`Applied.previous_status`, `triggers.request_pass_from_command`).
 The shim reacts to a `starting` job canceled under it (`shim.py`, "Still starting?"): it spawns
-nothing, runs no further hook (TODO(#25): stops a running one) and exits after delivering.
+nothing, runs no further hook (the shim stops a running one) and exits after delivering.
 The commands deliver the synchronous hooks of `hold`, `cancel` and `resolve` after the commit
 (`delivery_cli.py`).
 """
@@ -332,8 +332,7 @@ def release(
             raise JobsctlError("internal", f"{row['id']} is escalated but has no attempt")
         updates["override_hooks"] = attempt["escalated_hooks"]
         audit = "release_override"
-    # TODO(#25): the human check and the override are complete; the pre-start side that honours
-    # `override_hooks` belongs to the shim.
+    # the shim's `pre_start.PreStart` honours `override_hooks` on the next start
     return _transition(op, row, to="queued", updates=updates, audit=audit)
 
 

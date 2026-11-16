@@ -111,7 +111,7 @@ def record_effective(store: Store, job_id: str, claim_id: str, effective: dict[s
         )
 
 
-def _post_event(
+def post_event(
     tx: Tx, config: Config, hook: str, job_id: str, attempt: int, previous: str, now: str
 ) -> None:
     after = tx.one("SELECT * FROM jobs WHERE id = ?", [job_id])
@@ -146,7 +146,13 @@ def fail_starting(
         claim_id=claim_id,
         expect_status="starting",
         to_status="failed" if plan is None else "queued",
-        updates={"reason": reason, "ended_at": now, "status_changed_at": now, "not_before": None}
+        updates={
+            "reason": reason,
+            "ended_at": now,
+            "status_changed_at": now,
+            "not_before": None,
+            "override_hooks": "[]",  # a terminal end clears it (a requeue keeps it)
+        }
         if plan is None
         else plan,
     )
@@ -157,7 +163,7 @@ def fail_starting(
     if resolved_path is not None:
         updates["resolved_path"] = resolved_path
     update_attempt_by_claim(tx, job_id, claim_id, updates)
-    _post_event(tx, config, "post-fail", job_id, view.attempt, "starting", now)
+    post_event(tx, config, "post-fail", job_id, view.attempt, "starting", now)
     return True, [
         transition_record(
             job_id,
@@ -209,7 +215,7 @@ def begin_running(
             "resolved_path": resolved_path,
         },
     )
-    _post_event(tx, config, "post-start", job_id, view.attempt, "starting", now)
+    post_event(tx, config, "post-start", job_id, view.attempt, "starting", now)
     return True, [transition_record(job_id, view.queue, "starting", "running", view.attempt)]
 
 
@@ -307,7 +313,7 @@ def finish_running_in(
     if plan is not None:
         job_updates = plan
     elif outcome.terminal:
-        job_updates.update(reason=outcome.reason, ended_at=end)
+        job_updates.update(reason=outcome.reason, ended_at=end, override_hooks="[]")
     else:
         job_updates.update(hold_reason=outcome.hold_reason)
     won = transition_job_by_claim(
@@ -335,7 +341,7 @@ def finish_running_in(
     )
     if tail is not None:  # `_kill` keeps the last flushed tail when it has no other
         save_tail(tx, job_id, view.attempt, tail, now)
-    _post_event(tx, config, post_hook(outcome), job_id, view.attempt, "running", now)
+    post_event(tx, config, post_hook(outcome), job_id, view.attempt, "running", now)
     record = transition_record(
         job_id,
         view.queue,
