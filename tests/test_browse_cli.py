@@ -169,6 +169,23 @@ def test_an_existing_result_file_is_made_0600_on_write(tmp_path: Path) -> None:
     assert path.stat().st_mode & 0o777 == 0o600
 
 
+def test_write_result_tolerates_a_result_file_the_user_cannot_chmod(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import os
+
+    from jobsctl.tui.result import write_result
+
+    def deny(fd: int, mode: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "fchmod", deny)
+    path = tmp_path / "result.json"
+    path.write_text("old")
+    write_result(str(path), "back", [])
+    assert json.loads(path.read_text()) == {"intent": "back", "selected": []}
+
+
 def test_a_bad_result_file_is_refused_before_the_screen_starts(
     capsys: pytest.CaptureFixture[str],
     tty: None,

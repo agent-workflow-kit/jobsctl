@@ -50,7 +50,10 @@ def write_result(path: str, intent: Intent, selected: list[str]) -> None:
     document = json.dumps({"intent": intent, "selected": selected}) + "\n"
     fd = _open_regular(path)
     try:
-        os.fchmod(fd, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+        except PermissionError:
+            pass  # writable via group/ACL but not owned by us: write without tightening
         os.ftruncate(fd, 0)
         data = document.encode("ascii")
         written = 0
