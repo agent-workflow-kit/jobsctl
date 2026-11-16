@@ -195,7 +195,7 @@ Three spikes ran on 2026-10-30/31 on Ubuntu 22.04 (kernel 5.15, systemd), SQLite
 | A4 | Signal chain | SIGTERM to a shell job's PID left its `sleep` and Python children running under PID 1; signaling the job's own process group stopped them; `PR_SET_CHILD_SUBREAPER` works unprivileged and exposes leftovers | D10 |
 | A5 | Shim death | After SIGKILL of the shim, the job keeps running (no SIGHUP); `PDEATHSIG` would kill it within 50 ms | D11 (no `PDEATHSIG`) |
 | A6 | Exit codes | 0, 1, 13, 255 pass through; signal deaths are negative return codes; a shell reports a killed child as 143; a missing program raises before anything starts | [Exit record](interface.md#exit-record) |
-| A7 | stdin | `/dev/null` gives a clean end of file; a closed fd 0 breaks programs; a detached job that inherited the terminal read the user's keystrokes | stdin `/dev/null` |
+| A7 | stdin | `/dev/null` gives a clean end of file; a closed fd 0 breaks programs (reading it fails with `EBADF`); a detached job that inherited the terminal read the user's keystrokes | stdin `/dev/null` |
 
 ### Spike B: state and output
 

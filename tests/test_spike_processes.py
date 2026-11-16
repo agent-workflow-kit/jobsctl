@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import os
+import re
 import select
 import signal
 import subprocess
@@ -42,14 +43,16 @@ def py(code: str) -> list[str]:
 
 
 def kernel() -> tuple[int, int]:
-    major, minor = os.uname().release.split(".")[:2]
-    return int(major), int("".join(c for c in minor if c.isdigit()))
+    match = re.match(r"(\d+)\.(\d+)", os.uname().release)
+    assert match is not None, os.uname().release
+    return int(match[1]), int(match[2])
 
 
 # -- A1: detach mechanics ------------------------------------------------------------------
 
 A1_RUNNER = """
-    import os, subprocess, sys, time
+    import os, signal, subprocess, sys, time
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)  # a launcher may have left SIGHUP ignored
     rfd, wfd = os.pipe()
     os.set_inheritable(rfd, True)
     os.set_inheritable(wfd, True)
@@ -234,25 +237,45 @@ def test_a7_dev_null_stdin_is_a_clean_eof() -> None:
     assert res.stdout.strip() == b"''" and res.returncode == 0
 
 
+A7_CLOSED_FD_0 = """
+    import errno, os
+    os.close(0)  # what a program sees when its stdin was closed instead of given /dev/null
+    try:
+        os.read(0, 1)
+    except OSError as exc:
+        print(errno.errorcode[exc.errno])
+    else:
+        print("read-succeeded")
+"""
+
+
 def test_a7_a_closed_fd_0_breaks_programs() -> None:
-    # Not a Python probe: CPython versions differ in how they paper over a closed fd 0.
+    # Python child, not sh/cat: how a given cat or shell reacts to a closed fd 0 varies by
+    # implementation (some reopen /dev/null or print nothing); the kernel's EBADF does not.
     closed = subprocess.run(
-        ["/bin/sh", "-c", "exec 0<&-; exec cat"],
+        py(A7_CLOSED_FD_0), stdin=subprocess.DEVNULL, capture_output=True, timeout=30
+    )
+    assert closed.stdout.strip() == b"EBADF" and closed.returncode == 0, closed.stderr
+    null = subprocess.run(
+        py("import os; print(len(os.read(0, 1)))"),
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         timeout=30,
-        env={**os.environ, "LC_ALL": "C"},  # the message text is locale-dependent
     )
-    assert closed.returncode != 0 and b"Bad file descriptor" in closed.stderr
-    null = subprocess.run(["cat"], stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
-    assert null.returncode == 0 and null.stdout == b""
+    assert null.stdout.strip() == b"0" and null.returncode == 0  # /dev/null: end of file
 
 
 def test_a7_a_terminal_stdin_hands_the_keystrokes_to_the_program() -> None:
-    master, slave = os.openpty()
+    try:
+        master, slave = os.openpty()
+    except OSError as exc:
+        pytest.skip(f"no pseudo-terminal available here: {exc}")
     try:
         os.write(master, b"k\n")
-        res = subprocess.run(["head", "-c", "2"], stdin=slave, capture_output=True, timeout=30)
-        assert res.stdout == b"k\n"  # why a detached job must not inherit it
+        res = subprocess.run(
+            py("import os; print(os.read(0, 2))"), stdin=slave, capture_output=True, timeout=30
+        )
+        assert res.stdout.strip() == b"b'k\\n'"  # why a detached job must not inherit it
     finally:
         os.close(master)
         os.close(slave)
