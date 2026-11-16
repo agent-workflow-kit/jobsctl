@@ -236,6 +236,7 @@ FSIZE_CHILD = """
     import errno, os, resource, signal, sys
     # CPython ignores SIGXFSZ at startup, so say which disposition is under test.
     signal.signal(signal.SIGXFSZ, signal.SIG_IGN if sys.argv[2] == "ignore" else signal.SIG_DFL)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))  # SIGXFSZ may dump core into the cwd
     resource.setrlimit(resource.RLIMIT_FSIZE, (1000, 1000))
     fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT)
     try:
