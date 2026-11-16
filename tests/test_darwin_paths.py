@@ -1,5 +1,6 @@
 """macOS code paths that run on Linux: fakes for libproc, and what a platform without
-``os.waitid`` needs to import. None of this proves anything about a real Mac (docs/macos-checklist.md)."""
+``os.waitid`` needs to import. None of this proves anything about a real Mac
+(docs/macos-checklist.md)."""
 
 from __future__ import annotations
 
