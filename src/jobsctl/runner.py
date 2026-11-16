@@ -478,7 +478,7 @@ class Runner:
         signaled), so the next `reap` collects it and its attempt follows the normal exit
         handling. A recorded pid that is not our child is dropped by `reap` without a conclusion.
 
-        todo(#28): on macOS the identity read of a zombie (libproc / sysctl start time) is
+        todo(#28): on macOS the identity read of a zombie (libproc ``proc_pidinfo``) is
         unverified; if it fails the shim is simply not adopted and stays a zombie until exit."""
         known = {child.popen.pid for child in self.children}
         rows = self.store.query_all(

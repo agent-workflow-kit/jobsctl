@@ -22,9 +22,16 @@ import pytest
 pytest.importorskip("textual")  # the extra-less behavior is covered in test_browse_cli.py
 
 from tests.manual_helpers import add_job  # noqa: E402
-from tests.spike_helpers import Procs, linux_only  # noqa: E402
+from tests.spike_helpers import Procs  # noqa: E402
 
-pytestmark = linux_only
+# Platform-neutral: `os.openpty`/`termios` exist on Linux and macOS. The skip checks the capability
+# itself, not the platform. Verified on Linux only; on macOS it is a checklist item (#28).
+pytestmark = pytest.mark.skipif(
+    not (
+        hasattr(pty, "openpty") and hasattr(termios, "TIOCSWINSZ") and hasattr(termios, "tcgetattr")
+    ),
+    reason="needs pty.openpty and termios",
+)
 
 
 @pytest.fixture

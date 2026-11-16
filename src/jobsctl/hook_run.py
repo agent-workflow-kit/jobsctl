@@ -14,8 +14,9 @@ The caller (``pre-start`` in the shim, the delivery of post hooks) selects hooks
 payload and the environment, and logs the result; this module knows nothing of jobs or state.
 Outbox delivery and ``async`` hooks (``delivery.py``, ``deliver.py``) call ``run_hook`` per entry.
 The shim's ``pre-start`` loop (``pre_start.py``) applies veto and escalation from ``HookResult``.
-TODO(#28): ``wait_exited_keep`` (``waitid`` with ``WNOWAIT``) is ENOSYS on macOS: ``run_hook`` is
-Linux-only until the macOS port.
+TODO(#28): on macOS ``wait_exited_keep`` reads the zombie state through libproc instead of
+``waitid(WNOWAIT)`` (``gateway_proc.emulated_waitid_nowait``). That path, and so ``run_hook``
+there, has never run on a Mac; the hook tests are Linux-only (docs/macos-checklist.md).
 """
 
 from __future__ import annotations

@@ -15,7 +15,9 @@ import os
 import platform
 import signal
 import sys
-from typing import Any
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 from . import gateway
 
@@ -195,12 +197,79 @@ def prctl_get_int(option: int) -> int:
     return out.value
 
 
-def waitid_nowait(pid: int, nohang: bool = False) -> os.waitid_result | None:
+class WaitResult(Protocol):
+    """What the shim reads of a ``waitid`` result: ``os.waitid_result`` on Linux, an
+    :class:`EmulatedWait` on macOS (``os.waitid_result`` does not exist there)."""
+
+    @property
+    def si_pid(self) -> int: ...
+    @property
+    def si_code(self) -> int: ...
+    @property
+    def si_status(self) -> int: ...
+
+
+# `siginfo` si_code values; the same numbers on Linux and macOS (`shim_exit` maps them).
+CLD_EXITED = 1
+CLD_KILLED = 2
+CLD_DUMPED = 3
+_EMULATED_POLL_SECONDS = 0.02
+
+
+@dataclass(frozen=True)
+class EmulatedWait:
+    si_pid: int
+    si_code: int
+    si_status: int
+
+
+def decode_wait_status(status: int) -> tuple[int, int]:
+    """``(si_code, si_status)`` of a ``wait`` status of an exited or killed process;
+    ``OSError(EIO)`` for anything else (stopped, continued): never guessed."""
+    if os.WIFEXITED(status):
+        return CLD_EXITED, os.WEXITSTATUS(status)
+    if os.WIFSIGNALED(status):
+        return (CLD_DUMPED if os.WCOREDUMP(status) else CLD_KILLED), os.WTERMSIG(status)
+    raise OSError(errno.EIO, f"unexpected wait status {status:#x} on a zombie")
+
+
+def emulated_waitid_nowait(
+    state: Callable[[int], tuple[int, bool, int] | None],
+    pid: int,
+    nohang: bool = False,
+    *,
+    parent: int | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> WaitResult | None:
+    """``waitid(WEXITED | WNOWAIT)`` for platforms without ``waitid`` (macOS), from process
+    state read without waiting: ``state(pid)`` is ``(ppid, is_zombie, wait_status)`` or ``None``.
+    A zombie child's status stays readable until it is reaped, so nothing is consumed. Not our
+    child (a gone process, another parent) is ``ChildProcessError``, as for the real call.
+    Blocking polls; the caller bounds it. Unverified on a real Mac (docs/macos-checklist.md)."""
+    me = os.getpid() if parent is None else parent
+    nap = gateway.sleep if sleep is None else sleep
+    while True:
+        got = state(pid)
+        if got is None or got[0] != me:
+            raise ChildProcessError(errno.ECHILD, os.strerror(errno.ECHILD))
+        _, zombie, status = got
+        if zombie:
+            code, value = decode_wait_status(status)
+            return EmulatedWait(pid, code, value)
+        if nohang:
+            return None
+        nap(_EMULATED_POLL_SECONDS)
+
+
+def waitid_nowait(pid: int, nohang: bool = False) -> WaitResult | None:
     """Wait for child ``pid`` to exit, leaving it unreaped (``WEXITED | WNOWAIT``).
 
-    Blocks until it exits; with ``nohang`` returns ``None`` at once if it has not exited.
+    Blocks until it exits; with ``nohang`` returns ``None`` at once if it has not exited. On
+    macOS, which has no ``os.waitid``, the zombie state is read through libproc instead.
     """
     if not hasattr(os, "waitid"):
+        if sys.platform == "darwin":
+            return emulated_waitid_nowait(DarwinLibproc().wait_state, pid, nohang)
         raise OSError(errno.ENOSYS, "os.waitid is unavailable on this platform")
     flags = os.WEXITED | os.WNOWAIT | (os.WNOHANG if nohang else 0)
     return os.waitid(os.P_PID, pid, flags)
@@ -225,6 +294,7 @@ def reap_if_exited(pid: int) -> bool:
 
 PROC_PIDTBSDINFO = 3
 PROC_PGRP_ONLY = 2
+PROC_PPID_ONLY = 6
 SZOMB = 5
 
 
@@ -271,8 +341,9 @@ SYSCTL = "/usr/sbin/sysctl"  # absolute: cron's PATH may lack /usr/sbin
 class DarwinLibproc:
     """The ``libproc``/``sysctl`` calls ``DarwinHost`` needs."""
 
-    def bsdinfo(self, pid: int) -> tuple[int, int, int, int, bool] | None:
-        """``(ppid, pgid, start_sec, start_usec, is_zombie)``; ``None`` if no such process."""
+    @staticmethod
+    def _read(pid: int) -> _ProcBsdInfo | None:
+        """The ``proc_bsdinfo`` of ``pid``; ``None`` if there is no such process."""
         lib = _get_libproc()
         info = _ProcBsdInfo()
         size = ctypes.sizeof(info)
@@ -291,6 +362,13 @@ class DarwinLibproc:
             raise OSError(err, os.strerror(err))
         if got != size or info.pbi_pid != pid:
             raise OSError(errno.EIO, "short or mismatched proc_pidinfo result")
+        return info
+
+    def bsdinfo(self, pid: int) -> tuple[int, int, int, int, bool] | None:
+        """``(ppid, pgid, start_sec, start_usec, is_zombie)``; ``None`` if no such process."""
+        info = self._read(pid)
+        if info is None:
+            return None
         return (
             int(info.pbi_ppid),
             int(info.pbi_pgid),
@@ -299,24 +377,45 @@ class DarwinLibproc:
             info.pbi_status == SZOMB,
         )
 
-    def group_pids(self, pgid: int) -> list[int]:
+    def wait_state(self, pid: int) -> tuple[int, bool, int] | None:
+        """``(ppid, is_zombie, wait_status)`` for the wait emulation; ``None`` if gone.
+        ``pbi_xstatus`` is the kernel's exit status word; it is read only for a zombie."""
+        info = self._read(pid)
+        if info is None:
+            return None
+        return int(info.pbi_ppid), info.pbi_status == SZOMB, int(info.pbi_xstatus)
+
+    @staticmethod
+    def _list(kind: int, arg: int, *, strict: bool = False) -> list[int]:
+        """``proc_listpids``. A non-positive size is "none" unless ``strict`` and ``errno`` says
+        the call failed (then ``OSError``)."""
         lib = _get_libproc()
-        need = lib.proc_listpids(
-            ctypes.c_uint32(PROC_PGRP_ONLY), ctypes.c_uint32(pgid), None, ctypes.c_int(0)
-        )
+        ctypes.set_errno(0)
+        need = lib.proc_listpids(ctypes.c_uint32(kind), ctypes.c_uint32(arg), None, ctypes.c_int(0))
         if need <= 0:
+            err = ctypes.get_errno()
+            if strict and err not in (0, errno.ESRCH):
+                raise OSError(err, os.strerror(err))
             return []
         count = need // 4 + 16
         buf = (ctypes.c_int32 * count)()
         got = lib.proc_listpids(
-            ctypes.c_uint32(PROC_PGRP_ONLY),
-            ctypes.c_uint32(pgid),
+            ctypes.c_uint32(kind),
+            ctypes.c_uint32(arg),
             buf,
             ctypes.c_int(ctypes.sizeof(buf)),
         )
         if got <= 0:
             return []
         return [int(p) for p in buf[: got // 4] if p > 0]
+
+    def group_pids(self, pgid: int) -> list[int]:
+        return self._list(PROC_PGRP_ONLY, pgid)
+
+    def child_pids(self, ppid: int) -> list[int]:
+        """The PIDs whose parent is ``ppid`` (``PROC_PPID_ONLY``); a failed listing raises
+        ``OSError`` (unlike the group listing) so the scan is reported incomplete."""
+        return self._list(PROC_PPID_ONLY, ppid, strict=True)
 
     def boot_uuid(self) -> str:
         """The boot session UUID; ``""`` if ``sysctl`` fails. May raise ``OSError`` (missing
