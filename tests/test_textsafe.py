@@ -121,6 +121,14 @@ def test_strip_escapes_mapped_matches_strip_escapes_and_locates_characters() -> 
         assert all(raw[i] == ch for i, ch in zip(origin, stripped, strict=True)), raw
 
 
+def test_remove_escape_sequences_keeps_the_text_before_a_carriage_return() -> None:
+    from jobsctl.textsafe import remove_escape_sequences
+
+    assert remove_escape_sequences("\x1b[31mold\rnew\x1b[0m") == "old\rnew"
+    assert strip_escapes("\x1b[31mold\rnew\x1b[0m") == "new"
+    assert remove_escape_sequences("a\x1b]0;title\x07b") == "ab"
+
+
 def test_mask_runs_after_escape_removal_and_before_control_escaping() -> None:
     secret = "s3cr3t-value"
     # an escape sequence inside the secret is removed first, so the masked text is still found

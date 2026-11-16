@@ -282,23 +282,28 @@ def test_run_loop_stops_on_sigterm_after_finishing_its_pass(pool: Pool) -> None:
 
 @pytest.mark.real_trigger
 def test_add_starts_a_detached_pass_and_returns_at_once(pool: Pool) -> None:
+    """The whole chain in real processes: `add` triggers a detached pass, the pass claims the job
+    and spawns a detached shim, the shim runs the job, commits the end and requests another pass."""
     proc = cli(pool, "--json", "add", "--cwd", "/", "--", "true")
     out, err = proc.communicate(timeout=60)
     assert proc.returncode == 0, err
     job_id = json.loads(out)["job"]["id"]
     deadline = time.monotonic() + 60
     status = "queued"
-    while status == "queued" and time.monotonic() < deadline:
+    while status not in ("done", "failed") and time.monotonic() < deadline:
         time.sleep(0.1)
         with Store.open() as store:
             status = job_row(store, job_id)["status"]
-    assert status == "starting"  # claimed by the triggered pass (the stub shim ends at once)
+    assert status == "done"  # claimed by the triggered pass and run by its shim
     deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
+    while time.monotonic() < deadline:  # the shim's own trigger runs one more (empty) pass
         with Store.open() as store:
-            if store.query_one("SELECT 1 FROM leases WHERE name = 'runner'") is None:
+            if store.query_one("SELECT 1 FROM leases") is None:
                 break
         time.sleep(0.1)
     with Store.open() as store:
-        assert store.query_one("SELECT 1 FROM leases WHERE name = 'runner'") is None
+        assert store.query_all("SELECT 1 FROM leases") == []
+        counter = store.query_one("SELECT value FROM counters WHERE name = 'pass_requested'")
+        assert counter is not None and counter["value"] >= 2  # add's request and the shim's
     assert list((resolve_state_dir() / "diag").iterdir()) == []  # nothing was written
+    assert list((resolve_state_dir() / "shims").glob("*.log")) == []  # a clean shim leaves none

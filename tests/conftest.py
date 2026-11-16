@@ -11,7 +11,7 @@ import pytest
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
-pytest_plugins = ["tests.runner_fixtures"]
+pytest_plugins = ["tests.runner_fixtures", "tests.shim_real"]
 
 SCHEMAS = Path(__file__).resolve().parent.parent / "schemas"
 

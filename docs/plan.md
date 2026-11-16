@@ -34,7 +34,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 | `retention.py` | 2 | retention and `prune` batches, file removal anchored by descriptors, orphan sweep, forgetting empty unconfigured queues |
 | `hook_events.py`, `job_lookup.py`, `transitions_manual.py` | 1–4 | the post-hook outbox events written with a transition; finding jobs by id, prefix and selector; `hold`/`release`/`cancel` of non-running jobs |
 | `runner.py`, `claims.py`, `triggers.py`, `spawn.py`, `leases.py` | 2 | the pass: lease, reconcile hook point, claim loop with the `pass_requested` counter, shim spawn and identity record, delivery hand-off, retention, checkpoint; start triggers; `run --loop` (`commands/run.py`) |
-| `shim.py` | 2–4 | start sequence, output pump, tail flush, final commit and result file, timeout, signal sequence |
+| `shim.py`, `shim_store.py`, `shim_pump.py`, `shim_exit.py`, `leftovers.py`, `argv_resolve.py`, `result_file.py` | 2–4 | start sequence; its compare-and-set writes; output pump; exit record and outcome mapping; leftovers count; `argv[0]` resolution; result file; later the timeout and the signal sequence |
 | `output_capture.py`, `output_tail.py`, `output_store.py`, `textsafe.py` | 2 | ring buffer; tail rendering (window rules, masking, sanitizing, live flush); compression and the `outputs` table; the shared sanitizer |
 | `kill.py` | 3 | `_kill` for force-cancel after a shim loss |
 | `reconcile.py` | 3 | reconcile rules and findings |
@@ -86,9 +86,9 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 - timeouts and `overrides` (`none`); automatic retry (`not_before`, budget from the attempt's `effective` snapshot, the 3rd spawn failure final); `retry --attempt N` replay after a cancel or hold; `wait` exits 0/12/13/20/22/130.
 - result file written before the final commit; final-commit retry under contention.
 
-**Status**: In Progress (runner pass, start triggers and the shim spawn contract done; the shim, output capture, `wait`, `retry` and automatic retry remain)
+**Status**: In Progress (runner pass, start triggers, the shim spawn contract, the shim's start sequence with atomic job spawn, exit mapping, leftovers, result file and final commit, and output capture done; the signal sequence and timeout enforcement (`TODO(#19)`), `wait`, `retry` and automatic retry (`TODO(#18)`) remain)
 
-Interim behavior until the dependent issues land: the `_shim` stub (`TODO(#15)`) exits at once unconfirmed, so every pass requeues its claimed job as `claim_orphaned` and claims it again; a shim that confirmed and then died is left `starting` until reconcile (`TODO(#22)`). `_deliver` has no handler (`TODO(#24)`), so a spawned `_deliver` exits at once and the next pass requests it again while events stay undelivered.
+Interim behavior until the dependent issues land: a shim that confirmed and then died leaves its job `starting` or `running` until reconcile (`TODO(#22)`); the shim does not yet run `pre-start` hooks (`TODO(#25)`), enforce a timeout, react to a force request or SIGTERM while the job runs (`TODO(#19)`), retry automatically (`TODO(#18)`) or deliver events (`TODO(#24)`). `_deliver` has no handler (`TODO(#24)`), so a spawned `_deliver` exits at once and the next pass requests it again while events stay undelivered.
 
 ## Stage 3: Cancellation and recovery (0.3)
 

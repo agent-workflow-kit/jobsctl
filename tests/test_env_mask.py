@@ -292,3 +292,58 @@ def test_masking_set_of_plain_values() -> None:
     assert not got.contains_secret("short")  # under 8 characters: never masked
     assert got.mask("a longer-secret-1 b") == "a *** b"
     assert masking_set_of([]).values == ()
+
+
+# -- repetitive output stays linear ---------------------------------------------------------------
+
+
+def _old_spans(mset_: em.MaskingSet, text: str) -> list[tuple[int, int]]:
+    """The behavior before the quadratic fix: `_extend` for every match."""
+    assert mset_._pattern is not None  # pyright: ignore[reportPrivateUsage]
+    merged: list[tuple[int, int]] = []
+    for m in mset_._pattern.finditer(text):  # pyright: ignore[reportPrivateUsage]
+        start, end = m.span()
+        end = mset_._extend(text, start, end)  # pyright: ignore[reportPrivateUsage]
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def test_a_window_of_the_repeated_secret_is_masked_in_linear_time() -> None:
+    secret = "abcdefgh"
+    s = em.masking_set_of([secret])
+    text = secret * (266_000 // len(secret))
+    started = time.monotonic()
+    masked = s.mask(text)
+    assert time.monotonic() - started < 2.0
+    assert masked == "***" * (266_000 // len(secret))
+
+
+def test_a_flood_of_a_single_character_with_a_secret_of_it_is_linear() -> None:
+    s = em.masking_set_of(["a" * 8])
+    text = "a" * 266_000
+    started = time.monotonic()
+    assert s.mask(text) == "***"
+    assert time.monotonic() - started < 2.0
+
+
+def test_a_flood_of_an_overlapping_period_secret_is_linear() -> None:
+    s = em.masking_set_of(["abababab", "bababab1"])
+    text = "ab" * 133_000
+    started = time.monotonic()
+    assert s.mask(text) == "***"
+    assert time.monotonic() - started < 2.0
+
+
+def test_spans_equal_the_old_behavior_on_small_inputs_with_overlapping_secrets() -> None:
+    rng = random.Random(4242)
+    for _ in range(300):
+        values = {
+            "".join(rng.choice("abc") for _ in range(rng.randint(8, 12)))
+            for _ in range(rng.randint(1, 4))
+        }
+        s = em.masking_set_of(values)
+        text = "".join(rng.choice("abcx") for _ in range(rng.randint(0, 120)))
+        assert s.spans(text) == _old_spans(s, text)

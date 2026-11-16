@@ -51,7 +51,7 @@ RESERVED_ACTOR: Final = "auto:jobsctl"
 ORPHAN_SCAN_CAP: Final = 10000  # shims/ entries looked at per orphan sweep
 
 _ID_GLOB = "jb-" + "[a-z2-7]" * 8
-_FILE_RE = re.compile(r"(jb-[a-z2-7]{8})(?:\.log|\.[0-9]+\.result)")
+_FILE_RE = re.compile(r"(jb-[a-z2-7]{8})(?:\.log|\.[0-9]+\.result(?:\.tmp-[0-9a-f]{16})?)")
 _TERMINAL_SQL = ", ".join(f"'{s}'" for s in TERMINAL_STATUSES)
 
 

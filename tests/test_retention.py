@@ -800,3 +800,11 @@ def test_command_does_not_forget_queues(capsys: pytest.CaptureFixture[str]) -> N
     assert cli(capsys, "--older-than", "30d").code == 0
     with Store.open(mode=OpenMode.CLI) as s:
         assert "idle" in ids_in(s, "queues_seen", "name")
+
+
+def test_a_result_temp_file_left_by_a_dead_shim_is_removed_with_its_job(store: Store) -> None:
+    add_job(store, jid(1), attempts=0, attempt=2)
+    (store.paths.shims / f"{jid(1)}.2.result.tmp-0123456789abcdef").write_text("x")
+    (store.paths.shims / f"{jid(1)}.2.result.tmp-short").write_text("x")  # not ours: kept
+    run(store)
+    assert os.listdir(store.paths.shims) == [f"{jid(1)}.2.result.tmp-short"]

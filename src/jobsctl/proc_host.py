@@ -11,6 +11,7 @@ from __future__ import annotations
 import errno
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -60,6 +61,7 @@ class Host(Protocol):
     def thread_group_id(self, pid: int) -> int | None: ...
     def procs_hidden(self) -> bool: ...
     def scan_group(self, pgid: int) -> GroupScan: ...
+    def scan_children(self, ppid: int) -> GroupScan: ...
     def pidfd_supported(self) -> bool: ...
     def pidfd_open(self, pid: int) -> int: ...
     def pidfd_pid(self, fd: int) -> int | None: ...
@@ -203,6 +205,13 @@ class LinuxHost(_SignalOps):
         return parse_proc_stat(raw, pid)
 
     def scan_group(self, pgid: int) -> GroupScan:
+        return self._scan(lambda info: info.pgid == pgid)
+
+    def scan_children(self, ppid: int) -> GroupScan:
+        """The processes whose parent is `ppid` (a subreaper's adopted orphans among them)."""
+        return self._scan(lambda info: info.ppid == ppid)
+
+    def _scan(self, wanted: Callable[[ProcInfo], bool]) -> GroupScan:
         members: list[ProcInfo] = []
         unreadable = 0
         try:
@@ -219,7 +228,7 @@ class LinuxHost(_SignalOps):
             except (OSError, ProcParseError):
                 unreadable += 1
                 continue
-            if info is not None and info.pgid == pgid:
+            if info is not None and wanted(info):
                 members.append(info)
         return GroupScan(tuple(members), unreadable)
 
@@ -278,6 +287,10 @@ class DarwinHost(_SignalOps):
             if info is not None and info.pgid == pgid:
                 members.append(info)
         return GroupScan(tuple(members), unreadable)
+
+    def scan_children(self, ppid: int) -> GroupScan:
+        # TODO(#28): subreaper orphans cannot be found on macOS; leftovers probe the group only
+        return GroupScan((), 0)  # macOS: only the process group is probed (interface.md)
 
     def pidfd_supported(self) -> bool:
         return False

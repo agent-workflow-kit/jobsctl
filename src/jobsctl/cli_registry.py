@@ -21,6 +21,7 @@ from pathlib import Path
 
 from jobsctl.actors import default_actor, require_human
 from jobsctl.config import Config
+from jobsctl.errors import JobsctlError
 
 Handler = Callable[["Context"], int]
 _HANDLERS: dict[str, Handler] = {}
@@ -61,6 +62,7 @@ class Context:
     stdin_isatty: bool
     me_name: str  # `me.name` from config, else the OS user name
     explicit_actor: str | None
+    config_error: JobsctlError | None = None  # only `_shim` runs with a config that failed
 
     @property
     def actor(self) -> str:

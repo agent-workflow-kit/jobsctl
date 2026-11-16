@@ -210,6 +210,17 @@ def waitpid(pid: int) -> int:
     return os.waitpid(pid, 0)[1]
 
 
+def reap_if_exited(pid: int) -> bool:
+    """Reap child `pid` (by that exact PID, never "any child") if it has exited; `False` when it
+    is still running or is not our child."""
+    validate_pid(pid)
+    try:
+        done, _ = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        return False
+    return done == pid
+
+
 # --- macOS: libproc and sysctl (unverified on a real Mac; see issue #28) ---------------------
 
 PROC_PIDTBSDINFO = 3
