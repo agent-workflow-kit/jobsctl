@@ -12,10 +12,8 @@ import ctypes
 import errno
 import os
 import select
-import shlex
 import signal
 import subprocess
-import sys
 import textwrap
 from pathlib import Path
 
@@ -234,9 +232,13 @@ def test_a7_dev_null_stdin_is_a_clean_eof() -> None:
 
 
 def test_a7_a_closed_fd_0_breaks_programs() -> None:
-    inner = shlex.join([sys.executable, "-I", "-c", "import sys; print(sys.stdin)"])
-    res = subprocess.run(["/bin/sh", "-c", f"exec 0<&-; {inner}"], capture_output=True, timeout=30)
-    assert res.stdout.strip() == b"None"  # no stdin object at all, instead of an empty one
+    # Not a Python probe: CPython versions differ in how they paper over a closed fd 0.
+    closed = subprocess.run(
+        ["/bin/sh", "-c", "exec 0<&-; exec cat"], capture_output=True, timeout=30
+    )
+    assert closed.returncode != 0 and b"Bad file descriptor" in closed.stderr
+    null = subprocess.run(["cat"], stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+    assert null.returncode == 0 and null.stdout == b""
 
 
 def test_a7_a_terminal_stdin_hands_the_keystrokes_to_the_program() -> None:
