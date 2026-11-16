@@ -46,6 +46,7 @@ testpaths = ["tests"]
 markers = [
   "live: needs real models/hosts/credentials; never run in CI",
   "real_trigger: a start trigger really spawns its detached pass",
+  "allow_any_kill: the test may signal processes it did not start (see tests/kill_guard.py)",
 ]
 addopts = "-m 'not live'"
 

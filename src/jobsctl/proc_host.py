@@ -45,6 +45,9 @@ class ProcInfo:
 class GroupScan:
     members: tuple[ProcInfo, ...]
     unreadable: int  # entries seen but not readable (permission, parse): the scan is incomplete
+    # `unreadable` includes one bump for `hidepid` (other users' processes are invisible), nothing
+    # unreadable that was seen; a caller may discount that one bump (never a real unreadable entry)
+    hidden: bool = False
 
 
 class Libproc(Protocol):
@@ -218,7 +221,8 @@ class LinuxHost(_SignalOps):
             names = [n.name for n in self._root.iterdir()]
         except OSError:
             return GroupScan((), 1)
-        if self.procs_hidden():
+        hidden = self.procs_hidden()
+        if hidden:
             unreadable += 1  # other users' processes are invisible: the scan is incomplete
         for name in names:
             if not (name.isascii() and name.isdecimal()):
@@ -230,7 +234,7 @@ class LinuxHost(_SignalOps):
                 continue
             if info is not None and wanted(info):
                 members.append(info)
-        return GroupScan(tuple(members), unreadable)
+        return GroupScan(tuple(members), unreadable, hidden)
 
     def pidfd_supported(self) -> bool:
         return gateway_proc.pidfd_supported()

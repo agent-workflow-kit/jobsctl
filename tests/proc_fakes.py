@@ -59,13 +59,13 @@ class FakeHost:
         members = tuple(p for p in self.procs.values() if p.pgid == pgid)
         unreadable = sum(1 for pid in self.info_errors if pid not in self.procs)
         unreadable += 1 if self.hidden else 0
-        return GroupScan(members, unreadable)
+        return GroupScan(members, unreadable, self.hidden)
 
     def scan_children(self, ppid: int) -> GroupScan:
         members = tuple(p for p in self.procs.values() if p.ppid == ppid)
         unreadable = sum(1 for pid in self.info_errors if pid not in self.procs)
         unreadable += 1 if self.hidden else 0
-        return GroupScan(members, unreadable)
+        return GroupScan(members, unreadable, self.hidden)
 
     def pidfd_supported(self) -> bool:
         return self.pidfd_ok

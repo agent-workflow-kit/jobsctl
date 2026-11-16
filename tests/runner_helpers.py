@@ -22,9 +22,11 @@ from typing import Any
 from jobsctl.config import Config
 from jobsctl.leases import parse_identity
 from jobsctl.proc_host import default_host
+from jobsctl.proc_identity import check_identity
 from jobsctl.proc_signal import signal_process
 from jobsctl.runner import Runner
 from jobsctl.store_db import OpenMode, Store
+from tests.kill_guard import allow
 from tests.store_helpers import NOW, attempt_values, insert_row, job_values
 
 FAKE_SHIM = textwrap.dedent(
@@ -95,7 +97,8 @@ def kill_recorded_shims() -> None:
             "SELECT shim_identity FROM attempts WHERE shim_identity IS NOT NULL"
         ):
             ident = parse_identity(row["shim_identity"])
-            if ident is not None:
+            if ident is not None and check_identity(host, ident).alive:
+                allow(ident.pid)  # the recorded identity matches the live process
                 signal_process(host, ident, signal.SIGKILL)
 
 

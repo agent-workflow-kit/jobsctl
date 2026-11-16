@@ -26,11 +26,12 @@ from jobsctl.config import Config
 from jobsctl.config_files import load_config
 from jobsctl.leases import identity_text, own_identity, parse_identity
 from jobsctl.proc_host import default_host
-from jobsctl.proc_identity import Identity, identify
+from jobsctl.proc_identity import Identity, check_identity, identify
 from jobsctl.proc_signal import signal_group, signal_process
 from jobsctl.spawn import spawn_internal
 from jobsctl.store_db import OpenMode, Store
 from jobsctl.store_dir import resolve_state_dir
+from tests.kill_guard import allow
 from tests.shim_helpers import CLAIM, JOB, seed_claimed
 
 WAIT = 60
@@ -114,6 +115,7 @@ class RealShims:
         """Record a process a job announced, with its identity now."""
         ident = identify(default_host(), pid)
         self.extras.append(ident)
+        allow(pid)
         return ident
 
     def stop_all(self) -> None:
@@ -128,6 +130,9 @@ class RealShims:
                 ident = parse_identity(row[key]) if row[key] else None
                 if ident is None:
                     continue
+                if not check_identity(host, ident, allow_zombie=True).alive:
+                    continue  # gone or reused: the recorded pid is not ours to signal
+                allow(ident.pid)  # the recorded identity matches the live process
                 if key == "job_identity":
                     signal_group(host, ident, signal.SIGKILL, allow_zombie=True)
                 signal_process(host, ident, signal.SIGKILL, allow_zombie=True)
@@ -151,3 +156,45 @@ def real_shims(tmp_path_factory: pytest.TempPathFactory) -> Iterator[RealShims]:
 
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text())
+
+
+@dataclass
+class JobGuard:
+    """Teardown for jobs an in-process shim started: every job's recorded group (while the
+    leader's identity holds) and every PID a test announced (with the identity it had when it was
+    announced) is killed; nothing else, never by name."""
+
+    extras: list[Identity] = field(default_factory=list)
+
+    def track(self, pid: int) -> Identity:
+        ident = identify(default_host(), pid)
+        self.extras.append(ident)
+        allow(pid)
+        return ident
+
+    def stop_all(self) -> None:
+        host = default_host()
+        try:
+            with Store.open(mode=OpenMode.CLI) as store:
+                rows = store.query_all("SELECT job_identity FROM attempts")
+        except Exception:
+            rows = []
+        for row in rows:
+            ident = parse_identity(row["job_identity"]) if row["job_identity"] else None
+            if ident is not None:
+                if not check_identity(host, ident, allow_zombie=True).alive:
+                    continue  # gone or reused: the recorded pid is not ours to signal
+                allow(ident.pid)  # the recorded identity matches the live process
+                signal_group(host, ident, signal.SIGKILL, allow_zombie=True)
+                signal_process(host, ident, signal.SIGKILL, allow_zombie=True)
+        for ident in self.extras:
+            signal_process(host, ident, signal.SIGKILL)
+
+
+@pytest.fixture
+def job_guard() -> Iterator[JobGuard]:
+    guard = JobGuard()
+    try:
+        yield guard
+    finally:
+        guard.stop_all()
