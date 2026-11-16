@@ -150,7 +150,7 @@ def test_hold_writes_a_post_held_event_in_the_same_transaction(
     assert res.code == 0
     (event,) = outbox()
     assert event["job_id"] == job_id and event["hook"] == "post-held"
-    assert event["delivered_at"] is None and event["async"] == 0
+    assert event["delivered_at"] is not None and event["async"] == 0
     payload = event["payload"]
     validate_against("hooks/post-held.json", payload)
     assert payload["event_id"] == event["event_id"]

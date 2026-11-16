@@ -490,3 +490,74 @@ def test_a_result_file_of_another_claim_is_ignored(rig: Rig) -> None:
     del rig.host.procs[LEADER]
     assert rig.killer().run() == 0
     assert exit_kind(rig) == "unknown"
+
+
+# -- the post-cancel event of the forced end ---------------------------------------------------
+
+
+def test_the_forced_end_delivers_its_post_cancel_after_the_final_commit(
+    rig: Rig, tmp_path: Any
+) -> None:
+    seen = tmp_path / "seen"
+    db = rig.store.paths.root / "state.db"
+    probe = (
+        f"import sqlite3,sys,json; c=sqlite3.connect({str(db)!r}); "
+        "s=c.execute('SELECT status, reason FROM jobs').fetchone(); "
+        f"open({str(seen)!r},'a').write(json.loads(sys.stdin.read())['hook']+' '+' '.join(s)+'\\n')"
+    )
+    cfg = Config.model_validate(
+        {
+            "auto_run": False,
+            "hooks": {"post-cancel": [{"name": "w", "cmd": f'python3 -c "{probe}"'}]},
+        }
+    )
+    del rig.host.procs[LEADER]
+    assert rig.killer(cfg).run() == 0
+    assert ended(rig)[:2] == ("canceled", "forced")
+    assert seen.read_text().split() == ["post-cancel", "canceled", "forced"]  # committed first
+    rows = rig.store.query_all("SELECT delivered_at FROM hook_outbox")
+    assert len(rows) == 1 and rows[0]["delivered_at"] is not None
+    assert lease(rig) is None
+
+
+def test_a_kill_that_gives_up_still_delivers_the_pending_events(rig: Rig, tmp_path: Any) -> None:
+    trace = tmp_path / "trace"
+    cfg = Config.model_validate(
+        {
+            "auto_run": False,
+            "hooks": {"post-cancel": [{"name": "w", "cmd": f"echo ran >> {trace}"}]},
+        }
+    )
+    payload = {
+        "tool": "jobsctl", "hook": "post-cancel", "event_id": f"{JOB}:post-cancel:1",
+        "object_type": "job", "object_id": JOB, "repo": None, "labels": [],
+        "previous_status": "running", "job": {"queue": "q"}, "attempt": None,
+    }  # fmt: skip
+    with rig.store.write() as tx:
+        tx.execute(
+            "INSERT INTO hook_outbox (event_id, job_id, hook, payload, async, created_at) "
+            "VALUES (?, ?, 'post-cancel', ?, 0, 'x')",
+            [payload["event_id"], JOB, json.dumps(payload)],
+        )
+    rig.host.info_errors[LEADER] = PermissionError("hidepid")
+    assert rig.killer(cfg).run() == 1  # gave up: nothing finalized
+    untouched(rig)
+    assert trace.read_text().split() == ["ran"]
+    event = rig.store.query_one("SELECT delivered_at FROM hook_outbox")
+    assert event is not None and event["delivered_at"] is not None
+    assert lease(rig) is None
+
+
+def test_an_unexpected_delivery_error_never_changes_the_kills_outcome(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl.delivery import Deliverer
+
+    def boom(self: Deliverer, *args: Any, **kw: Any) -> bool:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(Deliverer, "deliver_sync", boom)
+    del rig.host.procs[LEADER]
+    assert rig.killer().run() == 0
+    assert ended(rig)[:2] == ("canceled", "forced")
+    assert lease(rig) is None

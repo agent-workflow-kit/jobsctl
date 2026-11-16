@@ -12,7 +12,7 @@ to the group this call created. Nothing is ever signaled by name or pattern.
 
 The caller (``pre-start`` in the shim, the delivery of post hooks) selects hooks, builds the
 payload and the environment, and logs the result; this module knows nothing of jobs or state.
-TODO(#24): outbox delivery and ``async`` hooks call ``run_hook`` per event.
+Outbox delivery and ``async`` hooks (``delivery.py``, ``deliver.py``) call ``run_hook`` per entry.
 TODO(#25): the shim's ``pre-start`` loop applies veto and escalation from ``HookResult``.
 TODO(#28): ``wait_exited_keep`` (``waitid`` with ``WNOWAIT``) is ENOSYS on macOS: ``run_hook`` is
 Linux-only until the macOS port.
@@ -92,6 +92,7 @@ class HookResult:
     signals_sent: tuple[str, ...]  # group signals sent, in order
     unkillable: bool  # the leader outlived SIGKILL: it was left unreaped
     duration: float
+    started: bool = True  # False: ``stop`` answered before the hook process was started
 
     @property
     def vetoes(self) -> bool:
@@ -102,7 +103,7 @@ class HookResult:
         `veto` (also for a timeout, a kill by signal and a hook that could not start), while its
         `hook_ran` outcome stays veto, timeout or failed. A result with ``unkillable`` set (the
         leader outlived SIGKILL and was left unreaped) must be treated as an internal error by
-        the callers (#24, #25), not as a veto."""
+        the callers (``delivery.py`` raises; #25), not as a veto."""
         return (
             self.hook == PRE_START
             and self.stopped is None
@@ -115,9 +116,8 @@ class HookResult:
 
     def log_fields(self, job_id: str) -> dict[str, Any]:
         """The fields of the `hook_ran` log record (`schemas/log.json`), without seq, ts, level.
-
-        TODO(#6): the `hook_ran` writer consumes these fields and ``warnings`` (the
-        `invalid_decision_id` log warnings)."""
+        The `hook_ran` writer (``delivery.Deliverer.record``) consumes these fields and
+        ``warnings`` (the `invalid_decision_id` log warnings)."""
         fields: dict[str, Any] = {
             "event": "hook_ran",
             "job_id": job_id,
@@ -325,7 +325,7 @@ def _noop_mask(text: str) -> str:
 def _stopped_before_start(hook: str, hook_id: str, reason: str) -> HookResult:
     return HookResult(
         hook, hook_id, "failed", None, None, (), (), None, None, False, False, None, reason,
-        None, (), False, 0.0,
+        None, (), False, 0.0, False,
     )  # fmt: skip
 
 
@@ -352,7 +352,7 @@ def run_hook(
     timeout: float,
     env: Mapping[str, str],
     cwd: str | Path,
-    mask: Callable[[str], str] = _noop_mask,  # TODO(#8): the masked-values set
+    mask: Callable[[str], str] = _noop_mask,
     stop: Callable[[], str | None] | None = None,
     host: Host | None = None,
     tuning: HookTuning | None = None,

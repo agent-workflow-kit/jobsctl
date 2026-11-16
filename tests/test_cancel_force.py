@@ -27,6 +27,7 @@ from jobsctl.proc_host import default_host
 from jobsctl.proc_identity import Identity
 from jobsctl.store_dir import resolve_state_dir
 from tests.conftest import validate_against
+from tests.delivery_helpers import ran, recorder
 from tests.helpers import Result, run_cli
 from tests.manual_helpers import (
     HUMAN,
@@ -667,8 +668,8 @@ def test_an_interrupt_after_the_commit_before_the_callback_is_cancel_pending(
     job_id = running_job(capsys)
     real = cancel_cmd._run
 
-    def run_then_interrupt(ctx: Any, targets: list[Any]) -> Any:
-        real(ctx, targets)  # committed
+    def run_then_interrupt(ctx: Any, targets: list[Any], reconciled: list[str]) -> Any:
+        real(ctx, targets, reconciled)  # committed
         targets.clear()  # the interrupt came before the callback filled it
         raise KeyboardInterrupt
 
@@ -794,3 +795,85 @@ def test_a_removed_queue_with_a_null_snapshot_falls_back_to_the_global_kill_grac
     res = run_cli(capsys, "--config", without, "--json", "cancel", job_id, "--force", *HUMAN)
     assert res.code == 0, res.out + res.err
     assert seen == [28]  # 2 x 9 + 10
+
+
+# -- hook delivery of the jobs a forced cancel touches ---------------------------------------------
+
+
+def test_a_failing_wait_still_delivers_the_post_cancel_of_the_plain_cancels(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`--force` takes at most a `--unique-key` selector, so one invocation cannot cancel a
+    queued and a running job today; the delivery must not depend on that: it runs whatever
+    ends the wait (here a timeout raised after the commit)."""
+    from jobsctl.commands import cancel as cancel_cmd
+
+    out = tmp_path / "out"
+    cfg = config_file(tmp_path, hooks={"post-cancel": [{"name": "w", "cmd": recorder(out)}]})
+    queued = add_job(capsys, "--label", "g=1")
+    real = cancel_cmd._run
+
+    def run_with_a_target(ctx: Any, targets: list[Any], reconciled: list[str]) -> Any:
+        result = real(ctx, targets, reconciled)
+        targets.append(object())  # as if a forced cancel of another job had been committed
+        return result
+
+    def timed_out(ctx: Any, done: Any, targets: Any) -> Any:
+        raise cancel_force.cancel_pending("jb-aaaaaaaa", "is still running after 1 seconds")
+
+    monkeypatch.setattr(cancel_cmd, "_run", run_with_a_target)
+    monkeypatch.setattr(cancel_cmd, "_deliver_and_wait", timed_out)
+    res = run_cli(capsys, "--config", cfg, "--json", "cancel", "--label", "g=1", "--all", *HUMAN)
+    error_of(res, 12, "cancel_pending")
+    assert row(queued)["status"] == "canceled"
+    (file,) = ran(out)
+    assert json.loads(file.read_text())["object_id"] == queued
+    assert all(e["delivered_at"] is not None for e in outbox() if e["job_id"] == queued)
+
+
+def test_a_signal_during_the_final_delivery_does_not_replace_the_error_in_flight(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from jobsctl.commands import cancel as cancel_cmd
+    from jobsctl.errors import JobsctlError
+
+    cfg = config_file(tmp_path)
+    add_job(capsys, "--label", "g=1")
+    real = cancel_cmd._run
+
+    def run_with_a_target(ctx: Any, targets: list[Any], reconciled: list[str]) -> Any:
+        result = real(ctx, targets, reconciled)
+        targets.append(object())
+        return result
+
+    def timed_out(ctx: Any, done: Any, targets: Any) -> Any:
+        raise cancel_force.cancel_pending("jb-aaaaaaaa", "is still running after 1 seconds")
+
+    def interrupted(ctx: Any, ids: Any) -> None:
+        raise JobsctlError("interrupted", "interrupted")
+
+    monkeypatch.setattr(cancel_cmd, "_run", run_with_a_target)
+    monkeypatch.setattr(cancel_cmd, "_deliver_and_wait", timed_out)
+    monkeypatch.setattr(cancel_cmd, "deliver_after_commit", interrupted)
+    res = run_cli(capsys, "--config", cfg, "--json", "cancel", "--label", "g=1", "--all", *HUMAN)
+    error_of(res, 12, "cancel_pending")  # not replaced by `interrupted`
+
+
+def test_the_events_a_forced_cancels_reconcile_wrote_are_delivered_by_the_command(
+    capsys: pytest.CaptureFixture[str], procs: list[Any], tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    cfg = config_file(tmp_path, hooks={"post-fail": [{"name": "w", "cmd": recorder(out)}]})
+    job_id = running_job(capsys)
+    bystander, _ = start_fake_shim(procs, tmp_path, job_id, finalize=False)
+    ident = Identity("0000-other-boot", bystander.pid, 1)
+    sql("UPDATE attempts SET shim_identity = ? WHERE job_id = ?", format_identity(ident), job_id)
+    res = run_cli(
+        capsys, "--config", cfg, "--json", "cancel", job_id, "--force", "--wait-timeout", "0",
+        *HUMAN,
+    )  # fmt: skip
+    doc_of(res)
+    assert row(job_id)["reason"] == "lost"  # reconcile (`boot_changed`) ended it
+    (file,) = ran(out)
+    assert json.loads(file.read_text())["hook"] == "post-fail"
+    assert all(e["delivered_at"] is not None for e in outbox())

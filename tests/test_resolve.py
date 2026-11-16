@@ -454,3 +454,20 @@ def test_an_empty_nonblocking_stdin_with_an_open_writer_does_not_crash(
     finally:
         timer.join()
         stream.close()
+
+
+def test_resolve_delivers_its_event_before_it_prints(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    from tests.delivery_helpers import ran, recorder
+
+    out = tmp_path / "out"
+    cfg = config_file(tmp_path, hooks={"post-finish": [{"name": "w", "cmd": recorder(out)}]})
+    job_id = add_job(capsys, config=cfg)
+    make_held(job_id, "exit_13")
+    doc = change(resolve_cli(capsys, job_id, "--as", "done", config=cfg))
+    assert doc["job"]["status"] == "done"
+    (file,) = ran(out)
+    assert f'"{job_id}"' in file.read_text()
+    (event,) = outbox()
+    assert event["delivered_at"] is not None

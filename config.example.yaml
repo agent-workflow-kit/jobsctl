@@ -82,8 +82,9 @@ env_file: null
 # name (optional) is the hook's identity, else cmd; timeout is a duration (default 30s); async
 # and include_output (post hooks only) default to false; at most 8 async hooks run at once, one
 # per job; include_output puts the (untrusted) output tail into the payload; queues null means
-# every queue; labels are key=value pairs that must all match. Hook output is not stored or
-# logged (only a vetoing or escalating pre-start hook's stderr is kept on the attempt).
+# every queue; labels are key=value pairs that must all match. Hook output is not stored: its
+# stderr appears only (masked, sanitized, at most 2 KiB) in the hook_ran log records, and a
+# vetoing or escalating pre-start hook's stderr is also kept on the attempt.
 hooks: {}
 # hooks:
 #   pre-start:

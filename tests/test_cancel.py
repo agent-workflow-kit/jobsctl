@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from jobsctl.store_dir import resolve_state_dir
 from tests.conftest import validate_against
+from tests.delivery_helpers import open_store, ran, recorder
 from tests.helpers import Result, run_cli
 from tests.manual_helpers import (
     HUMAN,
@@ -428,3 +433,79 @@ def test_the_clock_is_read_after_the_write_lock_is_held(
     monkeypatch.setattr(gateway, "utc_now", spy_now)
     one(cancel(capsys, job_id))
     assert events[:2] == ["locked", "now"]
+
+
+# -- delivery of the post-cancel events ------------------------------------------------------------
+
+
+def _hooked(tmp_path: Path) -> tuple[str, Path]:
+    out = tmp_path / "out"
+    cfg = config_file(tmp_path, hooks={"post-cancel": [{"name": "w", "cmd": recorder(out)}]})
+    return cfg, out
+
+
+def _delivered(job_id: str) -> bool:
+    events = [e for e in outbox() if e["job_id"] == job_id]
+    return bool(events) and all(e["delivered_at"] is not None for e in events)
+
+
+@pytest.mark.parametrize("state", ["queued", "starting"])
+def test_cancel_delivers_the_post_cancel_before_it_returns(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, state: str
+) -> None:
+    cfg, out = _hooked(tmp_path)
+    job_id = add_job(capsys, config=cfg)
+    if state == "starting":
+        make_starting(job_id)
+    res = run_cli(capsys, "--config", cfg, "--json", "cancel", job_id)
+    assert done(res)["jobs"][0]["status"] == "canceled"
+    (file,) = ran(out)
+    assert json.loads(file.read_text())["hook"] == "post-cancel"
+    assert _delivered(job_id)
+
+
+def test_cancel_leaves_the_events_to_a_live_lease_holder(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    from jobsctl import gateway
+    from jobsctl.leases import expiry, identity_text
+    from jobsctl.proc_host import default_host
+
+    cfg, out = _hooked(tmp_path)
+    job_id = add_job(capsys, config=cfg)
+    make_starting(job_id)
+    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        with open_store() as store, store.write() as tx:
+            tx.execute(
+                "INSERT INTO leases (name, holder_identity, expires_at) VALUES (?, ?, ?)",
+                [
+                    f"job:{job_id}",
+                    identity_text(default_host(), holder.pid),
+                    expiry(gateway.utc_now()),
+                ],
+            )
+        assert done(run_cli(capsys, "--config", cfg, "--json", "cancel", job_id))["changed"]
+    finally:
+        holder.kill()
+        holder.wait(timeout=10)
+    assert ran(out) == [] and not _delivered(job_id)  # the holder (the shim) delivers it
+
+
+def test_cancel_all_delivers_every_changed_jobs_post_cancel(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    cfg, out = _hooked(tmp_path)
+    queued = add_job(capsys, "--label", "a=1", config=cfg)
+    starting = add_job(capsys, "--label", "a=1", config=cfg)
+    make_starting(starting)
+    held = add_job(capsys, "--label", "a=1", config=cfg)
+    make_held(held, "manual")
+    running = add_job(capsys, "--label", "a=1", config=cfg)
+    make_running(running)
+    res = run_cli(capsys, "--config", cfg, "--json", "cancel", "--label", "a=1", "--all")
+    doc = done(res)
+    assert [r["job_id"] for r in doc["refused"]] == [running]
+    assert len(ran(out)) == 3
+    assert all(_delivered(j) for j in (queued, starting, held))
+    assert not any(e["job_id"] == running for e in outbox())

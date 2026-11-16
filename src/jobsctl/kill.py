@@ -2,8 +2,8 @@
 sequence; design.md D38).
 
 `_kill` is not the job's parent. It takes the `job:<id>` lease and proceeds only if the job is
-still `running` with a committed force request and its shim is proven dead; otherwise it exits
-(the pending events are delivered here once `_deliver` exists). The whole of it:
+still `running` with a committed force request and its shim is proven dead; otherwise it only
+delivers the job's pending events (under the lease) and exits. The whole of it:
 
 1. take the lease (a live holder: a shim, another `_kill`, a delivering command, so exit);
 2. re-read the attempt under the lease; a result file the dead shim left for it is the exit
@@ -37,6 +37,7 @@ from typing import Any
 from jobsctl import gateway
 from jobsctl.claims import LogRecord
 from jobsctl.config import Config
+from jobsctl.delivery import Deliverer
 from jobsctl.errors import JobsctlError
 from jobsctl.job_view import effective_settings
 from jobsctl.leases import RENEW_SECONDS, expiry, liveness_probe, own_identity, parse_identity
@@ -53,7 +54,7 @@ from jobsctl.shim_store import finish_running
 from jobsctl.store_db import Store
 from jobsctl.store_ops import lease_release, lease_renew, take_lease
 from jobsctl.timestamps import format_timestamp
-from jobsctl.triggers import request_pass
+from jobsctl.triggers import request_delivery_quietly, request_pass
 
 POLL_SECONDS = 0.1
 CHECK_SECONDS = 1.0  # the attempt and the leader's identity are looked at this often
@@ -193,6 +194,37 @@ class Killer:
             self._diag(f"the job lease was not released ({type(exc).__name__}); it will expire")
         self._held = False
 
+    # -- delivery ------------------------------------------------------------------------------
+
+    def _deliver_events(self) -> None:
+        """Deliver this job's undelivered synchronous events under the lease and request delivery
+        for its `async` ones. Never raises: SIGTERM or a lost lease just stops it."""
+        if not self._held:
+            return
+
+        def tick() -> None:
+            try:
+                self._tick()
+            except GaveUp:
+                pass  # `_held` is False now: the delivery stops
+
+        try:
+            deliverer = Deliverer(
+                self.store, self.config, clock=self.clock, host=self.host, diag=self._diag
+            )
+            deliverer.deliver_sync(
+                self.job_id,
+                stop=lambda: "SIGTERM" if self.stop.is_set else None,
+                held=lambda: self._held,
+                tick=tick,
+            )
+            if deliverer.has_pending(self.job_id, is_async=True):
+                request_delivery_quietly(
+                    self.store, self.config, self.config_path, host=self.host, warn=False
+                )
+        except Exception as exc:  # never blocks the final transition (SIGINT etc. still propagate)
+            self._diag(f"hook delivery failed ({type(exc).__name__})")
+
     # -- reading the attempt -------------------------------------------------------------------
 
     def _read(self) -> Target | None:
@@ -243,12 +275,16 @@ class Killer:
             self._diag("another live process holds the job lease; nothing to do")
             return 0
         try:
-            return self._with_lease()
+            code = self._with_lease()
+            self._deliver_events()  # the `post-cancel` it wrote, or events a dead holder left
+            return code
         except AlreadyHandled as why:
             self._diag(f"{why}; nothing to do")
+            self._deliver_events()
             return 0
         except GaveUp as why:
             self._diag(f"{why}; nothing finalized")
+            self._deliver_events()  # the lease may still be held: pending events are delivered
             return 1
         finally:
             self._release_lease()
@@ -256,7 +292,6 @@ class Killer:
     def _with_lease(self) -> int:
         target = self._read()
         if target is None or not self._shim_is_gone(target):
-            # TODO(#24): deliver this job's undelivered events (under the lease), then exit.
             return 0
         saved = self._from_result_file(target)
         if saved is not None:
@@ -427,7 +462,6 @@ class Killer:
             request_pass(self.store, self.config, self.config_path, host=self.host)
         except (JobsctlError, sqlite3.Error, OSError) as exc:
             self._diag(f"could not request a pass ({type(exc).__name__})")
-        # TODO(#24): deliver this job's undelivered events, the post-cancel hook included.
 
     def _retrying(self, action: Callable[[], Any]) -> Any:
         """The final transaction is retried with backoff for up to 10 minutes (the lease is kept

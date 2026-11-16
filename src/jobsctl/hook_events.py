@@ -2,12 +2,12 @@
 
 A transition and its post hook event are committed in one transaction. This module builds the
 payload (`schemas/hooks/payload.json`) and inserts the event; running the hook is delivery
-(TODO(#24)). Up to two events are written per transition and hook name: one when at least
+(`delivery.py`). Up to two events are written per transition and hook name: one when at least
 one synchronous entry of that hook selects the job (`async` 0) and one when at least one `async`
 entry does (`async` 1); each has its own event id (`queues`, `exclude_queues`, `labels`,
 evaluated at transition time against the job as it is after the transition). The `output_tail`
 is always `null` here: whether a hook opts into the tail (`include_output`) is decided per entry
-at delivery, which reads the stored tail then (TODO(#24))."""
+at delivery, which reads the stored tail then."""
 
 from __future__ import annotations
 

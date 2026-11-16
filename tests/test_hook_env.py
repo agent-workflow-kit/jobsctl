@@ -4,12 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from jobsctl.config import Config
-from jobsctl.hook_env import (
-    build_hook_env,
-    env_file_name_ignored,
-    provisional_canonical_environment,
-)
+from jobsctl.hook_env import build_hook_env, env_file_name_ignored
 
 BASE = {"PATH": "/usr/bin", "HOME": "/h", "LANG": "C"}
 
@@ -95,24 +90,3 @@ def test_invalid_names_and_nul_values_are_dropped() -> None:
     )
     assert env["GOOD"] == "fine"
     assert set(env) == {"GOOD", "JOBSCTL_HOOK", "JOBSCTL_ID", "JOBSCTL_OBJECT_TYPE"}
-
-
-def test_provisional_canonical_environment_inherits_by_name_and_pattern() -> None:
-    environ = {
-        "PATH": "/bin",
-        "LC_ALL": "C",
-        "LCX": "no",
-        "SECRET_TOKEN": "s",
-        "JOBSCTL_X": "1",
-        "TMPDIR": "/t",
-        "XDG_RUNTIME_DIR": "/r",
-        "XDG_SESSION_ID": "9",
-    }
-    got = provisional_canonical_environment(Config(), environ)
-    assert got == {"PATH": "/bin", "LC_ALL": "C", "TMPDIR": "/t", "XDG_RUNTIME_DIR": "/r"}
-
-
-def test_provisional_canonical_environment_honors_configured_inherit() -> None:
-    config = Config.model_validate({"env": {"inherit": ["SECRET_*"]}})
-    got = provisional_canonical_environment(config, {"SECRET_A": "1", "PATH": "/bin"})
-    assert got == {"SECRET_A": "1"}
