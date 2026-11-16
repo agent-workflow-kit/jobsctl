@@ -112,7 +112,7 @@ def test_env_name_never_echoes_a_value() -> None:
 def test_cwd_rejects_a_newline() -> None:
     with pytest.raises(argparse.ArgumentTypeError):
         cwd("/a\nb")
-    assert cwd("/a/../b") == "/b"
+    assert cwd("/a/../b") == "/a/../b"  # normalized later, by add
 
 
 def test_timestamp_format_has_millis_and_z() -> None:
@@ -172,10 +172,10 @@ def test_parse_timestamp_rejects(text: str) -> None:
 @pytest.mark.parametrize(
     ("text", "message"),
     [
-        ("ab", "invalid label 'ab': expected key=value"),
-        ("A=b", "invalid label key 'A': use [a-z0-9][a-z0-9_.-]{0,63}"),
-        ("=b", "invalid label key '': use [a-z0-9][a-z0-9_.-]{0,63}"),
-        ("a=b c", "invalid label value for 'a': 0 to 256 characters from [A-Za-z0-9._:/#@+=,-]"),
+        ("ab", "invalid label: expected key=value"),
+        ("A=b", "invalid label key: use [a-z0-9][a-z0-9_.-]{0,63}"),
+        ("=b", "invalid label key: use [a-z0-9][a-z0-9_.-]{0,63}"),
+        ("a=b c", "invalid label value: 0 to 256 characters from [A-Za-z0-9._:/#@+=,-]"),
     ],
 )
 def test_label_pair_messages(text: str, message: str) -> None:
@@ -188,10 +188,10 @@ def test_label_pair_splits_at_the_first_equals() -> None:
     assert label_pair("a=b=c") == ("a", "b=c")
 
 
-def test_job_id_message_cuts_at_equals() -> None:
+def test_job_id_message_does_not_echo_the_input() -> None:
     with pytest.raises(argparse.ArgumentTypeError) as exc:
         job_id("abcd=S3CRET")
-    assert "'abcd=...'" in str(exc.value) and "S3CRET" not in str(exc.value)
+    assert "abcd" not in str(exc.value) and "S3CRET" not in str(exc.value)
 
 
 @pytest.mark.parametrize("pad", [17, 18, 30, 5000])

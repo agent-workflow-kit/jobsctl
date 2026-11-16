@@ -322,7 +322,9 @@ def async_events(
     ids = []
     for _ in range(n):
         job_id = add_job(capsys, config=cfg)
-        assert hold(capsys, cfg, job_id).code == 0
+        with pytest.MonkeyPatch.context() as mp:  # no detached `_deliver` racing the test's own run
+            mp.setattr("jobsctl.triggers.spawn_internal", lambda *args, **kwargs: None)
+            assert hold(capsys, cfg, job_id).code == 0
         ids.append(job_id)
         first = outbox()[-1]
         for k in range(per_job - 1):

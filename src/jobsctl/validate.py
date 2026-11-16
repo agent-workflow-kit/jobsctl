@@ -2,7 +2,7 @@
 environment, Commands).
 
 Each validator returns the value or raises `GrammarError`, whose message states the rule and
-never includes the input (callers echo through `textsafe.echo` if they must). Every pattern is
+never includes the input (parse-time callers never echo it). Every pattern is
 matched with `fullmatch` and explicit ASCII classes, so a trailing newline, a Unicode digit or
 lookalike, or a NUL never passes.
 """

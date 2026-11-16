@@ -151,6 +151,24 @@ def test_many_cancels_of_one_job_commit_exactly_once(
     assert len(outbox()) == 1 and len(log_records("transition")) == 1
 
 
+def chain(records: list[dict[str, Any]], start: str = "queued") -> list[tuple[str, str]]:
+    """The job's transitions in commit order, rebuilt from their `from`/`to` links.
+
+    Log lines are appended after each commit, so racing processes can write them in a different
+    order than they committed: the file order says nothing, the links do.
+    """
+    remaining = [(r["from"], r["to"]) for r in records]
+    ordered: list[tuple[str, str]] = []
+    state = start
+    while remaining:
+        step = next((t for t in remaining if t[0] == state), None)
+        assert step is not None, f"no transition leaves {state!r}: {remaining}"
+        remaining.remove(step)
+        ordered.append(step)
+        state = step[1]
+    return ordered
+
+
 def test_hold_and_cancel_racing_end_in_a_state_the_table_allows(
     capsys: pytest.CaptureFixture[str], pool: Pool, config: str
 ) -> None:
@@ -161,7 +179,7 @@ def test_hold_and_cancel_racing_end_in_a_state_the_table_allows(
     hold_result, cancel_result = holder.result(), canceler.result()
     assert cancel_result["exit"] == 0 and changed(cancel_result)
     assert row(job_id)["status"] == "canceled"
-    transitions = [(r["from"], r["to"]) for r in log_records("transition")]
+    transitions = chain(log_records("transition"))
     if hold_result["exit"] == 0 and changed(hold_result):  # hold first, then cancel of held
         assert transitions == [("queued", "held"), ("held", "canceled")]
         assert [a["action"] for a in audit_records()] == ["cancel_held"]
@@ -182,13 +200,12 @@ def test_hold_and_release_racing_leave_a_consistent_job(
         assert w.result()["exit"] in (0, 20)  # release of a not yet held job is a queued no-op
     for job_id in ids:
         assert row(job_id)["status"] in ("queued", "held")
-    # every logged transition chains: each starts where the previous one ended
-    last: dict[str, str] = {}
-    for record in log_records("transition"):
-        assert record["from"] == last.get(record["job_id"], "queued")
-        last[record["job_id"]] = record["to"]
+    # each job's logged transitions chain from `queued` and end at the stored status, whatever
+    # order the lines reached the log file in
+    records = log_records("transition")
     for job_id in ids:
-        assert last.get(job_id, "queued") == row(job_id)["status"]
+        links = chain([r for r in records if r["job_id"] == job_id])
+        assert (links[-1][1] if links else "queued") == row(job_id)["status"]
 
 
 def test_cancel_all_racing_a_new_claim_never_skips_or_double_cancels(

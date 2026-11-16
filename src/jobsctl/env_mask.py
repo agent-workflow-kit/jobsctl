@@ -43,7 +43,7 @@ class MaskingSet:
         return max((len(v.encode("utf-8", "replace")) for v in self.values), default=0)
 
     def contains_secret(self, text: str) -> bool:
-        """Whether `text` contains a masked value (`add`'s `secret_in_argv`/`secret_in_env`)."""
+        """Whether `text` contains a masked value (every one of `add`'s `secret_in_*` refusals)."""
         return self._pattern is not None and self._pattern.search(text) is not None
 
     def spans(self, text: str) -> list[tuple[int, int]]:
@@ -174,7 +174,7 @@ def _build(chosen: set[str], warnings: tuple[EnvWarning, ...] = ()) -> MaskingSe
     # automaton would be linear.
     pattern = re.compile(trie) if ordered else None
     overlap = re.compile("(?=(" + trie + "))") if ordered else None
-    return MaskingSet(ordered, tuple(warnings), pattern, overlap)
+    return MaskingSet(ordered, warnings, pattern, overlap)
 
 
 def masking_set_of(values: Iterable[str]) -> MaskingSet:
