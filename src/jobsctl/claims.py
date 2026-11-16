@@ -130,7 +130,7 @@ def claim_jobs(
             expect_status="queued",
             expect_attempt=number - 1,
             to_status="starting",
-            updates={"attempt": number, "status_changed_at": now},
+            updates={"attempt": number, "status_changed_at": now, "not_before": None},
         )
         if not won:  # unreachable inside BEGIN IMMEDIATE; the compare-and-set is the guard
             snapshot = _with_claim(snapshot, chosen.queue, chosen.job_id)

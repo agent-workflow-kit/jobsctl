@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from jobsctl.auto_retry import plan_requeue
 from jobsctl.claims import LogRecord, transition_record
 from jobsctl.config import Config
 from jobsctl.hook_events import write_post_event
@@ -131,19 +133,22 @@ def fail_starting(
     resolved_path: str | None = None,
 ) -> tuple[bool, list[LogRecord]]:
     """`starting` -> `failed` with `reason` (`cwd_missing`, `missing_env`, `spawn_failed`,
-    `terminated`) and its `post-fail` event, in the caller's transaction.
-
-    TODO(#18): these failures are eligible for automatic retry (`missing_env`, `spawn_failed`,
-    `terminated`): the job would return to `queued` with `not_before` instead.
+    `terminated`) and its `post-fail` event, in the caller's transaction. `missing_env`,
+    `spawn_failed` and `terminated` are eligible for automatic retry: the job then returns to
+    `queued` with `not_before` instead (`auto_retry.plan_requeue`); the attempt is `failed` either
+    way.
     """
     job_id = str(view.row["id"])
+    plan = plan_requeue(tx, config, job_id, claim_id, reason=reason, now=now)
     won = transition_job_by_claim(
         tx,
         job_id,
         claim_id=claim_id,
         expect_status="starting",
-        to_status="failed",
-        updates={"reason": reason, "ended_at": now, "status_changed_at": now},
+        to_status="failed" if plan is None else "queued",
+        updates={"reason": reason, "ended_at": now, "status_changed_at": now, "not_before": None}
+        if plan is None
+        else plan,
     )
     if not won:
         return False, []
@@ -158,12 +163,12 @@ def fail_starting(
             job_id,
             view.queue,
             "starting",
-            "failed",
+            "failed" if plan is None else "queued",
             view.attempt,
-            reason=reason,
+            reason=reason if plan is None else None,
             attempt_status="failed",
             attempt_reason=reason,
-            retry_pending=False,
+            retry_pending=plan is not None,
         )
     ]
 
@@ -244,24 +249,31 @@ def finish_running(
     exit_record: ExitRecord,
     leftovers: int | None,
     tail: TailSnapshot,
-    now: str,
+    clock: Callable[[], str],
 ) -> FinalResult:
     """Start sequence step 9, the final transaction: the transition, the final tail and the hook
     events in one commit. It reads `force_requested_by`: a committed force request makes the end
     `canceled` (`forced`) whatever the exit (interface.md, Status transitions).
 
     `outcome` is what the shim decided: the exit's natural outcome, or `timeout` / `terminated` when
-    its signal sequence ran. The force request read here overrides it.
-    TODO(#18): a retryable failure returns the job to `queued` with `not_before`.
+    its signal sequence ran. The force request read here overrides it. A failed attempt that
+    automatic retry applies to (`auto_retry.plan_requeue`) returns the job to `queued` with
+    `not_before` instead of ending it; the attempt is `failed` either way.
     """
     with store.write() as tx:
+        now = clock()  # read inside the transaction, after the write lock is held
         view = read_claim_in(tx, job_id, claim_id)
         if view is None or view.status != "running":
             return FinalResult(False, None)
         if view.force_requested_by is not None:
             outcome = forced_outcome()
-        job_updates: dict[str, Any] = {"status_changed_at": now}
-        if outcome.terminal:
+        plan = None
+        if outcome.status == "failed" and outcome.reason is not None:
+            plan = plan_requeue(tx, config, job_id, claim_id, reason=outcome.reason, now=now)
+        job_updates: dict[str, Any] = {"status_changed_at": now, "not_before": None}
+        if plan is not None:
+            job_updates = plan
+        elif outcome.terminal:
             job_updates.update(reason=outcome.reason, ended_at=now)
         else:
             job_updates.update(hold_reason=outcome.hold_reason)
@@ -270,7 +282,7 @@ def finish_running(
             job_id,
             claim_id=claim_id,
             expect_status="running",
-            to_status=outcome.status,
+            to_status=outcome.status if plan is None else "queued",
             updates=job_updates,
         )
         if not won:
@@ -294,12 +306,12 @@ def finish_running(
             job_id,
             view.queue,
             "running",
-            outcome.status,
+            outcome.status if plan is None else "queued",
             view.attempt,
-            reason=outcome.reason,
+            reason=outcome.reason if plan is None else None,
             hold_reason=outcome.hold_reason,
             attempt_status=outcome.status,
             attempt_reason=outcome.reason,
-            retry_pending=False,
+            retry_pending=plan is not None,
         )
         return FinalResult(True, outcome, (record,))

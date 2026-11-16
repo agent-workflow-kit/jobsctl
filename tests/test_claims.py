@@ -271,3 +271,10 @@ def test_a_claim_that_moved_on_is_not_orphaned(store: Store) -> None:
         tx.execute("UPDATE jobs SET status = 'running' WHERE id = ?", [job_id])
         assert requeue_orphaned(tx, job_id, c.claim_id, now=LATER)[0] is False
         assert requeue_orphaned(tx, job_id, "other", now=LATER)[0] is False
+
+
+def test_a_claim_clears_not_before(store: Store) -> None:
+    (job_id,) = job_ids(1)
+    add_queued(store, job_id, not_before=NOW)
+    claim(store, config())
+    assert job_row(store, job_id)["not_before"] is None
