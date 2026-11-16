@@ -17,12 +17,14 @@ import pytest
 
 pytest.importorskip("textual")  # the unconditional tests are in test_browse_cli.py
 
+from textual.binding import Binding  # noqa: E402
 from textual.pilot import Pilot  # noqa: E402
 from textual.widgets import DataTable  # noqa: E402
 
 from jobsctl import gateway  # noqa: E402
 from jobsctl.timestamps import format_timestamp  # noqa: E402
-from jobsctl.tui import actions, app as tui_app  # noqa: E402
+from jobsctl.tui import actions  # noqa: E402
+from jobsctl.tui import app as tui_app
 from jobsctl.tui.app import BrowseApp, BrowseResult  # noqa: E402
 from tests.browse_helpers import (  # noqa: E402
     add_quiet,
@@ -44,8 +46,6 @@ from tests.manual_helpers import (  # noqa: E402
     sql,
     table_dump,
 )
-
-NOW = "2099-01-01T00:00:00.000Z"
 
 
 def fresh(job_id: str) -> None:
@@ -102,7 +102,9 @@ def test_moving_to_another_queue_lists_its_jobs(
     assert seen == [[other]]
 
 
-def test_the_detail_pane_shows_attempts_and_the_live_tail(capsys: pytest.CaptureFixture[str]) -> None:
+def test_the_detail_pane_shows_attempts_and_the_live_tail(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     job_id = add_job(capsys)
     make_running(job_id)
     sql(
@@ -163,7 +165,9 @@ def test_viewing_and_refreshing_writes_nothing(three: list[str]) -> None:
     before = table_dump()
 
     async def script(app: BrowseApp, pilot: Pilot[BrowseResult]) -> None:
-        await press(pilot, "r", "j", "k", "tab", "tab", "slash", "escape", "question_mark", "escape")
+        await press(
+            pilot, "r", "j", "k", "tab", "tab", "slash", "escape", "question_mark", "escape"
+        )
 
     drive(script)
     assert table_dump() == before
@@ -171,7 +175,10 @@ def test_viewing_and_refreshing_writes_nothing(three: list[str]) -> None:
 
 # -- hostile data --------------------------------------------------------------------------
 
-HOSTILE = "[bold red]X[/] [link=https://evil.example]L[/link] \x1b[31mred\x1b]0;title\x07 \x9b2J ‮RTL⁦ :smile:"
+HOSTILE = (
+    "[bold red]X[/] [link=https://evil.example]L[/link] \x1b[31mred\x1b]0;title\x07 \x9b2J "
+    "\u202eRTL\u2066 :smile:"
+)
 
 
 def test_stored_text_is_sanitized_and_never_read_as_markup(
@@ -180,7 +187,13 @@ def test_stored_text_is_sanitized_and_never_read_as_markup(
     job_id = add_job(capsys, "--queue", "q1")
     make_running(job_id)
     sql("UPDATE jobs SET argv = ?, queue = ? WHERE id = ?", json.dumps([HOSTILE]), HOSTILE, job_id)
-    sql("UPDATE jobs SET reason = ?, note = ?, actor = ? WHERE id = ?", HOSTILE, HOSTILE, HOSTILE, job_id)
+    sql(
+        "UPDATE jobs SET reason = ?, note = ?, actor = ? WHERE id = ?",
+        HOSTILE,
+        HOSTILE,
+        HOSTILE,
+        job_id,
+    )
     sql(
         "INSERT INTO outputs (job_id, n, tail, updated_at) VALUES (?, 1, ?, ?)",
         job_id,
@@ -205,7 +218,7 @@ def test_stored_text_is_sanitized_and_never_read_as_markup(
     assert "[bold red]X[/]" in text and "[link=https://evil.example]L[/link]" in text
     assert ":smile:" in text
     # ... and control characters, escape sequences and bidi controls are gone or escaped
-    assert not any(ch in text for ch in "\x1b\x07\x9b‮⁦")
+    assert not any(ch in text for ch in "\x1b\x07\x9b\u202e\u2066")
     assert "\\u202e" in text and "\\u2066" in text
     assert "output:" in text  # the tail itself is shown
     assert "rewritten" in text and "line\rrewritten" not in text
@@ -215,7 +228,11 @@ def test_markup_text_is_not_styled_in_the_rendered_screen(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     job_id = add_job(capsys)
-    sql("UPDATE jobs SET argv = ? WHERE id = ?", json.dumps(["[link=https://evil.example]L[/]"]), job_id)
+    sql(
+        "UPDATE jobs SET argv = ? WHERE id = ?",
+        json.dumps(["[link=https://evil.example]L[/]"]),
+        job_id,
+    )
     svg: list[str] = []
 
     async def script(app: BrowseApp, pilot: Pilot[BrowseResult]) -> None:
@@ -558,7 +575,10 @@ def test_the_timer_refreshes_without_a_key(capsys: pytest.CaptureFixture[str]) -
 
     async def script(app: BrowseApp, pilot: Pilot[BrowseResult]) -> None:
         second = add_quiet()
-        await pilot.pause(0.6)
+        for _ in range(100):  # bounded: 10 s at most
+            await pilot.pause(0.1)
+            if second in job_ids(app):
+                break
         seen.append(job_ids(app))
         assert second in seen[0]
 
@@ -567,7 +587,7 @@ def test_the_timer_refreshes_without_a_key(capsys: pytest.CaptureFixture[str]) -
 
 
 def test_the_module_binds_every_key_of_the_spec() -> None:
-    keys = {b.key for b in tui_app.BrowseApp.BINDINGS if hasattr(b, "key")}
+    keys = {b.key for b in tui_app.BrowseApp.BINDINGS if isinstance(b, Binding)}
     wanted = {"j", "k", "K", "J", "t", "b", "p", "plus", "minus", "h", "e", "v", "c", "R", "r"}
     assert wanted <= keys and {"slash", "question_mark", "q"} <= keys
     assert DataTable  # the arrow keys are the table's own bindings

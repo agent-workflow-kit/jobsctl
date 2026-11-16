@@ -21,7 +21,7 @@ This README is a guide. The normative rules, exact JSON shapes and every edge ca
 
 ## Status
 
-Implemented and released (see [CHANGELOG.md](CHANGELOG.md)) except the `browse` TUI ([#29](https://github.com/agent-workflow-kit/jobsctl/issues/29)) and macOS support ([#28](https://github.com/agent-workflow-kit/jobsctl/issues/28)). Today `jobsctl browse` exits 1 with `browse: not implemented yet`; the `tui` extra does not exist yet. Everything the TUI would do is available as a CLI command.
+Implemented and released (see [CHANGELOG.md](CHANGELOG.md)) except macOS support ([#28](https://github.com/agent-workflow-kit/jobsctl/issues/28)). `jobsctl browse` (the TUI) needs the optional `tui` extra; everything it does is also available as a CLI command.
 
 Platforms: Linux and WSL (Python 3.12 or newer, SQLite 3.35 or newer). macOS is best-effort and not yet verified. Details: [Platform notes](docs/interface.md#platform-notes).
 
@@ -31,7 +31,9 @@ Platforms: Linux and WSL (Python 3.12 or newer, SQLite 3.35 or newer). macOS is 
 uv tool install git+https://github.com/agent-workflow-kit/jobsctl
 ```
 
-For development, clone the repository and run `uv sync`, then `uv run jobsctl ...`.
+For the `browse` TUI, install the optional extra: `uv tool install 'jobsctl[tui] @ git+https://github.com/agent-workflow-kit/jobsctl'`. Without it `jobsctl browse` exits 2 (`tui_missing`) and prints that hint.
+
+For development, clone the repository and run `uv sync` (it installs the extra too), then `uv run jobsctl ...`.
 
 ## Quick start
 
@@ -168,7 +170,7 @@ The same table applies to every command; `wait` adds the job outcomes (Details: 
 |---|---|
 | 0 | success, including no-ops, `already_running`, and `add` on a held unique key |
 | 1 | internal error, or database busy |
-| 2 | usage error, invalid config, `browse` without the TUI extra (`tui_missing`; until [#29](https://github.com/agent-workflow-kit/jobsctl/issues/29) lands, `browse` exits 1) |
+| 2 | usage error, invalid config, `browse` without the TUI extra (`tui_missing`) or without a terminal |
 | 10 | not found, or unknown queue (only with `strict_queues`) |
 | 12 | `wait`: job failed; `cancel --force`: still pending; `wait`/`add --wait`/`cancel`: `version_skew` |
 | 13 | needs a human (`cancel --force`, `release --override-escalation`); `wait`: job held |
@@ -458,7 +460,7 @@ Never run `cron install` against your real crontab to experiment; use `cron inst
 
 ## Layer and dependencies
 
-L1 (primitive), fully standalone; it does not interpret what jobs do and knows nothing about its callers. Python packages: `pyyaml` and `pydantic`; `textual` only in the future `tui` extra. Platform and requirement notes: [Platform notes](docs/interface.md#platform-notes).
+L1 (primitive), fully standalone; it does not interpret what jobs do and knows nothing about its callers. Python packages: `pyyaml` and `pydantic`; `textual` only in the optional `tui` extra. Platform and requirement notes: [Platform notes](docs/interface.md#platform-notes).
 
 ## Documentation
 

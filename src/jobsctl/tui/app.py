@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Final
 
 from rich.text import Text
-from textual.app import App, ComposeResult, ScreenStackError
+from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
@@ -277,9 +277,7 @@ class BrowseApp(App[BrowseResult]):
                 return
             self._store.raise_if_newer()
             s = self._state
-            data = model.load(
-                self._store, self._config, queue=s.queue, job_id=s.job, focus=s.focus
-            )
+            data = model.load(self._store, self._config, queue=s.queue, job_id=s.job, focus=s.focus)
         except JobsctlError as err:
             if err.code == "version_skew":
                 self._finish(BrowseResult(error=err))
@@ -554,6 +552,3 @@ class BrowseApp(App[BrowseResult]):
                 self._run(actions.resolve(job.id, status, path))
 
         self.push_screen(ResolveScreen(), answered)
-
-
-__all__ = ["BrowseApp", "BrowseResult", "ScreenStackError"]
