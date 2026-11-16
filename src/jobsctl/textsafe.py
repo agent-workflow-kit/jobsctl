@@ -76,8 +76,9 @@ def _escape_char(ch: str) -> str:
     return ch
 
 
-def remove_escapes(text: str) -> str:
-    """``text`` without terminal escape sequences (the first step of :func:`sanitize`)."""
+def remove_escape_sequences(text: str) -> str:
+    """``text`` without terminal escape sequences and nothing else changed (``\\r`` rewrites are
+    kept; compare :func:`strip_escapes`)."""
     return _ESCAPES.sub("", text)
 
 
@@ -116,17 +117,6 @@ def echo(value: str, limit: int = 80) -> str:
     """An input quoted back in a message: sanitized inline and cut to `limit` characters."""
     clean = sanitize(value, inline=True)
     return clean if len(clean) <= limit else clean[:limit] + "..."
-
-
-def echo_input(text: str, limit: int = 80) -> str:
-    """A user input echoed in a message: cut at the first `=` (shown as `=...`), then `echo`.
-
-    A mistyped `--env` flag can push `NAME=secret` into any argument, so what follows an `=` is
-    never echoed; only `unique_key` and label values legitimately contain `=`, and losing their
-    tail is harmless.
-    """
-    name, eq, _ = text.partition("=")
-    return echo(name, limit) + ("=..." if eq else "")
 
 
 def strip_escapes(text: str) -> str:

@@ -643,7 +643,7 @@ def test_ctrl_c_during_the_wait_keeps_the_request_and_reports_it(
     assert attempt_row(job_id)["force_requested_by"] == "human:kim"
     assert row(job_id)["status"] == "running" and len(audit_records()) == 1
     assert signal.getsignal(signal.SIGINT) is before  # handlers restored
-    assert lines(log) == ["human:kim"]
+    assert wait_lines(log, 1) == ["human:kim"]
 
 
 def test_an_interrupt_before_the_commit_is_not_reported_as_a_request(
