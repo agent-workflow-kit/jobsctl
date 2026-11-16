@@ -199,12 +199,7 @@ def test_hostile_argv_round_trips(capsys: pytest.CaptureFixture[str]) -> None:
     assert stored == list(argv)  # stored losslessly, the lone surrogate included
 
 
-def test_wait_is_refused_until_wait_exists(capsys: pytest.CaptureFixture[str]) -> None:
-    res = add(capsys, "--wait")
-    assert res.code == 1 and not (resolve_state_dir() / "state.db").exists()
-
-
-def test_wait_is_refused_after_the_usage_and_secret_checks(
+def test_wait_runs_the_usage_and_secret_checks_before_any_write(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     cfg = secret_cfg(tmp_path)

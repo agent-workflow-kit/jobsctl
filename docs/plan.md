@@ -86,7 +86,7 @@ Status: planned, 2026-10-31. Implements [interface.md](interface.md) (normative)
 - timeouts and `overrides` (`none`); automatic retry (`not_before`, budget from the attempt's `effective` snapshot, the 3rd spawn failure final); `retry --attempt N` replay after a cancel or hold; `wait` exits 0/12/13/20/22/130.
 - result file written before the final commit; final-commit retry under contention.
 
-**Status**: In Progress (runner pass, start triggers, the shim spawn contract, the shim's start sequence with atomic job spawn, exit mapping, leftovers, result file and final commit, output capture, the signal sequence with timeout enforcement, `retry`, `resolve` and automatic retry done; `wait` remains)
+**Status**: In Progress (runner pass, start triggers, the shim spawn contract, the shim's start sequence with atomic job spawn, exit mapping, leftovers, result file and final commit, output capture, the signal sequence with timeout enforcement, `retry`, `resolve` and automatic retry, `wait` and `add --wait` done)
 
 Interim behavior until the dependent issues land: a shim that confirmed and then died leaves its job `starting` or `running` until reconcile (`TODO(#22)`; reconcile and `_kill` requeue a `lost` attempt through `auto_retry.plan_requeue`); the shim does not yet run `pre-start` hooks (`TODO(#25)`) or deliver events (`TODO(#24)`). `_deliver` has no handler (`TODO(#24)`), so a spawned `_deliver` exits at once and the next pass requests it again while events stay undelivered.
 
