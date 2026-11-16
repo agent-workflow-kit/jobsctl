@@ -222,6 +222,35 @@ Three spikes ran on 2026-10-30/31 on Ubuntu 22.04 (kernel 5.15, systemd), SQLite
 
 Every relied-on behavior becomes a regression test ([plan.md](plan.md)); the cron and macOS checks are `live` tests. Spike scripts are kept privately by the author.
 
+### Regression coverage
+
+Platform probes (`tests/test_spike_processes.py`, `tests/test_spike_state.py`) use no jobsctl code: they fail when the host kernel, Python or SQLite stops behaving as the spike found. The `jobsctl` tests listed beside them cover the same item through the code that relies on it. The macOS checks are issue #28.
+
+| # | Platform probe | jobsctl tests |
+|---|---|---|
+| A1 | `test_a1_popen_detach_survives_the_runner_hangup_and_closes_inherited_fds` | `test_shim_processes.py::test_the_shim_survives_sighup_and_sigint_and_the_job_gets_default_dispositions` |
+| A2 | none (needs a real cron daemon) | `test_cron_live.py` (`live`, by hand) |
+| A3 | `test_a3_proc_start_time_is_stable_survives_zombies_and_parses_odd_names` | `test_proc_identity.py` |
+| A4 | `test_a4_sigterm_to_a_shell_leaves_its_children_and_the_group_signal_stops_them`, `test_a4_child_subreaper_adopts_an_orphan_that_left_its_group_unprivileged` | `test_shim_signals.py` (shell job with children), `test_shim_processes.py::test_a_daemon_that_left_the_group_is_adopted_by_the_subreaper_and_counted` |
+| A5 | `test_a5_the_job_survives_sigkill_of_its_parent_no_hangup_no_pdeathsig` | `test_kill_processes.py::test_sigkill_of_the_shim_leaves_the_job_running_and_holding_its_slot`, `test_shim_processes.py::test_the_shim_dying_leaves_a_silent_job_running_spike_a5` |
+| A6 | `test_a6_exit_codes_pass_through`, `test_a6_signal_deaths_are_negative_and_a_shell_reports_143`, `test_a6_a_missing_program_raises_before_anything_starts` | `test_shim_exit.py` |
+| A7 | `test_a7_dev_null_stdin_is_a_clean_eof`, `test_a7_a_closed_fd_0_breaks_programs`, `test_a7_a_terminal_stdin_hands_the_keystrokes_to_the_program` | `test_shim_processes.py` (stdin of the real job) |
+| B1 | `test_b1_count_and_claim_never_exceeds_the_cap_across_processes`, `test_b1_a_deferred_read_then_write_fails_at_once_after_another_commit`, `test_b1_sqlite_has_upsert_and_returning` | `test_store_core.py` (connection setup), `test_store_processes.py`, `test_shim_processes.py::test_passes_and_real_shims_run_a_queue_to_completion_within_the_cap` |
+| B2 | `test_b2_many_writers_under_wal_get_no_lock_errors`, `test_b2_sigkill_mid_transaction_leaves_the_database_intact_and_unlocked` | `test_store_processes.py::test_sigkill_mid_transaction_leaves_nothing_and_no_lock` |
+| B3 | `test_b3_boot_id_is_a_stable_uuid` | `test_leases.py` (live, dead, expired, reused PID, earlier boot) |
+| B4 | `test_b4_a_writer_to_a_pipe_with_no_reader_dies_of_sigpipe`, `test_b4_a_pipe_is_bounded_and_a_write_to_a_closed_reader_is_epipe` | `test_shim_processes.py` (SIGPIPE after the shim died; 256 MiB flood in bounded memory) |
+| B5 | none (an algorithm, not a platform behavior) | `test_output_tail.py` (property tests at every cut) |
+| B6 | none (a sizing measurement, no behavior to hold) | none |
+| B7 | `test_b7_backslashreplace_keeps_information_and_surrogateescape_strings_cannot_be_stored` | `test_textsafe.py` |
+| C1 | `test_c1_*` (child, non-child, stdlib and raw syscall, flags `EINVAL` before 6.9) | `test_proc_signal.py` (fakes), `test_proc_real.py` |
+| C2 | `test_c2_*` (zombie leader held with `WNOWAIT`, group reserved until the reap, `Popen` blind to a manual reap) | `test_proc_real.py::test_held_zombie_leader_keeps_group_probeable_and_signalable`, `test_shim.py`, `test_leftovers.py` |
+| C3 | `test_c3_a_term_ignoring_shell_passes_the_ignore_to_its_children_so_only_sigkill_ends_them` | `test_hook_interrupt.py`, `test_hook_run.py` |
+| C4 | `test_c4_undumpable_denies_environ_to_a_same_user_process_until_exec` | `test_proc_real.py::test_undumpable_child_denies_environ_to_sibling`, `test_shim_processes.py::test_the_shim_is_non_dumpable_and_the_job_is_not` |
+| C5 | `test_c5_*` (`ELOOP`, FIFO with `O_NONBLOCK`, symlinked ancestor followed) | `test_env_file.py` |
+| C6 | `test_c6_*` (`flock` order, 200 KB concurrent appends, lock dies with its holder, `ENOSPC`) | `test_log_processes.py::test_ten_writers_by_300_lines_give_gap_free_seq_in_file_order` |
+
+Not testable on one host and so not covered: weak or emulated `flock` (NFS), a real full disk (the probe uses `/dev/full`), and macOS (issue #28).
+
 ## Dependencies
 
 - `pyyaml` (config; the standard library cannot read YAML) and `pydantic` (config validation), the design guide's standard set. Pydantic gives strict typing, `extra=forbid` and error locations (`loc`) that name the offending key; config messages are built from `loc` and the validator text alone, never from the input. PyYAML is used through a `SafeLoader` subclass that refuses anchors, aliases and duplicate keys (no expansion bombs; the file is also capped at 1 MiB).
