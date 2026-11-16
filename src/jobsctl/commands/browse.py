@@ -6,7 +6,7 @@ module is imported at startup, `commands.load_all`), so without the extra the co
 
 Order of the checks: the extra (exit 2), a terminal on stdin and stdout (exit 2), the database
 (read-only; an older schema is refused like the other read-only commands, a newer one is exit 12
-`version_skew`), then the TUI.
+`version_skew`), the `--result-file` path, then the TUI.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from jobsctl.store_dir import resolve_state_dir
 
 INSTALL_HINT = (
     "browse needs the tui extra: uv tool install 'jobsctl[tui] @ git+https://github.com/"
-    "agent-workflow-kit/jobsctl' (or pip install 'jobsctl[tui]')"
+    "agent-workflow-kit/jobsctl'"
 )
 
 
@@ -62,6 +62,10 @@ def browse(ctx: Context) -> int:
     first = open_store()  # an older schema is refused here, before the screen changes
     if first is not None:
         first.raise_if_newer()  # a newer one is version_skew, exit 12
+    if ctx.args.result_file is not None:
+        from jobsctl.tui.result import check_result_path
+
+        check_result_path(ctx.args.result_file)  # refuse a bad path now, not after the session
     app = app_module.BrowseApp(
         open_store=lambda: first if first is not None else open_store(),
         config=ctx.config,

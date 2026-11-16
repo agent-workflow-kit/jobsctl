@@ -17,9 +17,9 @@ import pytest
 
 pytest.importorskip("textual")  # the unconditional tests are in test_browse_cli.py
 
+from textual import events  # noqa: E402
 from textual.binding import Binding  # noqa: E402
 from textual.pilot import Pilot  # noqa: E402
-from textual.widgets import DataTable  # noqa: E402
 
 from jobsctl import gateway  # noqa: E402
 from jobsctl.timestamps import format_timestamp  # noqa: E402
@@ -590,4 +590,160 @@ def test_the_module_binds_every_key_of_the_spec() -> None:
     keys = {b.key for b in tui_app.BrowseApp.BINDINGS if isinstance(b, Binding)}
     wanted = {"j", "k", "K", "J", "t", "b", "p", "plus", "minus", "h", "e", "v", "c", "R", "r"}
     assert wanted <= keys and {"slash", "question_mark", "q"} <= keys
-    assert DataTable  # the arrow keys are the table's own bindings
+
+
+def test_ctrl_q_goes_back_like_q_and_the_command_palette_is_off(three: list[str]) -> None:
+    assert tui_app.BrowseApp.ENABLE_COMMAND_PALETTE is False
+
+    async def script(app: BrowseApp, pilot: Pilot[BrowseResult]) -> None:
+        await press(pilot, "ctrl+p")
+        assert type(app.screen).__name__ == "Screen"  # no palette screen
+        await press(pilot, "ctrl+q")
+
+    assert drive(script) == BrowseResult(intent="back", selected=())
+
+
+def test_enter_does_not_confirm_only_y_does(capsys: pytest.CaptureFixture[str]) -> None:
+    job_id = add_job(capsys)
+    make_held(job_id, "escalated", ("approve",))
+
+    async def script(app: BrowseApp, pilot: Pilot[BrowseResult]) -> None:
+        await press(pilot, "e", "enter")
+        assert type(app.screen).__name__ == "ConfirmScreen"
+        assert row(job_id)["status"] == "held"
+        await press(pilot, "y")
+        assert row(job_id)["status"] == "queued"
+
+    drive(script)
+
+
+def test_a_fast_key_sequence_acts_on_the_job_under_the_cursor(three: list[str]) -> None:
+    a, b, _c = three
+
+    async def script(app: BrowseApp, pilot: Pilot[BrowseResult]) -> None:
+        # both keys are queued before the highlight event of the first is handled
+        app.post_message(events.Key("j", "j"))
+        app.post_message(events.Key("h", "h"))
+        await pilot.pause()
+        await pilot.pause()
+
+    drive(script)
+    assert row(b)["status"] == "held" and row(a)["status"] == "queued"
+
+
+def test_tab_inside_a_dialog_moves_between_its_inputs_not_the_lists(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    job_id = add_job(capsys)
+    make_held(job_id, "manual")
+
+    async def script(app: BrowseApp, pilot: Pilot[BrowseResult]) -> None:
+        await press(pilot, "v")
+        assert app.focused is not None and app.focused.id == "as"
+        await press(pilot, "tab")
+        assert type(app.screen).__name__ == "ResolveScreen"
+        assert app.focused is not None and app.focused.id == "note"
+
+    drive(script)
+
+
+def test_arrow_keys_tab_and_enter_navigate(three: list[str]) -> None:
+    a, b, _c = three
+
+    async def script(app: BrowseApp, pilot: Pilot[BrowseResult]) -> None:
+        await press(pilot, "down")
+        assert detail(app).startswith(b)
+        await press(pilot, "up")
+        assert detail(app).startswith(a)
+        await press(pilot, "tab")
+        assert app.focused is not None and app.focused.id == "queues"
+        await press(pilot, "tab")
+        assert app.focused is not None and app.focused.id == "jobs"
+        await press(pilot, "enter")
+        assert app.focused is not None and app.focused.id == "detail-scroll"
+
+    drive(script)
+
+
+def test_marks_of_jobs_that_no_longer_exist_are_dropped_but_filtered_ones_stay(
+    three: list[str],
+) -> None:
+    a, b, c = three
+
+    async def script(app: BrowseApp, pilot: Pilot[BrowseResult]) -> None:
+        await press(pilot, "space", "j", "space", "j", "space")  # a, b, c marked
+        await press(pilot, "slash")
+        await pilot.press(*"zzz")  # matches nothing: every job is hidden by the filter
+        await press(pilot, "enter")
+        assert job_ids(app) == []
+        sql("DELETE FROM jobs WHERE id = ?", b)
+        await press(pilot, "r")
+        await press(pilot, "o")
+
+    result = drive(script)
+    assert result == BrowseResult(intent="open", selected=tuple(sorted((a, c))))
+
+
+@pytest.mark.parametrize(
+    ("case", "keys", "expected"),
+    [
+        ("queued", ["J"], lambda a, b, c: ["move", a, "--after", b]),
+        ("queued", ["j", "K"], lambda a, b, c: ["move", b, "--before", a]),
+        ("queued", ["t"], lambda a, b, c: ["move", a, "--top"]),
+        ("queued", ["b"], lambda a, b, c: ["move", a, "--bottom"]),
+        ("queued", ["p"], lambda a, b, c: ["pin", a]),
+        ("pinned", ["p"], lambda a, b, c: ["unpin", a]),
+        ("queued", ["plus"], lambda a, b, c: ["priority", a, "1"]),
+        ("queued", ["minus"], lambda a, b, c: ["priority", a, "-1"]),
+        ("queued", ["h"], lambda a, b, c: ["hold", a]),
+        ("held", ["e"], lambda a, b, c: ["release", a]),
+        ("escalated", ["e", "y"], lambda a, b, c: ["release", a, "--override-escalation"]),
+        ("queued", ["c"], lambda a, b, c: ["cancel", a]),
+        (
+            "running",
+            ["c", "y"],
+            lambda a, b, c: ["cancel", a, "--force", "--wait-timeout", "0"],
+        ),
+        ("done", ["R"], lambda a, b, c: ["retry", a]),
+        ("held", ["v", "enter", "enter"], lambda a, b, c: ["resolve", a, "--as", "done"]),
+    ],
+)
+def test_each_key_runs_exactly_this_cli_command_with_the_human_actor(
+    case: str,
+    keys: list[str],
+    expected: Any,
+    three: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.manual_helpers import make_done
+
+    # a job whose state changed sorts after the queued ones: give all three the state, so the
+    # job under the cursor is the first one listed
+    for job_id in three:
+        if case == "pinned":
+            sql("UPDATE jobs SET pinned = 1 WHERE id = ?", job_id)
+        elif case == "held":
+            make_held(job_id, "manual")
+        elif case == "escalated":
+            make_held(job_id, "escalated", ("approve",))
+        elif case == "running":
+            make_running(job_id)
+        elif case == "done":
+            make_done(job_id, "failed")
+            fresh(job_id)
+    calls: list[list[str]] = []
+
+    def fake_main(argv: list[str]) -> int:
+        calls.append(argv)
+        return 0
+
+    monkeypatch.setattr(actions.cli, "main", fake_main)
+
+    listed: list[str] = []
+
+    async def script(app: BrowseApp, pilot: Pilot[BrowseResult]) -> None:
+        listed.extend(job_ids(app))
+        await press(pilot, *keys)
+
+    drive(script)
+    assert calls == [["--json", *expected(*listed), "--actor", "human:kim"]]

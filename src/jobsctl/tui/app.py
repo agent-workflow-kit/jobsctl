@@ -63,7 +63,7 @@ class ConfirmScreen(ModalScreen[bool]):
     """A yes/no question; the text is plain."""
 
     BINDINGS: ClassVar = [
-        Binding("y,enter", "answer(True)", "yes"),
+        Binding("y", "answer(True)", "yes"),
         Binding("n,escape", "answer(False)", "no"),
     ]
 
@@ -127,11 +127,12 @@ class _State:
     job: str | None = None
     focus: str | None = None
     filter: str = ""
-    marked: set[str] = field(default_factory=set)
+    marked: dict[str, str] = field(default_factory=dict)  # job id -> the queue it was marked in
     rows: tuple[model.JobItem, ...] = ()
 
 
 class BrowseApp(App[BrowseResult]):
+    ENABLE_COMMAND_PALETTE = False  # ctrl+p opens nothing: the palette is outside the spec
     CSS = """
     #queues { width: 40; border-right: solid $primary; }
     #right { width: 1fr; }
@@ -165,6 +166,7 @@ class BrowseApp(App[BrowseResult]):
         Binding("question_mark", "help", "help", show=False),
         Binding("q", "quit_back", "quit", show=False),
         Binding("ctrl+c", "quit_back", "quit", show=False, priority=True),
+        Binding("ctrl+q", "quit_back", "quit", show=False, priority=True),
         Binding("tab", "switch", "switch", show=False, priority=True),
     ]
 
@@ -314,6 +316,10 @@ class BrowseApp(App[BrowseResult]):
         s.queue = data.queue
         rows = self._visible(data)
         s.rows = rows
+        # a mark of this queue whose job is gone is dropped (`data.jobs` is not text-filtered, so
+        # a job hidden only by the filter keeps its mark); marks of other queues wait until visited
+        present = {j.id for j in data.jobs}
+        s.marked = {i: q for i, q in s.marked.items() if q != data.queue or i in present}
         self._populating = True
         try:
             queues = self._queues_table()
@@ -415,6 +421,9 @@ class BrowseApp(App[BrowseResult]):
             table.action_cursor_up()
 
     def action_switch(self) -> None:
+        if isinstance(self.screen, ModalScreen):  # tab moves between the dialog's own inputs
+            self.screen.focus_next()
+            return
         if self.focused is self._jobs_table():
             self._queues_table().focus()
         else:
@@ -437,14 +446,17 @@ class BrowseApp(App[BrowseResult]):
         if job is None:
             return
         marked = self._state.marked
-        marked.symmetric_difference_update({job.id})
+        if job.id in marked:
+            del marked[job.id]
+        else:
+            marked[job.id] = self._state.queue or ""
         self._show(self._state.data)
 
     def action_open(self) -> None:
         job = self._current()
         marked = self._state.marked
         shown = [j.id for j in self._state.rows if j.id in marked]
-        hidden = sorted(marked.difference(shown))  # marked in another queue or filtered out
+        hidden = sorted(set(marked).difference(shown))  # marked in another queue or filtered out
         selected = tuple(shown + hidden or ([job.id] if job else []))
         self._finish(BrowseResult(intent="open", selected=selected))
 
@@ -454,8 +466,18 @@ class BrowseApp(App[BrowseResult]):
     # -- actions (each one a CLI command) -----------------------------------------------
 
     def _current(self) -> model.JobItem | None:
+        """The job under the cursor of the jobs table, read from the table itself: the cached
+        `s.job` follows an asynchronous highlight event and lags a fast key sequence."""
+        table = self._jobs_table()
         s = self._state
-        return next((j for j in s.rows if j.id == s.job), None)
+        try:
+            key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        except Exception:
+            return None
+        job = next((j for j in s.rows if j.id == key), None)
+        if job is not None:
+            s.job = job.id
+        return job
 
     def _run(self, argv: list[str]) -> None:
         outcome = actions.run_command(argv, config_path=self._config_path, actor=self._actor)

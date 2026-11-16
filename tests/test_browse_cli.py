@@ -36,6 +36,7 @@ def test_without_the_extra_browse_exits_2_tui_missing_with_the_install_hint(
     assert res.code == 2
     error = res.envelope()["error"]
     assert error["code"] == "tui_missing" and "jobsctl[tui]" in error["message"]
+    assert "pip" not in error["message"]  # the package is not on PyPI
     validate_against("cli/error.json", res.envelope())
 
 
@@ -156,3 +157,40 @@ def test_the_result_file_is_never_written_through_a_symlink_or_into_a_fifo(
         write_result(str(tmp_path / "missing" / "dir" / "file"), "back", [])
     with pytest.raises(JobsctlError):
         write_result("\x00", "back", [])
+
+
+def test_an_existing_result_file_is_made_0600_on_write(tmp_path: Path) -> None:
+    from jobsctl.tui.result import write_result
+
+    path = tmp_path / "result.json"
+    path.write_text("old")
+    path.chmod(0o644)
+    write_result(str(path), "back", [])
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_a_bad_result_file_is_refused_before_the_screen_starts(
+    capsys: pytest.CaptureFixture[str],
+    tty: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("textual")
+    from jobsctl.tui import app as tui_app
+
+    def must_not_run(self: object) -> None:
+        raise AssertionError("the session started")
+
+    monkeypatch.setattr(tui_app.BrowseApp, "run", must_not_run)
+    add_job(capsys)
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    link = tmp_path / "link"
+    link.symlink_to(victim)
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    for bad in (link, fifo, tmp_path):
+        res = run_cli(capsys, "--json", "browse", "--result-file", str(bad))
+        assert res.code == 1 and res.envelope()["error"]["code"] == "internal", bad
+        assert "result file" in res.envelope()["error"]["message"]
+    assert victim.read_text() == "keep"
