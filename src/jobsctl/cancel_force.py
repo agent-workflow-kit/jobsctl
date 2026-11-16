@@ -141,10 +141,7 @@ def request_force(op: Op, row: sqlite3.Row, targets: list[ForceTarget]) -> Appli
 
 
 def spawn_kill(ctx: Context, job_id: str) -> subprocess.Popen[bytes]:
-    """Start a detached `jobsctl _kill <id>` (the caller reaps this exact handle).
-
-    TODO(#21): the `_kill` command itself (signal sequence for a job without a shim) lands with
-    #21; until then the spawned process exits at once and the wait ends in `cancel_pending`."""
+    """Start a detached `jobsctl _kill <id>` (see `jobsctl.kill`); the caller reaps the handle."""
     return spawn_internal(resolve_state_dir(), ctx.config, ctx.config_path, "_kill", [job_id])
 
 

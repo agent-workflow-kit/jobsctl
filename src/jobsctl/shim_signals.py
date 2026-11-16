@@ -54,6 +54,7 @@ class SignalSequence:
         own_child: Callable[[], bool],
         now: Callable[[], float],
         diag: Callable[[str], None],
+        allow_zombie: bool = True,
     ) -> None:
         self._host = host
         self._leader = leader
@@ -62,6 +63,10 @@ class SignalSequence:
         self._own_child = own_child
         self._now = now
         self._diag = diag
+        # True only for a leader the caller holds unreaped (the shim): its zombie still reserves
+        # the group id. A leader the caller does not hold (`_kill`) counts as gone once it is a
+        # zombie, and then nothing is signaled.
+        self._allow_zombie = allow_zombie
         self.phase = Phase.IDLE
         self.cause: str | None = None
         self.sent: list[str] = []  # for logs and tests: "term:pid", "term:group", "kill:group", ...
@@ -107,7 +112,7 @@ class SignalSequence:
         self._note(what, out, repeat=repeat)
 
     def _signal_group(self, sig: int, what: str, *, repeat: bool = False) -> None:
-        out = signal_group(self._host, self._leader, sig, allow_zombie=True)
+        out = signal_group(self._host, self._leader, sig, allow_zombie=self._allow_zombie)
         if self._fallback_ok(out):
             self._diag(f"{what}: identity not confirmed ({out.detail}); the group id is reserved")
             try:

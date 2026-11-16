@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import os
+
 from jobsctl.cli_registry import Context, command
 from jobsctl.diag import install
 from jobsctl.env_file import disable_dumpable
+from jobsctl.kill import Killer
+from jobsctl.kill import prepare_process as prepare_kill
 from jobsctl.shim import Shim, StopSignal, prepare_process
 from jobsctl.store_db import OpenMode, Store
 from jobsctl.store_dir import resolve_state_dir
@@ -34,3 +38,16 @@ def shim(ctx: Context) -> int:
             stop=stop,
         )
         return running.run()
+
+
+@command("_kill")
+def kill(ctx: Context) -> int:
+    """The forced cancel of a job without a shim (`[python, -I, -m, jobsctl, _kill, id]`, started
+    by `cancel --force` and reconcile): diagnostics in `diag/kill-<pid>.log`, then `jobsctl.kill`.
+    It tolerates being started for a job that needs nothing (it then exits after its re-check)."""
+    disable_dumpable()
+    install(resolve_state_dir() / "diag" / f"kill-{os.getpid()}.log")
+    stop = StopSignal()
+    prepare_kill(stop)
+    with Store.open(mode=OpenMode.INTERNAL, busy_timeout=ctx.config.busy_timeout) as store:
+        return Killer(store, ctx.config, ctx.config_path, ctx.args.id, stop=stop).run()
