@@ -757,7 +757,11 @@ def _env_file_for_reason(reason: str, tmp_path: Path, monkeypatch: pytest.Monkey
         return str(target)
     target.write_text("TOKEN=abc123secret\n", encoding="utf-8")
     target.chmod(0o600)
-    if reason == "mode":
+    if reason == "read":
+        monkeypatch.setattr(  # the file opens and passes every check, then the read fails
+            env_file_module, "_read_trusted", lambda fd: (None, "read")
+        )
+    elif reason == "mode":
         target.chmod(0o666)
     elif reason == "size":
         target.write_bytes(b"A=" + b"x" * env_file_module.MAX_BYTES + b"\n")
@@ -767,7 +771,7 @@ def _env_file_for_reason(reason: str, tmp_path: Path, monkeypatch: pytest.Monkey
 
 
 @pytest.mark.parametrize(
-    "reason", ["path", "open", "not_regular", "owner", "mode", "size", "ancestor"]
+    "reason", ["path", "open", "not_regular", "owner", "read", "mode", "size", "ancestor"]
 )
 def test_the_run_warning_names_the_failed_check_and_matches_the_log_record(
     reason: str,

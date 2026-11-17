@@ -366,11 +366,8 @@ class Runner:
         assert env_file is not None
         log_env_file_state(self.writer, self.config.env_file, env_file)
         unsafe = next((w for w in env_file.warnings if w.code == "env_file_unsafe"), None)
-        if (
-            unsafe is not None
-            and unsafe.reason is not None  # `_unavailable` always sets it
-            and not any(w["code"] == "env_file_unsafe" for w in result.warnings)
-        ):
+        if unsafe is not None and not any(w["code"] == "env_file_unsafe" for w in result.warnings):
+            assert unsafe.reason is not None  # _unavailable always sets it
             result.warnings.append(
                 {
                     "code": "env_file_unsafe",
