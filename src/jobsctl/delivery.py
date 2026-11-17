@@ -18,7 +18,9 @@ Delivery is at least once and in order per job:
   ``payload.job.queue`` with the delivering process's config; the outbox ``async`` column is a
   hint only: an event delivered as synchronous runs the entries that are not ``async`` now, an
   ``async`` one the ``async`` entries. An entry that is no longer configured runs nothing;
-- a failing or timed-out hook is logged (``hook_ran``) and never retried;
+- a failing or timed-out hook is logged (``hook_ran``) and never retried; a hook whose leader
+  outlived SIGKILL leaves its event undelivered and backs the event off (``hook_retry``): it is
+  skipped until its ``retry_after``, and retried at the capped interval for ever;
 - nothing here runs inside a write transaction: hooks, log appends and the delivered mark each
   have their own.
 
@@ -46,6 +48,7 @@ from jobsctl.env_mask import MaskingSet, masking_values
 from jobsctl.errors import JobsctlError
 from jobsctl.hook_env import build_hook_env
 from jobsctl.hook_payload import MAX_OUTPUT_TAIL_CHARS, OUTPUT_HOOKS, encode_payload
+from jobsctl.hook_retry import deferred_until, record_unkillable
 from jobsctl.hook_run import HookResult, HookTuning, run_hook
 from jobsctl.hook_select import select_hooks
 from jobsctl.log_writer import RecordWriter
@@ -62,6 +65,7 @@ __all__ = [
     "EventPlan",
     "HookEnvironment",
     "PlannedHook",
+    "UnkillableHook",
 ]
 
 POST_HOOKS = ("post-start", "post-finish", "post-fail", "post-held", "post-cancel")
@@ -124,6 +128,11 @@ class EventPlan:
     problem: str | None = None  # the stored event cannot be delivered (never retried)
 
 
+class UnkillableHook(JobsctlError):
+    """A hook's leader outlived SIGKILL (``internal``): its event stays undelivered and is
+    deferred by :meth:`Deliverer.note_unkillable`."""
+
+
 class Deliverer:
     """Plans, runs and records the delivery of outbox events for one process.
 
@@ -151,6 +160,7 @@ class Deliverer:
         self.runner = runner
         self.diag = diag or _stderr_warning
         self.cwd: Path = store.paths.root
+        self._noticed: set[str] = set()
         self.env = HookEnvironment.load(config, environ)
         self.writer = RecordWriter(store, masking=self.env.masking, clock=clock)
 
@@ -255,7 +265,7 @@ class Deliverer:
             )
             on_result(result)
             if result.unkillable:
-                raise JobsctlError(
+                raise UnkillableHook(
                     "internal",
                     f"a {planned.hook} hook outlived SIGKILL; its event stays undelivered",
                 )
@@ -291,6 +301,8 @@ class Deliverer:
                 return True
             if not held() or stop():
                 return False
+            if self.defer_notice(row):
+                return False
             plan = self.plan_event(row)
             if plan.problem is None:
 
@@ -299,7 +311,12 @@ class Deliverer:
                     if check is not None:
                         check(result)
 
-                if not self.run_hooks(plan, stop=stop_and_tick, on_result=on_result):
+                try:
+                    ran_all = self.run_hooks(plan, stop=stop_and_tick, on_result=on_result)
+                except UnkillableHook:
+                    self.note_unkillable(plan.event_id)
+                    raise
+                if not ran_all:
                     return False
                 if check is not None:
                     check(None)
@@ -308,6 +325,32 @@ class Deliverer:
             self.mark_delivered(plan.event_id)
             if not held():
                 return False
+
+    # -- backoff -------------------------------------------------------------------------------
+
+    def defer_notice(self, row: sqlite3.Row) -> bool:
+        """Whether ``row`` is deferred (its ``retry_after`` is in the future); says so through
+        ``diag`` (never twice for one event in one process)."""
+        until = deferred_until(row, self.clock())
+        if until is None:
+            return False
+        event_id = str(row["event_id"])
+        if event_id not in self._noticed:
+            self._noticed.add(event_id)
+            self.diag(
+                f"the hook event {event_id} is deferred until {until} (a hook outlived SIGKILL)"
+            )
+        return True
+
+    def note_unkillable(self, event_id: str) -> int | None:
+        """Count a hook of ``event_id`` that outlived SIGKILL and defer the event (main thread
+        only: it writes). Returns the new attempt count; a failure to write is a diagnostic."""
+        try:
+            with self.store.write() as tx:
+                return record_unkillable(tx, event_id, self.clock())
+        except (JobsctlError, sqlite3.Error) as exc:
+            self.diag(f"the retry of {event_id} was not deferred ({type(exc).__name__})")
+            return None
 
     # -- recording -----------------------------------------------------------------------------
 

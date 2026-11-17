@@ -71,9 +71,20 @@ class Finding:
     job_id: str
     finding: str
     action: str
+    event_id: str | None = None  # `hook_delivery_stuck` only
+    attempts: int | None = None  # `hook_delivery_stuck` only
 
-    def as_json(self) -> dict[str, str]:
-        return {"job_id": self.job_id, "finding": self.finding, "action": self.action}
+    def as_json(self) -> dict[str, str | int]:
+        body: dict[str, str | int] = {
+            "job_id": self.job_id,
+            "finding": self.finding,
+            "action": self.action,
+        }
+        if self.event_id is not None:
+            body["event_id"] = self.event_id
+        if self.attempts is not None:
+            body["attempts"] = self.attempts
+        return body
 
 
 @dataclass(frozen=True)

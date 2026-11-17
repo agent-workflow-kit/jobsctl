@@ -11,9 +11,9 @@ One `_deliver` runs at a time, under the `deliver` lease. A round does two thing
    delivered once its hooks ended (exit or timeout).
 
 A hook whose leader outlived SIGKILL (an `internal` error) does not stop the round: the other jobs
-are delivered, that job is skipped for the rest of the round, its event stays undelivered (the next
-round or `_deliver` tries it again) and the error is raised at the end of the round, so the
-process exits non-zero.
+are delivered, that job is skipped for the rest of the round, its event stays undelivered and backs
+off (`hook_retry`: skipped until its `retry_after`, then retried, at the capped interval for ever)
+and the error is raised at the end of the round, so the process exits non-zero.
 
 It re-reads the `deliver_requested` counter and releases the lease in one transaction and starts
 over if the counter changed, so a request made while it ran is not lost. SIGTERM stops running
@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from jobsctl.config import Config
-from jobsctl.delivery import Deliverer, EventPlan
+from jobsctl.delivery import Deliverer, EventPlan, UnkillableHook
 from jobsctl.errors import JobsctlError
 from jobsctl.hook_run import HookResult
 from jobsctl.job_lease import Lease
@@ -167,6 +167,9 @@ class Delivery:
             job_id = str(row["job_id"])
             if job_id in self._skipped:
                 continue
+            first = self.deliverer.next_event(job_id, is_async=False)
+            if first is not None and self.deliverer.defer_notice(first):
+                continue  # backing off: its later events wait behind it, as the order requires
             lease = Lease.take(self.store, f"job:{job_id}", host=self.host)
             if lease is None:  # a live holder delivers its own events
                 continue
@@ -228,6 +231,8 @@ class Delivery:
                     except JobsctlError as exc:
                         self._record_once(flight)
                         if exc.code == "internal":  # an unkillable hook: only its job is skipped
+                            if isinstance(exc, UnkillableHook):
+                                self.deliverer.note_unkillable(flight.plan.event_id)
                             self._note_unkillable(flight.plan.job_id, exc)
                         else:
                             fail(exc)
@@ -255,6 +260,8 @@ class Delivery:
             job_id = str(row["job_id"])
             if job_id in busy or job_id in self._skipped:
                 continue
+            if self.deliverer.defer_notice(row):
+                continue  # backing off: the job's later events wait behind it
             if len(flights) >= self.max_async:
                 return marked
             plan = self.deliverer.plan_event(row)

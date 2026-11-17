@@ -129,7 +129,14 @@ _V1: tuple[str, ...] = (
     "CREATE TABLE pruned_ids (id TEXT NOT NULL PRIMARY KEY)",
 )
 
-MIGRATIONS: tuple[tuple[str, ...], ...] = (_V1,)
+# Version 2: backoff of an event whose hook leader outlived SIGKILL (interface.md, Delivery).
+# `attempts` counts those failures; `retry_after` (timestamp text) is the earliest next delivery.
+_V2: tuple[str, ...] = (
+    "ALTER TABLE hook_outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE hook_outbox ADD COLUMN retry_after TEXT",
+)
+
+MIGRATIONS: tuple[tuple[str, ...], ...] = (_V1, _V2)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 _CREATE_RE = re.compile(r"^CREATE (UNIQUE )?(TABLE|INDEX) (IF NOT EXISTS )?\"?\w+\"?\b", re.I)

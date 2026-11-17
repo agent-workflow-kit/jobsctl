@@ -41,6 +41,7 @@ from jobsctl.config import Config
 from jobsctl.env_file import EnvFile, load_env_file
 from jobsctl.env_logging import log_env_file_state
 from jobsctl.errors import JobsctlError
+from jobsctl.hook_retry import STUCK_FINDING, stuck_findings
 from jobsctl.leases import (
     LEASE_COLUMNS,
     RENEW_SECONDS,
@@ -111,7 +112,7 @@ class PassResult:
     already_running: bool = False
     holder: Holder | None = None
     started: list[str] = field(default_factory=list)
-    reconciled: list[dict[str, str]] = field(default_factory=list)
+    reconciled: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[dict[str, str]] = field(default_factory=list)
     changed: bool = False
     freed: bool = False  # reconcile ended or requeued a job (a slot or a queued job appeared)
@@ -303,14 +304,15 @@ class Runner:
             self._step("release")
             if self._release_if_unchanged(seen):
                 break
-        if result.started or result.reconciled or result.changed:
+        changes = [r for r in result.reconciled if r["finding"] != STUCK_FINDING]
+        if result.started or changes or result.changed:
             self._safely(
                 lambda: self.writer.log(
                     "pass",
                     fields={
                         "details": {
                             "started": len(result.started),
-                            "reconciled": len(result.reconciled),
+                            "reconciled": len(changes),
                         }
                     },
                 )
@@ -526,7 +528,33 @@ class Runner:
             )
         )
 
+    def _report_stuck(self, result: PassResult) -> None:
+        """`hook_delivery_stuck`: every event whose hook outlived SIGKILL `STUCK_ATTEMPTS` times
+        is in the pass result each time (the event is still retried at the capped interval); its
+        log record is written once per event."""
+        with self.store.read() as tx:
+            stuck = stuck_findings(tx)
+        for item in stuck:
+            result.reconciled.append(item)
+            event_id, attempts = str(item["event_id"]), int(item["attempts"])
+            self._safely(
+                lambda item=item, event_id=event_id, attempts=attempts: self.writer.warn_once(
+                    f"hook_delivery_stuck:{event_id}",
+                    "stuck",
+                    "reconcile",
+                    fields={
+                        "job_id": item["job_id"],
+                        "finding": STUCK_FINDING,
+                        "action": "reported",
+                        "message": "a hook outlived SIGKILL repeatedly; its event is retried "
+                        "at the capped interval",
+                        "details": {"event_id": event_id, "attempts": attempts},
+                    },
+                )
+            )
+
     def _request_delivery(self, result: PassResult) -> None:
+        self._report_stuck(result)
         with self.store.read() as tx:
             redeliver = redeliverable_jobs(tx, self.host, self.clock())
         child = request_delivery(
