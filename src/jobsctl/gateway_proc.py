@@ -364,7 +364,7 @@ class DarwinLibproc:
             if got > 0:
                 break
             err = ctypes.get_errno()
-            if err == errno.ESRCH and arg == 0:
+            if arg == 0 and err in (0, errno.ESRCH):
                 continue
             if err in (0, errno.ESRCH):
                 return None

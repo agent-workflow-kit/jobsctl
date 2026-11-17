@@ -279,6 +279,14 @@ def test_a_zombie_that_answers_only_with_arg_1_is_read_by_the_retry(fake_lib: Fa
     assert gateway_proc.DarwinLibproc().wait_state(55) == (0, True, 3 << 8)
 
 
+def test_a_zero_return_with_errno_0_on_arg_0_is_retried_with_arg_1(fake_lib: FakeLib) -> None:
+    fake_lib.zombie_needs_arg_1 = True
+    fake_lib.pidinfo_errno = 0
+    got = gateway_proc.DarwinLibproc().bsdinfo(55)
+    assert got is not None and got[4] is True
+    assert fake_lib.pidinfo_calls == [0, 1]
+
+
 def test_a_process_that_is_gone_is_none_after_one_retry(fake_lib: FakeLib) -> None:
     fake_lib.zombie_needs_arg_1 = True
     fake_lib.pidinfo_calls.clear()
