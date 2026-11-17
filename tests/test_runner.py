@@ -758,9 +758,13 @@ def _env_file_for_reason(reason: str, tmp_path: Path, monkeypatch: pytest.Monkey
     target.write_text("TOKEN=abc123secret\n", encoding="utf-8")
     target.chmod(0o600)
     if reason == "read":
-        monkeypatch.setattr(  # the file opens and passes every check, then the read fails
-            env_file_module, "_read_trusted", lambda fd: (None, "read")
-        )
+
+        def failing_read(fd: int) -> tuple[None, str]:
+            os.close(fd)  # the real _read_trusted closes the fd in its finally
+            return None, "read"
+
+        # the file opens and passes every check, then the read fails
+        monkeypatch.setattr(env_file_module, "_read_trusted", failing_read)
     elif reason == "mode":
         target.chmod(0o666)
     elif reason == "size":
