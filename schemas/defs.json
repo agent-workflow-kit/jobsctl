@@ -2219,7 +2219,7 @@
             "null"
           ],
           "minimum": 0,
-          "description": "Current attempt: processes left in the job's process group (interface: Leftovers); null when no probe was made."
+          "description": "Current attempt: processes left in the job's process group (interface: Leftovers) (a lower bound when the scan was incomplete); null when no probe was made or the exit kind is `unknown`."
         },
         "resolved_path": {
           "oneOf": [
@@ -2421,7 +2421,7 @@
             "null"
           ],
           "minimum": 0,
-          "description": "Current attempt: processes left in the job's process group (interface: Leftovers); null when no probe was made."
+          "description": "Current attempt: processes left in the job's process group (interface: Leftovers) (a lower bound when the scan was incomplete); null when no probe was made or the exit kind is `unknown`."
         },
         "resolved_path": {
           "oneOf": [

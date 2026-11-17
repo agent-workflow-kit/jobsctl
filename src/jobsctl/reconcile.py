@@ -393,7 +393,7 @@ class Reconciler:
         else:
             outcome = Outcome("failed", "lost")
             exit_record = ExitRecord("unknown")
-            leftovers = None if d.leftovers is None else d.leftovers.recorded
+            leftovers = None if d.leftovers is None else d.leftovers.recorded_unless_unproven
             tail = None  # the last flushed tail stays
         done = finish_running_in(
             tx,

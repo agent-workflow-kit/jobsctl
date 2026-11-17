@@ -307,7 +307,7 @@ class Killer:
             if state is Liveness.ALIVE:
                 self._run_sequence(target, target.leader)
                 leftovers = self._leftovers(target.leader)
-                count = leftovers.recorded
+                count = leftovers.recorded_unless_unproven
             # DEAD: gone, reused or another boot. Nothing is signaled; the group cannot be probed.
         elif target.leader is not None:
             self._diag(f"the recorded group {target.pgid} is not the leader's; nothing signaled")

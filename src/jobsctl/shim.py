@@ -104,6 +104,14 @@ def _noop_handler(signum: int, frame: object) -> None:
     return None
 
 
+def _recorded_for(record: ExitRecord, leftovers: Leftovers) -> int | None:
+    """An unknown exit keeps `null` for an empty incomplete probe; otherwise the count (a lower
+    bound when the scan was incomplete)."""
+    if record.kind == "unknown":
+        return leftovers.recorded_unless_unproven
+    return leftovers.recorded
+
+
 class StopSignal:
     """SIGTERM, recorded by the handler and looked at by the loops."""
 
@@ -772,7 +780,7 @@ class Shim:
         leftovers = count_leftovers(
             self.host, leader_pid=job.pid, pgid=job.pid, own_pid=os.getpid()
         )
-        if leftovers.count:
+        if leftovers.count or not leftovers.complete:
             self._log_leftovers(view, leftovers)
         tail = job.capture.snapshot(final=True)
         natural = natural_outcome(record)
@@ -938,11 +946,18 @@ class Shim:
         return Outcome("failed", seq.cause)
 
     def _log_leftovers(self, view: ClaimView, leftovers: Leftovers) -> None:
+        """A warning when processes remain; an info record when the scan was incomplete and found
+        none, so the recorded 0 stays readable as a lower bound (`details.complete` is false)."""
+        found = leftovers.count > 0
         self._log(
             "leftovers",
             view,
-            level="warn",
-            message="processes outlived the job's leader; they were not signaled",
+            level="warn" if found else "info",
+            message=(
+                "processes outlived the job's leader; they were not signaled"
+                if found
+                else "the process scan was incomplete; the recorded leftovers is a lower bound"
+            ),
             count=leftovers.count,
             complete=leftovers.complete,
         )
@@ -967,7 +982,7 @@ class Shim:
                     reason=outcome.reason,
                     hold_reason=outcome.hold_reason,
                     exit=record,
-                    leftovers=leftovers.recorded,
+                    leftovers=_recorded_for(record, leftovers),
                     tail=ResultTail(tail.text, tail.bytes_seen, tail.truncated),
                     ended_at=self._now(),
                 ),
@@ -1000,7 +1015,7 @@ class Shim:
                     self.claim_id,
                     outcome=outcome,
                     exit_record=record,
-                    leftovers=leftovers.recorded,
+                    leftovers=_recorded_for(record, leftovers),
                     tail=tail,
                     clock=self._now,
                 ),
