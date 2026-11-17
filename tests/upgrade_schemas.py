@@ -12,4 +12,8 @@ V2 = (
         "CREATE TABLE extra_v2 (k TEXT NOT NULL PRIMARY KEY, v TEXT)",
     ),
 )
-SCHEMAS = {"old": MIGRATIONS, "new": V2}
+# The v0.31.2 release (before the hook-retry backoff, #72): schema version 1, no
+# `hook_outbox.attempts`. Frozen: each new migration adds a fixture for its own predecessor
+# (e.g. a `V2_RELEASE`) and keeps this one; it never replaces it.
+V1_RELEASE = MIGRATIONS[:1]
+SCHEMAS = {"old": MIGRATIONS, "new": V2, "v1_release": V1_RELEASE}

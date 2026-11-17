@@ -17,6 +17,7 @@ from jobsctl import gateway, retention
 from jobsctl.cli_output import print_json
 from jobsctl.cli_registry import Context, command
 from jobsctl.env_file import disable_dumpable
+from jobsctl.hook_retry import stuck_findings
 from jobsctl.leases import LEASE_COLUMNS, holder_of
 from jobsctl.proc_host import default_host
 from jobsctl.reconcile import Reconciler, run_rules
@@ -72,6 +73,7 @@ def _dry_run(ctx: Context) -> dict[str, Any]:
                     findings.append(
                         {"job_id": job_id, "finding": "hooks_redelivered", "action": "redelivered"}
                     )
+            findings.extend(stuck_findings(tx))
             if ctx.config.retention is not None:
                 for job_id in retention.candidates(
                     tx, gateway.utc_now(), ctx.config.retention, None

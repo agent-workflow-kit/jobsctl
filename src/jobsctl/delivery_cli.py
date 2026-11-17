@@ -45,7 +45,7 @@ def deliver_after_commit(ctx: Context, job_ids: Iterable[str]) -> None:
 def _deliver_jobs(
     store: Store, config: Config, config_path: Path | None, ids: list[str], *, quiet: bool
 ) -> None:
-    deliverer = Deliverer(store, config)
+    deliverer = Deliverer(store, config, announce_deferred=False)
     leftover_async = False
     with InterruptGuard() as guard:
         for job_id in ids:

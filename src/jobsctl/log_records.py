@@ -265,6 +265,7 @@ _LOG_FIELD_CHECKS: Final[Mapping[str, Check]] = {
             "shim_lost",
             "force_resumed",
             "hooks_redelivered",
+            "hook_delivery_stuck",
             "pruned",
         )  # fmt: skip
     ),
@@ -277,6 +278,7 @@ _LOG_FIELD_CHECKS: Final[Mapping[str, Check]] = {
             "marked_shim_lost",
             "kill_started",
             "redelivered",
+            "reported",
             "deleted",
         )  # fmt: skip
     ),

@@ -190,6 +190,7 @@
         "shim_lost",
         "force_resumed",
         "hooks_redelivered",
+        "hook_delivery_stuck",
         "pruned"
       ]
     },
@@ -202,6 +203,7 @@
         "marked_shim_lost",
         "kill_started",
         "redelivered",
+        "reported",
         "deleted"
       ]
     },
@@ -2684,6 +2686,16 @@
         "job_id": {
           "$ref": "#/$defs/job_id"
         },
+        "event_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "hook_delivery_stuck only: the id of the stuck outbox event."
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "hook_delivery_stuck only: how many times a hook of the event outlived SIGKILL."
+        },
         "finding": {
           "$ref": "#/$defs/finding_name"
         },
@@ -2698,6 +2710,38 @@
         "finding",
         "action"
       ],
+      "if": {
+        "properties": {
+          "finding": {
+            "const": "hook_delivery_stuck"
+          }
+        },
+        "required": [
+          "finding"
+        ]
+      },
+      "then": {
+        "required": [
+          "event_id",
+          "attempts"
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "event_id"
+              ]
+            },
+            {
+              "required": [
+                "attempts"
+              ]
+            }
+          ]
+        }
+      },
       "description": "A reconcile finding (interface: Reconcile)."
     },
     "hook_job": {

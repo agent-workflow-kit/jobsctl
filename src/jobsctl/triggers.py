@@ -17,11 +17,13 @@ from pathlib import Path
 from jobsctl import gateway
 from jobsctl.config import Config
 from jobsctl.errors import JobsctlError
+from jobsctl.hook_retry import NOT_DEFERRED_SQL
 from jobsctl.leases import LEASE_COLUMNS, holder_of
 from jobsctl.proc_host import Host, default_host
 from jobsctl.spawn import spawn_internal
 from jobsctl.store_db import OpenMode, Store, Tx
 from jobsctl.store_ops import counter_incr
+from jobsctl.timestamps import format_timestamp
 
 PASS_REQUESTED = "pass_requested"
 DELIVER_REQUESTED = "deliver_requested"
@@ -77,11 +79,13 @@ def request_pass_from_command(
 
 def redeliverable_jobs(tx: Tx, host: Host, now: dt.datetime) -> list[str]:
     """The jobs with undelivered synchronous events and no live `job:<id>` lease holder
-    (`hooks_redelivered`), in id order."""
+    (`hooks_redelivered`), in id order. An event backing off after a hook that outlived SIGKILL
+    (and the later events of its job) is not redeliverable until its `retry_after`."""
     jobs = []
     for row in tx.all(
-        "SELECT DISTINCT job_id FROM hook_outbox WHERE delivered_at IS NULL AND async = 0 "
-        "ORDER BY job_id"
+        "SELECT DISTINCT job_id FROM hook_outbox o WHERE delivered_at IS NULL AND async = 0 "
+        f"AND {NOT_DEFERRED_SQL} ORDER BY job_id",
+        [format_timestamp(now)],
     ):
         lease = tx.one(LEASE_COLUMNS, [f"job:{row['job_id']}"])
         if holder_of(lease, host, now) is None:
@@ -92,7 +96,11 @@ def redeliverable_jobs(tx: Tx, host: Host, now: dt.datetime) -> list[str]:
 def has_undelivered(tx: Tx, host: Host, now: dt.datetime) -> bool:
     """Whether a pass should request delivery: an undelivered `async` event of any job, or an
     undelivered synchronous event of a job with no live `job:<id>` lease holder."""
-    if tx.one("SELECT 1 FROM hook_outbox WHERE delivered_at IS NULL AND async = 1 LIMIT 1"):
+    if tx.one(
+        "SELECT 1 FROM hook_outbox o WHERE delivered_at IS NULL AND async = 1 "
+        f"AND {NOT_DEFERRED_SQL} LIMIT 1",
+        [format_timestamp(now)],
+    ):
         return True
     return bool(redeliverable_jobs(tx, host, now))
 
