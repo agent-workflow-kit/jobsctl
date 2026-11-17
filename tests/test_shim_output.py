@@ -167,7 +167,7 @@ def test_a_clean_exit_records_zero_leftovers_and_logs_nothing(store: Store) -> N
     make_shim(store).run()
     assert attempt(store)["leftovers"] == 0
     # an incomplete scan (a loaded host) may add a count-0 info record; no process was left
-    assert [r for r in log_records("leftovers") if r["details"]["count"]] == []
+    assert [r for r in log_records("leftovers") if r["level"] == "warn"] == []
 
 
 class _IncompleteScanHost(LinuxHost):
@@ -278,6 +278,36 @@ def test_a_final_commit_that_never_succeeds_leaves_the_result_file_for_reconcile
     assert job(store)["status"] == "running"
     record = read_result(shims_dir(), JOB, 1)
     assert record is not None and record.status == "done" and record.tail.text == "kept\n"
+
+
+def test_an_unknown_exit_on_an_incomplete_empty_scan_keeps_null_leftovers(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobsctl.shim_pump import Pump
+
+    def broken(self: Pump) -> object:
+        raise OSError("pump broken")
+
+    monkeypatch.setattr(Pump, "run", broken)
+    seed_claimed(store, ["true"])
+    make_shim(store, host=_IncompleteScanHost()).run()
+    assert exit_of(store)["kind"] == "unknown"  # type: ignore[index]
+    assert attempt(store)["leftovers"] is None
+
+
+def test_an_incomplete_scan_writes_zero_to_the_result_file_for_an_exited_job(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_claimed(store, ["sh", "-c", "exit 0"])
+    monkeypatch.setattr(shim_module, "FINAL_COMMIT_SECONDS", 0.5)
+
+    def always_busy(*args: object, **kwargs: object) -> object:
+        raise JobsctlError("busy", "state.db is busy")
+
+    monkeypatch.setattr(shim_module, "finish_running", always_busy)
+    assert make_shim(store, host=_IncompleteScanHost()).run() == 1
+    record = read_result(shims_dir(), JOB, 1)
+    assert record is not None and record.exit.kind == "exited" and record.leftovers == 0
 
 
 def test_a_planted_symlink_at_the_result_name_is_not_written_through(

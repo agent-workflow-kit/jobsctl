@@ -104,6 +104,14 @@ def _noop_handler(signum: int, frame: object) -> None:
     return None
 
 
+def _recorded_for(record: ExitRecord, leftovers: Leftovers) -> int | None:
+    """An unknown exit keeps `null` for an empty incomplete probe; otherwise the count (a lower
+    bound when the scan was incomplete)."""
+    if record.kind == "unknown":
+        return leftovers.recorded_unless_unproven
+    return leftovers.recorded
+
+
 class StopSignal:
     """SIGTERM, recorded by the handler and looked at by the loops."""
 
@@ -974,7 +982,7 @@ class Shim:
                     reason=outcome.reason,
                     hold_reason=outcome.hold_reason,
                     exit=record,
-                    leftovers=leftovers.recorded,
+                    leftovers=_recorded_for(record, leftovers),
                     tail=ResultTail(tail.text, tail.bytes_seen, tail.truncated),
                     ended_at=self._now(),
                 ),
@@ -1007,7 +1015,7 @@ class Shim:
                     self.claim_id,
                     outcome=outcome,
                     exit_record=record,
-                    leftovers=leftovers.recorded,
+                    leftovers=_recorded_for(record, leftovers),
                     tail=tail,
                     clock=self._now,
                 ),
