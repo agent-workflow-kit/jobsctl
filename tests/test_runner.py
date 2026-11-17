@@ -801,6 +801,143 @@ def test_the_run_warning_names_the_failed_check_and_matches_the_log_record(
     assert "abc123secret" not in str(document)
 
 
+def _unsafe_records(store: Store) -> list[dict[str, Any]]:
+    return [e for e in log_events(store) if e["event"] == "env_file_unsafe"]
+
+
+@pytest.mark.parametrize(
+    "reason", ["path", "open", "not_regular", "owner", "read", "mode", "size", "ancestor"]
+)
+def test_a_configured_unsafe_env_file_is_reported_with_nothing_queued(
+    reason: str,
+    store: Store,
+    kit: ShimKit,
+    runners: list[Runner],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _exempt_tmp_ancestors(monkeypatch, tmp_path)
+    path = _env_file_for_reason(reason, tmp_path, monkeypatch)
+    runner = make_runner(runners, store, cfg(default_cap=None, env_file=path), kit=kit)
+    result = runner.run_pass()
+    document = result.as_json()
+    validate_against("cli/run.json", document)
+    (warning,) = document["warnings"]
+    assert (warning["code"], warning["reason"]) == ("env_file_unsafe", reason)
+    (record,) = _unsafe_records(store)
+    assert record["details"]["reason"] == reason
+    assert "abc123secret" not in str(document) + (store.paths.root / "log.jsonl").read_text()
+    second = runner.run_pass()  # same state: the warning is still reported, the log is not
+    assert [w["code"] for w in second.warnings] == ["env_file_unsafe"]
+    assert len(_unsafe_records(store)) == 1
+
+
+def test_a_safe_configured_env_file_gives_no_warning(
+    store: Store,
+    kit: ShimKit,
+    runners: list[Runner],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _exempt_tmp_ancestors(monkeypatch, tmp_path)
+    directory = tmp_path / "private"
+    directory.mkdir(mode=0o700)
+    env_file = directory / "env"
+    env_file.write_text("TOKEN=abc123secret\n", encoding="utf-8")
+    env_file.chmod(0o600)
+    runner = make_runner(runners, store, cfg(default_cap=None, env_file=str(env_file)), kit=kit)
+    result = runner.run_pass()
+    assert result.warnings == []
+    validate_against("cli/run.json", result.as_json())
+    assert _unsafe_records(store) == []
+
+
+def test_no_env_file_configured_means_no_check_and_no_file_access(
+    store: Store, kit: ShimKit, runners: list[Runner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str | None] = []
+
+    def load(path: str | None) -> Any:
+        calls.append(path)
+        return env_file_module.load_env_file(path)
+
+    monkeypatch.setattr("jobsctl.runner.load_env_file", load)
+    result = make_runner(runners, store, cfg(default_cap=None), kit=kit).run_pass()
+    assert calls == [] and result.warnings == [] and log_events(store) == []
+
+
+def test_an_unsafe_env_file_is_loaded_once_per_pass_and_with_a_job_warns_once(
+    store: Store,
+    kit: ShimKit,
+    runners: list[Runner],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (wants,) = job_ids(1)
+    add_queued(store, wants, pass_env='["TOKEN"]')
+    env_file = tmp_path / "secrets.env"
+    env_file.write_text("TOKEN=abc123secret\n", encoding="utf-8")
+    env_file.chmod(0o666)
+    loads: list[str | None] = []
+    real = env_file_module.load_env_file
+
+    def counting(path: str | None) -> Any:
+        loads.append(path)
+        return real(path, check_ancestors_from=tmp_path)
+
+    monkeypatch.setattr("jobsctl.runner.load_env_file", counting)
+    result = make_runner(runners, store, cfg(default_cap=None, env_file=str(env_file)), kit=kit)
+    out = result.run_pass()
+    assert loads == [str(env_file)]  # one load, however many claims or queued jobs need it
+    assert job_row(store, wants)["status"] == "queued"
+    assert [w["code"] for w in out.warnings] == ["env_file_unsafe"]
+    assert len(_unsafe_records(store)) == 1
+
+
+def test_the_env_file_state_changes_follow_the_once_per_state_rule(
+    store: Store,
+    kit: ShimKit,
+    runners: list[Runner],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _exempt_tmp_ancestors(monkeypatch, tmp_path)
+    directory = tmp_path / "private"
+    directory.mkdir(mode=0o700)
+    env_file = directory / "env"
+    env_file.write_text("TOKEN=abc123secret\n", encoding="utf-8")
+    runner = make_runner(runners, store, cfg(default_cap=None, env_file=str(env_file)), kit=kit)
+    env_file.chmod(0o666)
+    assert [w["reason"] for w in runner.run_pass().warnings] == ["mode"]
+    env_file.chmod(0o600)
+    assert runner.run_pass().warnings == []
+    env_file.chmod(0o666)
+    assert [w["reason"] for w in runner.run_pass().warnings] == ["mode"]
+    assert len(_unsafe_records(store)) == 2  # clearing re-arms silently; unsafe again logs
+
+
+def test_a_pass_that_does_not_hold_the_lease_does_not_check_the_env_file(
+    store: Store,
+    runners: list[Runner],
+    sleeper: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = dt.datetime.now(dt.UTC)
+    assert take_lease(
+        store, "runner", sleeper, now=format_timestamp(now), expires_at=expiry(now),
+        is_alive=lambda _h: True,
+    )  # fmt: skip
+    env_file = tmp_path / "secrets.env"
+    env_file.write_text("TOKEN=abc123secret\n", encoding="utf-8")
+    env_file.chmod(0o666)
+    loads: list[str | None] = []
+    monkeypatch.setattr("jobsctl.runner.load_env_file", lambda p: loads.append(p))
+    result = make_runner(runners, store, cfg(env_file=str(env_file))).run_pass()
+    assert result.already_running and result.warnings == [] and loads == []
+    assert _unsafe_records(store) == []
+
+
 def test_the_env_file_warning_is_reported_once_per_pass_however_often_it_claims(
     store: Store, kit: ShimKit, runners: list[Runner], tmp_path: Path
 ) -> None:
