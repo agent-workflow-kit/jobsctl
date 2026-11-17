@@ -131,6 +131,8 @@ _V1: tuple[str, ...] = (
 
 # Version 2: backoff of an event whose hook leader outlived SIGKILL (interface.md, Delivery).
 # `attempts` counts those failures; `retry_after` (timestamp text) is the earliest next delivery.
+# The ALTER statements are not idempotent by design: the whole migration runs in one transaction
+# together with the `user_version` bump, so it is applied completely or not at all.
 _V2: tuple[str, ...] = (
     "ALTER TABLE hook_outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE hook_outbox ADD COLUMN retry_after TEXT",

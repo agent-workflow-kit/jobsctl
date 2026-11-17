@@ -535,6 +535,11 @@ class Runner:
         with self.store.read() as tx:
             stuck = stuck_findings(tx)
         for item in stuck:
+            if any(
+                r["finding"] == STUCK_FINDING and r["event_id"] == item["event_id"]
+                for r in result.reconciled
+            ):
+                continue  # a pass that repeats (a changed pass_requested) reports an event once
             result.reconciled.append(item)
             event_id, attempts = str(item["event_id"]), int(item["attempts"])
             self._safely(

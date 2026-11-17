@@ -137,7 +137,8 @@ class Deliverer:
     """Plans, runs and records the delivery of outbox events for one process.
 
     ``runner`` is ``run_hook`` (tests replace it); ``diag`` receives short messages (never
-    hook output or environment values); ``cwd`` is jobsctl's state directory."""
+    hook output or environment values); ``cwd`` is jobsctl's state directory. A command's
+    delivery passes ``announce_deferred=False``: only ``_deliver`` and the shim say so."""
 
     def __init__(
         self,
@@ -150,6 +151,7 @@ class Deliverer:
         tuning: HookTuning | None = None,
         runner: Runner = run_hook,
         diag: Callable[[str], None] | None = None,
+        announce_deferred: bool = True,
     ) -> None:
         self.store = store
         self.config = config
@@ -159,6 +161,7 @@ class Deliverer:
         self.tuning = tuning
         self.runner = runner
         self.diag = diag or _stderr_warning
+        self.announce_deferred = announce_deferred  # False: a command says nothing of a deferral
         self.cwd: Path = store.paths.root
         self._noticed: set[str] = set()
         self.env = HookEnvironment.load(config, environ)
@@ -288,7 +291,7 @@ class Deliverer:
         before an event is marked delivered (a command passes ``InterruptGuard.check``; it
         raises to abandon the delivery). ``True`` when no synchronous event is left
         undelivered; ``False`` when the delivery stopped early (``stop`` answered, or the lease
-        was lost) and left events undelivered."""
+        was lost) or the next event is deferred (backing off), and left events undelivered."""
         self.refresh()
 
         def stop_and_tick() -> str | None:
@@ -335,7 +338,7 @@ class Deliverer:
         if until is None:
             return False
         event_id = str(row["event_id"])
-        if event_id not in self._noticed:
+        if self.announce_deferred and event_id not in self._noticed:
             self._noticed.add(event_id)
             self.diag(
                 f"the hook event {event_id} is deferred until {until} (a hook outlived SIGKILL)"

@@ -2710,6 +2710,38 @@
         "finding",
         "action"
       ],
+      "if": {
+        "properties": {
+          "finding": {
+            "const": "hook_delivery_stuck"
+          }
+        },
+        "required": [
+          "finding"
+        ]
+      },
+      "then": {
+        "required": [
+          "event_id",
+          "attempts"
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "event_id"
+              ]
+            },
+            {
+              "required": [
+                "attempts"
+              ]
+            }
+          ]
+        }
+      },
       "description": "A reconcile finding (interface: Reconcile)."
     },
     "hook_job": {

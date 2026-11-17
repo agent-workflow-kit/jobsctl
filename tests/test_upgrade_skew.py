@@ -42,7 +42,8 @@ LAUNCHER = textwrap.dedent(
 
 def launcher(tmp_path: Path, version: str) -> str:
     """An executable standing in for the interpreter a pass spawns: it runs `_shim` with the
-    migrations of `version` ("old": the previous release, "new": one additive migration more)."""
+    migrations of `version` ("old": the current release, "new": one additive migration more,
+    "v1_release": the v0.31.2 release, schema version 1)."""
     import sys
 
     path = tmp_path / f"jobsctl-{version}"
@@ -81,12 +82,14 @@ def test_an_old_shim_finishes_its_job_against_a_migrated_database(
     assert real_shims.row("SELECT 1 FROM leases WHERE name = ?", f"job:{JOB}") is None
 
 
-def test_the_shim_of_the_release_before_the_hook_backoff_works_on_the_migrated_schema(
+def test_the_shim_of_the_v1_release_works_on_the_migrated_schema(
     real_shims: RealShims, tmp_path: Path
 ) -> None:
     with Store.open(mode=OpenMode.CLI):  # migrated to the schema with `attempts`/`retry_after`
         pass
-    popen = real_shims.seed_and_spawn(["sh", "-c", "exit 0"], python=launcher(tmp_path, "previous"))
+    popen = real_shims.seed_and_spawn(
+        ["sh", "-c", "exit 0"], python=launcher(tmp_path, "v1_release")
+    )
     real_shims.wait_status("done")
     assert popen.wait(timeout=60) == 0
     assert user_version() == len(MIGRATIONS)  # not downgraded

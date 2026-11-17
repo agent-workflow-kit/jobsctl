@@ -7,6 +7,7 @@ be made safely); the clock is a fake the test moves, so nothing sleeps.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -22,17 +23,19 @@ from jobsctl.hook_retry import (
     BACKOFF_CAP_SECONDS,
     STUCK_ATTEMPTS,
     backoff_seconds,
+    record_unkillable,
 )
 from jobsctl.hook_run import HookResult
 from jobsctl.runner import Runner
 from jobsctl.store_db import Store
+from jobsctl.store_ops import counter_incr
 from jobsctl.store_schema import MIGRATIONS
 from jobsctl.timestamps import format_timestamp
 from jobsctl.triggers import has_undelivered, redeliverable_jobs
 from tests.conftest import validate_against
 from tests.delivery_helpers import fake_result, open_store, pending
 from tests.helpers import run_cli
-from tests.manual_helpers import log_records, outbox, sql
+from tests.manual_helpers import add_job, config_file, log_records, outbox, sql
 from tests.test_delivery import _async_cfg, async_events  # pyright: ignore[reportPrivateUsage]
 
 pytestmark = pytest.mark.usefixtures("validated_records")
@@ -184,6 +187,60 @@ def test_a_deferred_sync_event_is_skipped_by_redelivery_and_its_job_alone(
     assert hook.calls.count(good) == 1
 
 
+def test_a_deferred_sync_event_blocks_only_its_own_jobs_sync_events(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Job A: two sync events (the first deferred) and an async one; job B: one sync event."""
+    a, b = async_events(capsys, tmp_path, 2, 1)
+    sql("UPDATE hook_outbox SET async = 0")
+    first = event_row(a)
+    second = {**first["payload"], "event_id": f"{a}:post-held:second"}
+    for event_id, is_async in ((second["event_id"], 0), (f"{a}:post-held:async", 1)):
+        sql(
+            "INSERT INTO hook_outbox (event_id, job_id, hook, payload, async, created_at) "
+            "VALUES (?, ?, 'post-held', ?, ?, 'x')",
+            event_id,
+            a,
+            json.dumps({**second, "event_id": event_id}),
+            is_async,
+        )
+    sql(
+        "UPDATE hook_outbox SET attempts = 1, retry_after = ? WHERE event_id = ?",
+        format_timestamp(T0 + dt.timedelta(seconds=30)),
+        first["event_id"],
+    )
+    cfg = Config.model_validate({"hooks": {"post-held": [{"name": "w", "cmd": "true"}]}})
+    with open_store() as store, store.read() as tx:
+        assert redeliverable_jobs(tx, _host(), T0) == [b]
+        d = Deliverer(store, cfg, clock=Clock(), diag=lambda m: None)
+        assert d.next_event(b, is_async=False) is not None
+        assert d.next_event(a, is_async=True) is not None  # A's async event stays deliverable
+        # the deferral is the first sync event of A: its later sync event waits behind it
+        deferred = d.next_event(a, is_async=False)
+        assert deferred is not None and deferred["event_id"] == first["event_id"]
+        assert d.defer_notice(deferred)
+        assert not d.defer_notice(d.next_event(b, is_async=False))  # pyright: ignore
+        sql("UPDATE hook_outbox SET delivered_at = 'x' WHERE job_id = ? AND async = 0", b)
+    with open_store() as store, store.read() as tx:
+        assert redeliverable_jobs(tx, _host(), T0) == []  # only A's sync events were left
+        assert has_undelivered(tx, _host(), T0)  # A's async event is deliverable
+        sql("UPDATE hook_outbox SET delivered_at = 'x' WHERE async = 1")
+    with open_store() as store, store.read() as tx:
+        assert not has_undelivered(tx, _host(), T0)
+        assert redeliverable_jobs(tx, _host(), T0 + dt.timedelta(seconds=30)) == [a]
+
+
+def test_an_unkillable_failure_of_a_delivered_event_changes_nothing(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    (job,) = async_events(capsys, tmp_path, 1, 1)
+    sql("UPDATE hook_outbox SET delivered_at = 'x'")
+    before = event_row(job)
+    with open_store() as store, store.write() as tx:
+        assert record_unkillable(tx, before["event_id"], T0) is None
+    assert event_row(job) == before
+
+
 @pytest.mark.parametrize("mode", ["failed", "timeout"])
 def test_ordinary_failures_do_not_count_and_are_never_retried(
     capsys: pytest.CaptureFixture[str], tmp_path: Path, mode: str
@@ -228,6 +285,29 @@ def test_a_sync_delivery_by_a_command_counts_the_failure_too(
     assert event_row(bad)["attempts"] == 1
 
 
+def test_cancel_with_a_deferred_earlier_event_runs_no_hook_and_says_nothing(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    out = tmp_path / "ran"
+    hook = [{"name": "w", "cmd": f"echo ran >> {out}"}]
+    cfg = config_file(tmp_path, hooks={"post-held": hook, "post-cancel": hook})
+    job = add_job(capsys, config=cfg)
+    assert run_cli(capsys, "--config", cfg, "--json", "hold", job).code == 0
+    out.unlink()  # the hold ran its hook; now its event backs off
+    (first,) = outbox()
+    far = format_timestamp(dt.datetime.now(dt.UTC) + dt.timedelta(hours=1))
+    sql(
+        "UPDATE hook_outbox SET delivered_at = NULL, attempts = 1, retry_after = ?",
+        far,
+    )
+    res = run_cli(capsys, "--config", cfg, "--json", "cancel", job)
+    assert res.code == 0, res.out + res.err
+    assert res.err == "" and not out.exists()  # nothing said, no hook run
+    events = outbox()
+    assert [e["event_id"] for e in events if e["delivered_at"] is None][0] == first["event_id"]
+    assert len([e for e in events if e["delivered_at"] is None]) == 2  # left for `_deliver`
+
+
 # -- the finding -----------------------------------------------------------------------------
 
 
@@ -251,6 +331,34 @@ def test_below_the_threshold_there_is_no_finding(
     make_stuck(capsys, tmp_path, STUCK_ATTEMPTS - 1)
     res = run_cli(capsys, "--json", "reconcile")
     assert res.envelope()["findings"] == []
+
+
+@pytest.mark.parametrize(("attempts", "findings"), [(4, 0), (5, 1)])
+def test_the_threshold_is_five_attempts(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, attempts: int, findings: int
+) -> None:
+    make_stuck(capsys, tmp_path, attempts)
+    assert len(run_cli(capsys, "--json", "reconcile").envelope()["findings"]) == findings
+
+
+def test_a_pass_that_repeats_reports_a_stuck_event_once(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _, event = make_stuck(capsys, tmp_path, STUCK_ATTEMPTS)
+    bumped: list[str] = []
+
+    def probe(step: str) -> None:
+        if step == "release" and not bumped:  # a request that arrives while the pass runs
+            bumped.append(step)
+            with open_store() as other, other.write() as tx:
+                counter_incr(tx, "pass_requested")
+
+    with open_store() as store:
+        runner = Runner(store, Config(), None, clock=Clock())
+        runner.probe = probe
+        body = runner.run_pass().as_json()
+    assert bumped
+    assert [f["event_id"] for f in body["reconciled"]] == [event]
 
 
 @pytest.mark.parametrize("attempts", [STUCK_ATTEMPTS, STUCK_ATTEMPTS + 2])
@@ -352,3 +460,40 @@ def test_the_previous_versions_statements_work_on_a_migrated_outbox() -> None:
         )
         assert len(rows) == 1
         tx.execute("UPDATE hook_outbox SET delivered_at = 'd' WHERE event_id = 'e1'")
+
+
+# -- the schema ------------------------------------------------------------------------------
+
+
+def _finding(**extra: Any) -> dict[str, Any]:
+    return {"job_id": "jb-aaaaaaaa", "finding": "hook_delivery_stuck", "action": "reported"} | extra
+
+
+def _check_finding(doc: dict[str, Any]) -> None:
+    validate_against(
+        "cli/reconcile.json",
+        {"already_running": False, "holder": None, "dry_run": False, "findings": [doc]},
+    )
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        _finding(),  # event_id and attempts are required
+        _finding(event_id="e1"),
+        _finding(attempts=5),
+        _finding(event_id="e1", attempts=5) | {"finding": "hooks_redelivered"},
+    ],
+)
+def test_the_finding_schema_ties_event_id_and_attempts_to_the_stuck_finding(
+    doc: dict[str, Any],
+) -> None:
+    from jsonschema import ValidationError
+
+    with pytest.raises(ValidationError):
+        _check_finding(doc)
+
+
+def test_the_finding_schema_accepts_the_stuck_finding_and_the_others() -> None:
+    _check_finding(_finding(event_id="e1", attempts=5))
+    _check_finding(_finding() | {"finding": "hooks_redelivered", "action": "redelivered"})
