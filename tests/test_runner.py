@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -960,6 +961,56 @@ def test_the_env_file_warning_is_reported_once_per_pass_however_often_it_claims(
     result = runner.run_pass()
     assert len(releases) == 2
     assert [w["code"] for w in result.warnings] == ["env_file_unsafe"]
+
+
+def test_a_failing_env_state_log_write_still_reports_the_warning(
+    store: Store,
+    kit: ShimKit,
+    runners: list[Runner],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = tmp_path / "secrets.env"
+    env_file.write_text("TOKEN=abc123secret\n", encoding="utf-8")
+    env_file.chmod(0o666)
+
+    def failing(*_args: Any, **_kwargs: Any) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("jobsctl.runner.log_env_file_state", failing)
+    result = make_runner(runners, store, cfg(env_file=str(env_file)), kit=kit).run_pass()
+    assert [w["code"] for w in result.warnings] == ["env_file_unsafe"]
+
+
+def test_a_fresh_pass_reports_the_unchanged_unsafe_env_file_again_without_logging(
+    store: Store, kit: ShimKit, runners: list[Runner], tmp_path: Path
+) -> None:
+    env_file = tmp_path / "secrets.env"
+    env_file.write_text("TOKEN=abc123secret\n", encoding="utf-8")
+    env_file.chmod(0o666)
+    config = cfg(env_file=str(env_file))
+    first = make_runner(runners, store, config, kit=kit).run_pass()
+    second = make_runner(runners, store, config, kit=kit).run_pass()  # a new Runner: new cache
+    assert [w["code"] for w in first.warnings] == ["env_file_unsafe"]
+    assert [w["code"] for w in second.warnings] == ["env_file_unsafe"]
+    assert len(_unsafe_records(store)) == 1
+
+
+def test_reconcile_does_not_check_the_env_file(
+    store: Store,
+    kit: ShimKit,
+    runners: list[Runner],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = tmp_path / "secrets.env"
+    env_file.write_text("TOKEN=abc123secret\n", encoding="utf-8")
+    env_file.chmod(0o666)
+    loads: list[str | None] = []
+    monkeypatch.setattr("jobsctl.runner.load_env_file", lambda p: loads.append(p))
+    result = make_runner(runners, store, cfg(env_file=str(env_file)), kit=kit).run_reconcile()
+    assert loads == []
+    assert [w for w in result.warnings if w["code"] == "env_file_unsafe"] == []
 
 
 def test_the_pass_summary_is_logged_only_when_something_changed(

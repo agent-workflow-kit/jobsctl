@@ -342,7 +342,9 @@ class Runner:
     def _check_env_file(self, result: PassResult) -> None:
         """Load and check a configured `env_file` once per pass, whether or not a queued job
         needs it, so `env_file_unsafe` (log record and `run --json` warning) is always reported.
-        Nothing is read when none is configured; a failure never fails the pass."""
+        Nothing is read when none is configured. Only the logging is guarded: a failure to write
+        the log record never fails the pass, but a load failure propagates as it did from the
+        claim."""
         if self.config.env_file is None:
             return
         self._env_unavailable()
@@ -374,7 +376,6 @@ class Runner:
     def _log_env_state(self, result: PassResult) -> None:
         env_file = self._env_file
         assert env_file is not None
-        log_env_file_state(self.writer, self.config.env_file, env_file)
         unsafe = next((w for w in env_file.warnings if w.code == "env_file_unsafe"), None)
         if unsafe is not None and not any(w["code"] == "env_file_unsafe" for w in result.warnings):
             assert unsafe.reason is not None  # _unavailable always sets it
@@ -385,6 +386,7 @@ class Runner:
                     "reason": unsafe.reason,
                 }
             )
+        log_env_file_state(self.writer, self.config.env_file, env_file)
 
     def _spawn_one(self, claim: Claim, result: PassResult) -> None:
         """One claim's spawn; its failure (a busy database, a database error) returns that job to
