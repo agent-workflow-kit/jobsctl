@@ -20,6 +20,7 @@ import pytest
 from jobsctl.runner import Child, PassResult, Runner
 from jobsctl.store_db import OpenMode, Store
 from jobsctl.store_dir import resolve_state_dir
+from jobsctl.store_schema import MIGRATIONS
 from tests.shim_helpers import CLAIM, JOB
 from tests.shim_real import RealShims
 from tests.upgrade_schemas import V2
@@ -74,10 +75,21 @@ def test_an_old_shim_finishes_its_job_against_a_migrated_database(
     assert att["shim_confirmed_at"] and att["note2"] is None
     job = real_shims.row("SELECT * FROM jobs WHERE id = ?", JOB)
     assert job["score"] == 7  # the column the old code never heard of keeps its default
-    assert user_version() == 2  # the old shim neither downgraded nor touched the schema
+    assert user_version() == len(V2)  # the old shim neither downgraded nor touched the schema
     tail = real_shims.row("SELECT tail FROM outputs WHERE job_id = ?", JOB)
     assert bytes(tail["tail"]) == b"from-the-job\n"
     assert real_shims.row("SELECT 1 FROM leases WHERE name = ?", f"job:{JOB}") is None
+
+
+def test_the_shim_of_the_release_before_the_hook_backoff_works_on_the_migrated_schema(
+    real_shims: RealShims, tmp_path: Path
+) -> None:
+    with Store.open(mode=OpenMode.CLI):  # migrated to the schema with `attempts`/`retry_after`
+        pass
+    popen = real_shims.seed_and_spawn(["sh", "-c", "exit 0"], python=launcher(tmp_path, "previous"))
+    real_shims.wait_status("done")
+    assert popen.wait(timeout=60) == 0
+    assert user_version() == len(MIGRATIONS)  # not downgraded
 
 
 def test_a_new_shim_on_an_older_database_exits_before_confirming_and_writes_nothing(
@@ -92,7 +104,7 @@ def test_a_new_shim_on_an_older_database_exits_before_confirming_and_writes_noth
         0,
     )
     assert real_shims.row("SELECT COUNT(*) FROM leases WHERE name = ?", f"job:{JOB}")[0] == 0
-    assert user_version() == 1  # the shim does not migrate
+    assert user_version() == len(MIGRATIONS)  # the shim does not migrate
     log = resolve_state_dir() / "shims" / f"{JOB}.log"
     assert "older than this jobsctl" in log.read_text(encoding="utf-8")
     assert stat.S_IMODE(log.stat().st_mode) == 0o600 and not log.is_symlink()
@@ -142,7 +154,9 @@ def test_an_internal_process_on_an_older_schema_exits_one_before_writing(
     before = db.read_bytes()
     res = run_cli(capsys, *argv)
     assert res.code == 1 and "older" in res.err
-    assert user_version() == 1 and db.read_bytes() == before  # not even a pragma wrote
+    assert (
+        user_version() == len(MIGRATIONS) and db.read_bytes() == before
+    )  # not even a pragma wrote
 
 
 @pytest.mark.parametrize("argv", [["_deliver"], ["_kill", JOB]])
@@ -155,4 +169,4 @@ def test_an_internal_process_of_the_previous_version_works_on_a_migrated_schema(
         pass
     res = run_cli(capsys, *argv)
     assert res.code in (0, 10), res.err  # nothing to deliver, or no such job: never a version error
-    assert user_version() == 2
+    assert user_version() == len(V2)

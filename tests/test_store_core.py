@@ -437,6 +437,7 @@ def test_additive_statements_are_allowed(sql: str) -> None:
     check_additive(sql)
 
 
+N = len(MIGRATIONS)  # the current schema version; V2_COLUMN is one more
 V2_COLUMN = MIGRATIONS + (("ALTER TABLE jobs ADD COLUMN score INTEGER NOT NULL DEFAULT 7",),)
 
 
@@ -444,19 +445,19 @@ def test_a_migration_adds_a_column_with_a_default_and_old_rows_read_correctly(
     state: Path,
 ) -> None:
     with Store.open(state) as v1:
-        assert v1.schema_version == 1
+        assert v1.schema_version == N
         with v1.write() as tx:
             insert_row(tx, "jobs", job_values("jb-aaaaaaaa"))
             insert_row(tx, "jobs", job_values("jb-bbbbbbbb", queue="other"))
     with Store.open(state, migrations=V2_COLUMN) as v2:
-        assert v2.schema_version == 2
-        assert v2.current_version() == 2
+        assert v2.schema_version == N + 1
+        assert v2.current_version() == N + 1
         rows = v2.query_all("SELECT id, score FROM jobs ORDER BY id")
         assert [(r["id"], r["score"]) for r in rows] == [("jb-aaaaaaaa", 7), ("jb-bbbbbbbb", 7)]
         assert "score" in v2.columns("jobs")
     # the previous version keeps working against the migrated database
     with Store.open(state, mode=OpenMode.INTERNAL) as old:
-        assert old.current_version() == 2
+        assert old.current_version() == N + 1
         assert old.query_one("SELECT count(*) AS c FROM jobs")["c"] == 2  # type: ignore[index]
         with old.write() as tx:
             insert_row(tx, "jobs", job_values("jb-cccccccc"))
@@ -466,7 +467,7 @@ def test_a_migration_adds_a_column_with_a_default_and_old_rows_read_correctly(
 def test_migration_is_idempotent_across_reopens(state: Path) -> None:
     for _ in range(3):
         with Store.open(state, migrations=V2_COLUMN) as store:
-            assert store.current_version() == 2
+            assert store.current_version() == N + 1
 
 
 def test_a_failing_migration_rolls_back_completely(state: Path) -> None:
@@ -481,7 +482,7 @@ def test_a_failing_migration_rolls_back_completely(state: Path) -> None:
         Store.open(state, migrations=bad)
     assert err.value.code == "internal"
     with Store.open(state) as store:
-        assert store.current_version() == 1
+        assert store.current_version() == N
         names = {r["name"] for r in store.query_all("SELECT name FROM sqlite_master")}
         assert "half_done" not in names
 
@@ -491,7 +492,7 @@ def test_a_non_additive_migration_is_refused_before_touching_the_database(state:
     with pytest.raises(ValueError, match="additive"):
         Store.open(state, migrations=MIGRATIONS + (("DROP TABLE counters",),))
     with Store.open(state) as store:
-        assert store.current_version() == 1
+        assert store.current_version() == N
         assert store.query_one("SELECT count(*) AS c FROM counters") is not None
 
 
@@ -600,11 +601,11 @@ def test_internal_open_on_an_older_schema_writes_nothing(state: Path) -> None:
     with pytest.raises(SchemaOlderError) as err:
         Store.open(state, mode=OpenMode.INTERNAL, migrations=V2_COLUMN)
     assert err.value.code == "internal"
-    assert (err.value.found, err.value.known) == (1, 2)
+    assert (err.value.found, err.value.known) == (N, N + 1)
     assert (state / "state.db").read_bytes() == before
     assert not (state / "state.db-wal").exists() or (state / "state.db-wal").stat().st_size == 0
     with Store.open(state) as store:
-        assert store.current_version() == 1  # still not migrated
+        assert store.current_version() == N  # still not migrated
 
 
 def test_internal_open_on_a_fresh_database_exits_before_writing(state: Path) -> None:

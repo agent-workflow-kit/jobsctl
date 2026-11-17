@@ -12,4 +12,6 @@ V2 = (
         "CREATE TABLE extra_v2 (k TEXT NOT NULL PRIMARY KEY, v TEXT)",
     ),
 )
-SCHEMAS = {"old": MIGRATIONS, "new": V2}
+# The release before the hook-retry backoff (#72): schema version 1, no `hook_outbox.attempts`.
+PREVIOUS = MIGRATIONS[:1]
+SCHEMAS = {"old": MIGRATIONS, "new": V2, "previous": PREVIOUS}

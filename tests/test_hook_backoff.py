@@ -216,7 +216,10 @@ def test_a_sync_delivery_by_a_command_counts_the_failure_too(
 ) -> None:
     (bad,) = async_events(capsys, tmp_path, 1, 1)
     sql("UPDATE hook_outbox SET async = 0")
-    cfg, clock = Config.model_validate({"hooks": {"post-held": [{"name": "w", "cmd": "true"}]}}), Clock()
+    cfg, clock = (
+        Config.model_validate({"hooks": {"post-held": [{"name": "w", "cmd": "true"}]}}),
+        Clock(),
+    )
     with open_store() as store:
         d = Deliverer(store, cfg, runner=Hook({bad}), clock=clock, diag=lambda m: None)
         with pytest.raises(JobsctlError):
@@ -228,7 +231,9 @@ def test_a_sync_delivery_by_a_command_counts_the_failure_too(
 # -- the finding -----------------------------------------------------------------------------
 
 
-def make_stuck(capsys: pytest.CaptureFixture[str], tmp_path: Path, attempts: int) -> tuple[str, str]:
+def make_stuck(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, attempts: int
+) -> tuple[str, str]:
     (job,) = async_events(capsys, tmp_path, 1, 1)
     event = event_row(job)["event_id"]
     sql(

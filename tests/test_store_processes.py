@@ -126,7 +126,7 @@ def state(tmp_path: Path) -> Path:
 def test_concurrent_first_opens_create_one_valid_database(pool: Pool, state: Path) -> None:
     workers = pool.spawn_many(8, state, "open")
     pool.go()
-    assert [w.result() for w in workers] == [{"version": 1}] * 8
+    assert [w.result() for w in workers] == [{"version": len(MIGRATIONS)}] * 8
     with Store.open(state) as store:
         assert store.query_one("PRAGMA integrity_check")[0] == "ok"  # type: ignore[index]
 
@@ -135,9 +135,9 @@ def test_concurrent_migrations_apply_once(pool: Pool, state: Path) -> None:
     Store.open(state).close()
     workers = pool.spawn_many(8, state, "open", "v2")
     pool.go()
-    assert [w.result() for w in workers] == [{"version": 2}] * 8
+    assert [w.result() for w in workers] == [{"version": len(MIGRATIONS) + 1}] * 8
     with Store.open(state, migrations=MIGRATIONS) as store:
-        assert store.current_version() == 2
+        assert store.current_version() == len(MIGRATIONS) + 1
 
 
 def test_racing_cas_transitions_have_exactly_one_winner(pool: Pool, state: Path) -> None:
@@ -251,7 +251,7 @@ def test_a_busy_migration_is_exit_1_busy(pool: Pool, state: Path) -> None:
     assert err.value.code == "busy"
     pool.kill(holder)
     with Store.open(state) as store:
-        assert store.current_version() == 1
+        assert store.current_version() == len(MIGRATIONS)
 
 
 def test_sigkill_mid_transaction_leaves_nothing_and_no_lock(pool: Pool, state: Path) -> None:
@@ -298,7 +298,11 @@ def test_internal_open_on_an_older_schema_in_another_process_writes_nothing(
         store.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     before = (state / "state.db").read_bytes()
     worker = pool.spawn(state, "internal-open")
-    assert worker.result() == {"older": True, "found": 1, "known": 2}
+    assert worker.result() == {
+        "older": True,
+        "found": len(MIGRATIONS),
+        "known": len(MIGRATIONS) + 1,
+    }
     assert (state / "state.db").read_bytes() == before
     with Store.open(state, mode=OpenMode.INTERNAL) as same:  # same version as the db: opens
-        assert same.current_version() == 1
+        assert same.current_version() == len(MIGRATIONS)
