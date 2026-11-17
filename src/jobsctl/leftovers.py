@@ -10,7 +10,9 @@ unreaped (so its process group id is reserved):
   PIDs; the others only count.
 
 A scan that could not read every `/proc` entry (`hidepid`, a vanished entry) is incomplete: the
-count is then a lower bound, and a count of 0 is not proof that nothing is left.
+count is then a lower bound, and a count of 0 is not proof that nothing is left. It is still
+recorded as an integer for an exit that was observed (`recorded`); only exit kind `unknown`
+records `null` for an empty incomplete probe (`recorded_unless_unproven`).
 """
 
 from __future__ import annotations
@@ -33,8 +35,16 @@ class Leftovers:
         return len(self.pids)
 
     @property
-    def recorded(self) -> int | None:
-        """The attempt's `leftovers`: the count, or `None` for an empty but incomplete probe."""
+    def recorded(self) -> int:
+        """The `leftovers` of an attempt whose job exited or was signaled: the number of PIDs
+        found. When the scan was incomplete this is a lower bound (0 is then not proof that
+        nothing is left); `complete` and the logged `leftovers` warning say which."""
+        return len(self.pids)
+
+    @property
+    def recorded_unless_unproven(self) -> int | None:
+        """The `leftovers` of an attempt with exit kind `unknown` (no exit status observed): the
+        count, or `None` for an empty but incomplete probe, which proves nothing."""
         if self.pids or self.complete:
             return len(self.pids)
         return None

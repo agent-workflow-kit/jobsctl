@@ -15,8 +15,12 @@ from jobsctl import gateway
 from jobsctl import shim as shim_module
 from jobsctl.config import Config
 from jobsctl.errors import JobsctlError
+from jobsctl.proc_host import GroupScan, default_host
 from jobsctl.result_file import read_result
 from jobsctl.store_db import OpenMode, Store
+from jobsctl.store_dir import resolve_state_dir
+from tests.conftest import validate_against, validate_record_file
+from tests.helpers import run_cli
 from tests.kill_guard import allow
 from tests.shim_helpers import (
     JOB,
@@ -161,7 +165,58 @@ def test_leftovers_are_counted_logged_and_never_signaled(store: Store, tmp_path:
 def test_a_clean_exit_records_zero_leftovers_and_logs_nothing(store: Store) -> None:
     seed_claimed(store, ["true"])
     make_shim(store).run()
-    assert attempt(store)["leftovers"] == 0 and log_records("leftovers") == []
+    assert attempt(store)["leftovers"] == 0
+    # an incomplete scan (a loaded host) may add a count-0 info record; no process was left
+    assert [r for r in log_records("leftovers") if r["details"]["count"]] == []
+
+
+class _IncompleteScanHost(type(default_host())):  # type: ignore[misc]
+    """The real host whose `/proc` scans always report one unreadable entry (a loaded host, or
+    `hidepid`): what they find is unchanged, but they are never complete."""
+
+    def scan_group(self, pgid: int) -> GroupScan:
+        got = super().scan_group(pgid)
+        return GroupScan(got.members, got.unreadable + 1, got.hidden)
+
+    def scan_children(self, ppid: int) -> GroupScan:
+        got = super().scan_children(ppid)
+        return GroupScan(got.members, got.unreadable + 1, got.hidden)
+
+
+@pytest.mark.parametrize(
+    ("script", "kind"), [("exit 3", "exited"), ("kill -KILL $$", "signaled")]
+)
+def test_an_incomplete_scan_records_zero_and_the_show_document_validates(
+    store: Store, capsys: pytest.CaptureFixture[str], script: str, kind: str
+) -> None:
+    seed_claimed(store, ["sh", "-c", script])
+    make_shim(store, host=_IncompleteScanHost()).run()
+    row = attempt(store)
+    assert exit_of(store)["kind"] == kind  # type: ignore[index]
+    assert row["leftovers"] == 0 and type(row["leftovers"]) is int
+    res = run_cli(capsys, "--json", "show", JOB)
+    doc = res.envelope()
+    validate_against("cli/show.json", doc)  # the schema demands an integer for exited/signaled
+    assert doc["leftovers"] == 0
+    (rec,) = log_records("leftovers")  # the incompleteness stays observable
+    assert rec["level"] == "info" and rec["details"] == {"count": 0, "complete": False}
+    validate_record_file(resolve_state_dir() / "log.jsonl", "log.json")
+
+
+def test_an_incomplete_scan_that_finds_a_process_records_the_count_and_warns(
+    store: Store, tmp_path: Path
+) -> None:
+    pidfile = tmp_path / "pids"
+    seed_claimed(store, ["sh", "-c", f"sleep 60 & echo $! > {pidfile}; exit 0"])
+    make_shim(store, host=_IncompleteScanHost()).run()
+    pid = int(pidfile.read_text())
+    allow(pid)
+    try:
+        assert attempt(store)["leftovers"] == 1
+        (rec,) = log_records("leftovers")
+        assert rec["level"] == "warn" and rec["details"] == {"count": 1, "complete": False}
+    finally:
+        os.kill(pid, signal.SIGKILL)
 
 
 # -- the result file and the final commit ---------------------------------------------------------

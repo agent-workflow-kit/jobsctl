@@ -772,7 +772,7 @@ class Shim:
         leftovers = count_leftovers(
             self.host, leader_pid=job.pid, pgid=job.pid, own_pid=os.getpid()
         )
-        if leftovers.count:
+        if leftovers.count or not leftovers.complete:
             self._log_leftovers(view, leftovers)
         tail = job.capture.snapshot(final=True)
         natural = natural_outcome(record)
@@ -938,11 +938,18 @@ class Shim:
         return Outcome("failed", seq.cause)
 
     def _log_leftovers(self, view: ClaimView, leftovers: Leftovers) -> None:
+        """A warning when processes remain; an info record when the scan was incomplete and found
+        none, so the recorded 0 stays readable as a lower bound (`details.complete` is false)."""
+        found = leftovers.count > 0
         self._log(
             "leftovers",
             view,
-            level="warn",
-            message="processes outlived the job's leader; they were not signaled",
+            level="warn" if found else "info",
+            message=(
+                "processes outlived the job's leader; they were not signaled"
+                if found
+                else "the process scan was incomplete; the recorded leftovers is a lower bound"
+            ),
             count=leftovers.count,
             complete=leftovers.complete,
         )

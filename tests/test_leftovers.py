@@ -89,9 +89,32 @@ def test_an_incomplete_scan_is_a_lower_bound() -> None:
     assert got.count == 1 and not got.complete and got.recorded == 1
 
 
-def test_an_empty_incomplete_scan_records_null() -> None:
+def test_an_empty_incomplete_scan_records_zero_as_a_lower_bound() -> None:
     got = count_leftovers(host_with(hidden=True), leader_pid=LEADER, pgid=LEADER, own_pid=SHIM)
-    assert got.count == 0 and not got.complete and got.recorded is None
+    assert got.count == 0 and not got.complete
+    assert got.recorded == 0 and type(got.recorded) is int
+
+
+def test_a_complete_scan_records_its_count() -> None:
+    host = host_with(proc(201, pgid=LEADER, ppid=1), proc(300, pgid=300, ppid=SHIM))
+    got = count_leftovers(host, leader_pid=LEADER, pgid=LEADER, own_pid=SHIM)
+    assert got.complete and got.recorded == 2
+
+
+def test_an_unreadable_entry_makes_the_scan_incomplete_and_the_found_pids_still_count() -> None:
+    host = FakeHost(
+        procs={201: proc(201, pgid=LEADER, ppid=1)}, info_errors={999: PermissionError("x")}
+    )
+    got = count_leftovers(host, leader_pid=LEADER, pgid=LEADER, own_pid=SHIM)
+    assert got.recorded == 1
+
+
+def test_the_unknown_exit_kind_keeps_null_for_an_empty_incomplete_scan() -> None:
+    """`_kill` and `job_gone` finalize exit kind `unknown`, where null means "not proven"."""
+    empty = Leftovers((), False)
+    assert empty.recorded_unless_unproven is None
+    assert Leftovers((7,), False).recorded_unless_unproven == 1
+    assert Leftovers((), True).recorded_unless_unproven == 0
 
 
 def test_real_processes_group_members_and_a_setsid_orphan_are_counted_and_not_signaled() -> None:
