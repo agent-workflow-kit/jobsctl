@@ -15,7 +15,7 @@ from jobsctl import gateway
 from jobsctl import shim as shim_module
 from jobsctl.config import Config
 from jobsctl.errors import JobsctlError
-from jobsctl.proc_host import GroupScan, default_host
+from jobsctl.proc_host import GroupScan, LinuxHost
 from jobsctl.result_file import read_result
 from jobsctl.store_db import OpenMode, Store
 from jobsctl.store_dir import resolve_state_dir
@@ -170,7 +170,7 @@ def test_a_clean_exit_records_zero_leftovers_and_logs_nothing(store: Store) -> N
     assert [r for r in log_records("leftovers") if r["details"]["count"]] == []
 
 
-class _IncompleteScanHost(type(default_host())):  # type: ignore[misc]
+class _IncompleteScanHost(LinuxHost):
     """The real host whose `/proc` scans always report one unreadable entry (a loaded host, or
     `hidepid`): what they find is unchanged, but they are never complete."""
 
@@ -183,9 +183,7 @@ class _IncompleteScanHost(type(default_host())):  # type: ignore[misc]
         return GroupScan(got.members, got.unreadable + 1, got.hidden)
 
 
-@pytest.mark.parametrize(
-    ("script", "kind"), [("exit 3", "exited"), ("kill -KILL $$", "signaled")]
-)
+@pytest.mark.parametrize(("script", "kind"), [("exit 3", "exited"), ("kill -KILL $$", "signaled")])
 def test_an_incomplete_scan_records_zero_and_the_show_document_validates(
     store: Store, capsys: pytest.CaptureFixture[str], script: str, kind: str
 ) -> None:
