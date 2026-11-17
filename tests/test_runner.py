@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from jobsctl import env_file as env_file_module
 from jobsctl import gateway
 from jobsctl.config import Config
 from jobsctl.errors import JobsctlError
@@ -699,8 +700,13 @@ def test_nothing_to_deliver_spawns_nothing_and_a_quiet_pass_logs_nothing(
 
 
 def test_an_untrusted_env_file_keeps_pass_env_jobs_queued_and_warns(
-    store: Store, kit: ShimKit, runners: list[Runner], tmp_path: Path
+    store: Store,
+    kit: ShimKit,
+    runners: list[Runner],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _exempt_tmp_ancestors(monkeypatch, tmp_path)
     wants, plain = job_ids(2)
     add_queued(store, wants, position="1".zfill(20), pass_env='["TOKEN"]')
     add_queued(store, plain, position="2".zfill(20))
@@ -711,10 +717,88 @@ def test_an_untrusted_env_file_keeps_pass_env_jobs_queued_and_warns(
     result = runner.run_pass()
     assert result.started == [plain]
     assert job_row(store, wants)["status"] == "queued"
-    assert [w["code"] for w in result.warnings] == ["env_file_unsafe"]
+    assert [(w["code"], w["reason"]) for w in result.warnings] == [("env_file_unsafe", "mode")]
     validate_against("cli/run.json", result.as_json())
     assert "abc123secret" not in (store.paths.root / "log.jsonl").read_text(encoding="utf-8")
     assert "abc123secret" not in str(kit.record(plain)["env"])
+
+
+def _exempt_tmp_ancestors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """pytest's tmp dir sits under the world-writable /tmp, which would fail every env_file with
+    `ancestor`: exempt the ancestors up to tmp_path so the check under test is the one failing."""
+
+    def load(path: str | None) -> Any:
+        return env_file_module.load_env_file(path, check_ancestors_from=tmp_path)
+
+    monkeypatch.setattr("jobsctl.runner.load_env_file", load)
+
+
+def _env_file_for_reason(reason: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """An env_file path that fails exactly the `reason` check, built under tmp_path."""
+    directory = tmp_path / "private"
+    directory.mkdir(mode=0o700)
+    target = directory / "env"
+    if reason == "path":
+        return str(directory / ".." / "env")  # a `..` component (config rejects relative paths)
+    if reason == "open":
+        return str(target)  # missing
+    if reason == "not_regular":
+        target.mkdir(mode=0o700)
+        return str(target)
+    if reason == "owner":
+        target.write_text("TOKEN=abc123secret\n", encoding="utf-8")
+        target.chmod(0o600)
+        real = env_file_module._file_untrusted_reason
+        monkeypatch.setattr(  # only the file looks foreign; the directories stay trusted
+            env_file_module,
+            "_file_untrusted_reason",
+            lambda mode, uid, size, euid: real(mode, uid, size, euid + 1),
+        )
+        return str(target)
+    target.write_text("TOKEN=abc123secret\n", encoding="utf-8")
+    target.chmod(0o600)
+    if reason == "read":
+
+        def failing_read(fd: int) -> tuple[None, str]:
+            os.close(fd)  # the real _read_trusted closes the fd in its finally
+            return None, "read"
+
+        # the file opens and passes every check, then the read fails
+        monkeypatch.setattr(env_file_module, "_read_trusted", failing_read)
+    elif reason == "mode":
+        target.chmod(0o666)
+    elif reason == "size":
+        target.write_bytes(b"A=" + b"x" * env_file_module.MAX_BYTES + b"\n")
+    elif reason == "ancestor":
+        directory.chmod(0o770)
+    return str(target)
+
+
+@pytest.mark.parametrize(
+    "reason", ["path", "open", "not_regular", "owner", "read", "mode", "size", "ancestor"]
+)
+def test_the_run_warning_names_the_failed_check_and_matches_the_log_record(
+    reason: str,
+    store: Store,
+    kit: ShimKit,
+    runners: list[Runner],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (wants,) = job_ids(1)
+    add_queued(store, wants, pass_env='["TOKEN"]')
+    _exempt_tmp_ancestors(monkeypatch, tmp_path)
+    path = _env_file_for_reason(reason, tmp_path, monkeypatch)
+    runner = make_runner(runners, store, cfg(default_cap=None, env_file=path), kit=kit)
+    result = runner.run_pass()
+    document = result.as_json()
+    validate_against("cli/run.json", document)
+    (warning,) = document["warnings"]
+    assert warning["code"] == "env_file_unsafe"
+    assert warning["reason"] == reason
+    (record,) = [e for e in log_events(store) if e["event"] == "env_file_unsafe"]
+    assert record["details"]["reason"] == warning["reason"]
+    assert "abc123secret" not in str(document)
 
 
 def test_the_env_file_warning_is_reported_once_per_pass_however_often_it_claims(

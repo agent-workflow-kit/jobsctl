@@ -602,7 +602,7 @@ Reports [Capacity](#capacity) for one queue (known or not) or for every known qu
 
 ### `run`
 
-`jobsctl run [--loop] [--interval DURATION] [--max-starts N]`: [Pass](#pass). Output: `schemas/cli/run.json`, `{"already_running": <bool>, "holder": {"pid", "since"}|null, "started": [<id>...], "reconciled": [<finding>...], "warnings": [<warning>...]}` (with `--loop`, one JSON line per pass; `holder` is the live lease holder when `already_running`). Warnings: `env_file_unsafe`, `shim_spawn_failed` (with `job_id`).
+`jobsctl run [--loop] [--interval DURATION] [--max-starts N]`: [Pass](#pass). Output: `schemas/cli/run.json`, `{"already_running": <bool>, "holder": {"pid", "since"}|null, "started": [<id>...], "reconciled": [<finding>...], "warnings": [<warning>...]}` (with `--loop`, one JSON line per pass; `holder` is the live lease holder when `already_running`). Warnings: `env_file_unsafe` (with `reason`, the failed check), `shim_spawn_failed` (with `job_id`).
 
 ### `reconcile`
 
