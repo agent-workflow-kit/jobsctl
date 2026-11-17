@@ -33,10 +33,10 @@ class DiscardCapture:
         return None
 
 
-WaitExit = Callable[[int], os.waitid_result | None]
+WaitExit = Callable[[int], gateway_proc.WaitResult | None]
 
 
-def _wait_nohang(pid: int) -> os.waitid_result | None:
+def _wait_nohang(pid: int) -> gateway_proc.WaitResult | None:
     return gateway_proc.waitid_nowait(pid, nohang=True)
 
 
@@ -88,7 +88,7 @@ class Pump:
         if ready:
             self._read_some()
 
-    def run(self) -> os.waitid_result:
+    def run(self) -> gateway_proc.WaitResult:
         """Pump until the leader exits; returns its (unreaped) wait result."""
         next_periodic = gateway.monotonic() + self._interval
         while True:

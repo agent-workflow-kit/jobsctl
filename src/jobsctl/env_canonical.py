@@ -27,7 +27,14 @@ ALWAYS_INHERITED: Final = (
     "TMPDIR",
 )
 RESERVED_PREFIX: Final = "JOBSCTL_"
-_TEMP_ROOTS: Final = ("/tmp", "/run/user")
+# `/var/folders` is macOS's per-user temporary tree; `/private/...` are its real paths.
+_TEMP_ROOTS: Final = (
+    "/tmp",
+    "/run/user",
+    "/private/tmp",
+    "/var/folders",
+    "/private/var/folders",
+)
 # The PATH used when cleaning leaves no entry: an empty PATH makes POSIX shells search the
 # current directory. Its entries are cleaned too; if none survives, PATH is removed.
 _FALLBACK_PATH: Final = ("/usr/bin", "/bin")

@@ -1,4 +1,5 @@
-"""Linux-only process helpers: dumpability, child subreaper, holding and reaping a leader."""
+"""Process helpers: dumpability and child subreaper (Linux only; no-ops elsewhere), holding and
+reaping a leader."""
 
 from __future__ import annotations
 
@@ -50,11 +51,12 @@ def is_child_subreaper() -> bool | None:
     return gateway_proc.prctl_get_int(gateway_proc.PR_GET_CHILD_SUBREAPER) == 1
 
 
-def wait_exited_keep(pid: int, *, nohang: bool = False) -> os.waitid_result | None:
+def wait_exited_keep(pid: int, *, nohang: bool = False) -> gateway_proc.WaitResult | None:
     """Wait until child ``pid`` has exited without reaping it (``WEXITED | WNOWAIT``), so the
     PID and process group id stay reserved. Blocks by default; with ``nohang`` returns ``None``
-    at once if the child has not exited. Raises ``OSError(ENOSYS)`` where ``os.waitid`` is
-    missing (macOS CPython; held-leader waiting there is owned by issue #28).
+    at once if the child has not exited. Where ``os.waitid`` is missing (macOS CPython) the state
+    is read through libproc (``gateway_proc.waitid_nowait``; unverified on a Mac, issue #28);
+    ``OSError(ENOSYS)`` on any other platform without it.
     """
     validate_pid(pid)
     return gateway_proc.waitid_nowait(pid, nohang)

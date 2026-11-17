@@ -31,7 +31,8 @@ HEADER = b"# jobsctl managed"
 ENTRY_PREFIX = b"* * * * * "
 ENTRY_SUFFIX = b" run --quiet"
 MAX_CRONTAB_BYTES = 1024 * 1024
-TEMP_ROOTS = ("/tmp", "/run/user")  # PATH entries under these are per-session directories
+# PATH entries under these are per-session directories (`/var/folders` is macOS's per-user tree)
+TEMP_ROOTS = ("/tmp", "/run/user", "/private/tmp", "/var/folders", "/private/var/folders")
 XDG_VARIABLES = ("XDG_CONFIG_HOME", "XDG_STATE_HOME")
 
 Warning = dict[str, Any]

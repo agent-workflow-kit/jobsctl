@@ -361,6 +361,8 @@ class FakeLibproc:
         self.info: dict[int, tuple[int, int, int, int, bool]] = {}  # pid -> ppid,pgid,sec,usec,Z
         self.errors: dict[int, int] = {}
         self.groups: dict[int, list[int]] = {}
+        self.children: dict[int, list[int]] = {}
+        self.list_errors: set[int] = set()  # ppids whose child listing raises OSError
         self.uuid = "AAAA-BBBB"
 
     def bsdinfo(self, pid: int) -> tuple[int, int, int, int, bool] | None:
@@ -370,6 +372,11 @@ class FakeLibproc:
 
     def group_pids(self, pgid: int) -> list[int]:
         return self.groups.get(pgid, [])
+
+    def child_pids(self, ppid: int) -> list[int]:
+        if ppid in self.list_errors:
+            raise OSError(errno.EPERM, "fake")
+        return self.children.get(ppid, [])
 
     def boot_uuid(self) -> str:
         return self.uuid

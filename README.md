@@ -21,9 +21,9 @@ This README is a guide. The normative rules, exact JSON shapes and every edge ca
 
 ## Status
 
-Implemented and released (see [CHANGELOG.md](CHANGELOG.md)) except macOS support ([#28](https://github.com/agent-workflow-kit/jobsctl/issues/28)). `jobsctl browse` (the TUI) needs the optional `tui` extra; everything it does is also available as a CLI command.
+Implemented and released (see [CHANGELOG.md](CHANGELOG.md)) except macOS verification ([#28](https://github.com/agent-workflow-kit/jobsctl/issues/28); the checklist and live tests exist, a human has not run them yet). `jobsctl browse` (the TUI) needs the optional `tui` extra; everything it does is also available as a CLI command.
 
-Platforms: Linux and WSL (Python 3.12 or newer, SQLite 3.35 or newer). macOS is best-effort and not yet verified. Details: [Platform notes](docs/interface.md#platform-notes).
+Platforms: Linux and WSL (Python 3.12 or newer, SQLite 3.35 or newer). macOS is **not verified**: the code has macOS paths (libproc, `sysctl`) that have been tested only with fakes on Linux, and nothing has run on a Mac yet. Expect macOS to be best-effort until the [macOS checklist](docs/macos-checklist.md) has been run (`make live-macos` runs its automated part). Details: [Platform notes](docs/interface.md#platform-notes).
 
 ## Install
 

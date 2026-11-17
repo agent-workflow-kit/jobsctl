@@ -53,6 +53,7 @@ class GroupScan:
 class Libproc(Protocol):
     def bsdinfo(self, pid: int) -> tuple[int, int, int, int, bool] | None: ...
     def group_pids(self, pgid: int) -> list[int]: ...
+    def child_pids(self, ppid: int) -> list[int]: ...
     def boot_uuid(self) -> str: ...
 
 
@@ -280,21 +281,30 @@ class DarwinHost(_SignalOps):
         return False
 
     def scan_group(self, pgid: int) -> GroupScan:
+        return self._scan(self._lib.group_pids(pgid), lambda info: info.pgid == pgid)
+
+    def scan_children(self, ppid: int) -> GroupScan:
+        """The processes whose parent is ``ppid``. macOS has no child subreaper, so an orphan
+        goes to ``launchd`` and is not found here: this lists only processes still parented by
+        ``ppid`` (a child that left the group with its parent alive, an unreaped zombie)."""
+        try:
+            pids = self._lib.child_pids(ppid)
+        except OSError:
+            return GroupScan((), 1)  # the listing failed: incomplete, never "none"
+        return self._scan(pids, lambda info: info.ppid == ppid)
+
+    def _scan(self, pids: list[int], wanted: Callable[[ProcInfo], bool]) -> GroupScan:
         members: list[ProcInfo] = []
         unreadable = 0
-        for pid in self._lib.group_pids(pgid):
+        for pid in pids:
             try:
                 info = self.process_info(pid)
             except OSError:
                 unreadable += 1
                 continue
-            if info is not None and info.pgid == pgid:
+            if info is not None and wanted(info):
                 members.append(info)
         return GroupScan(tuple(members), unreadable)
-
-    def scan_children(self, ppid: int) -> GroupScan:
-        # TODO(#28): subreaper orphans cannot be found on macOS; leftovers probe the group only
-        return GroupScan((), 0)  # macOS: only the process group is probed (interface.md)
 
     def pidfd_supported(self) -> bool:
         return False
