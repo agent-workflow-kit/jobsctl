@@ -10,6 +10,10 @@ manual part of the checklist). A process is signaled only after its recorded ide
 confirmed (a PID read back from a job's file is identified first), and only by that exact PID or
 the process group of a leader this test started: no pattern kills. Every wait is bounded.
 
+A test that fails before it has read a job's leader PID cannot stop that job: its shim and a
+``sleep`` of at most 300 s outlive the test and end by themselves (they are not killed by
+pattern). Nothing else is left behind.
+
 Off macOS the whole module is skipped with the reason below, so it is collected and skipped
 cleanly in CI and on Linux. A maintainer can run the platform-neutral tests (the CLI ones) on
 Linux to check the tests themselves with ``JOBSCTL_LIVE_MACOS_ANY_OS=1``; the ``libproc`` ones
@@ -221,7 +225,11 @@ def test_boot_id_is_the_boot_session_uuid_and_stable() -> None:
 @darwin_only
 @pytest.mark.parametrize(
     ("script", "kind", "code", "sig"),
-    [("exit 7", "exited", 7, None), ("kill -9 $$", "signaled", None, 9)],
+    [
+        ("exit 7", "exited", 7, None),
+        ("exit 3", "exited", 3, None),
+        ("kill -9 $$", "signaled", None, 9),
+    ],
 )
 def test_a_zombie_child_is_visible_and_its_status_is_read_without_reaping(
     rec: Recorder, script: str, kind: str, code: int | None, sig: int | None

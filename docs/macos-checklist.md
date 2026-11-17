@@ -17,16 +17,16 @@ Evidence levels used below:
 
 | Path | Code | What it does on darwin | Evidence | Risk |
 |---|---|---|---|---|
-| Process identity | `proc_host.DarwinHost.process_info`, `gateway_proc.DarwinLibproc.bsdinfo` | `proc_pidinfo(PROC_PIDTBSDINFO)` into a 136-byte `proc_bsdinfo`; start time is `pbi_start_tvsec * 10^6 + pbi_start_tvusec`; state is `Z` only for `SZOMB` | Linux (fake lib); struct layout, constants and stability of the start time: Mac needed | A wrong struct layout reads garbage; the size check (`got != size`, `pbi_pid != pid`) turns that into `EIO`, i.e. unknown, never dead |
+| Process identity | `proc_host.DarwinHost.process_info`, `gateway_proc.DarwinLibproc.bsdinfo` | `proc_pidinfo(PROC_PIDTBSDINFO)` into a 136-byte `proc_bsdinfo`; start time is `pbi_start_tvsec * 10^6 + pbi_start_tvusec`; state is `Z` only for `SZOMB` | Linux (fake lib, `bsdinfo` through `DarwinLibproc` with a fake `libproc`, including the `EIO` size and pid check); struct layout, constants and stability of the start time: Mac needed | A wrong struct layout reads garbage; the size check (`got != size`, `pbi_pid != pid`) turns that into `EIO`, i.e. unknown, never dead |
 | Liveness, "gone" | `bsdinfo` | A return of 0 with `errno` 0 or `ESRCH` means no such process | Mac needed | If macOS returns 0 for a process we may not inspect (sandbox, hardened runtime), a live process reads as gone and `reconcile` could mark a job `lost`. Check with a process of another user |
-| Zombie visibility | `bsdinfo`, `wait_state` | A zombie must still answer `proc_pidinfo` with `pbi_status == SZOMB` | Mac needed | If it answers `ESRCH`, a held zombie leader reads as dead: `signal_group(allow_zombie=True)` refuses, `adopt_shims` does not adopt a zombie shim |
-| Boot id | `DarwinLibproc.boot_uuid` | `/usr/sbin/sysctl -n kern.bootsessionuuid` through `gateway.run`, 5 s timeout; empty, non-zero exit, missing binary or timeout is `BootIdUnavailable` (liveness unknown) | Linux (failure paths); real value: Mac needed | None found statically; the absolute path avoids cron's short `PATH` |
-| Held-leader wait | `gateway_proc.waitid_nowait` -> `emulated_waitid_nowait` | `os.waitid` does not exist on macOS CPython. The shim, `_leader_exited`, `_own_unreaped_child` and `run_hook` all call it. It now reads the zombie state and wait status (`pbi_xstatus`) from libproc instead of `waitid(WEXITED\|WNOWAIT)`; a non-child or vanished PID raises `ChildProcessError(ECHILD)`; a blocking wait polls every 20 ms | Linux (fake state, decoding, errors); that `pbi_xstatus` holds the wait status of an exited process: Mac needed | **Before this branch the shim could not even be imported on macOS** (`shim_pump` named `os.waitid_result` at import time) and every wait raised `ENOSYS`. If `pbi_xstatus` is not the wait status, exit codes are wrong; the live tests check exit 7 and SIGKILL. Fallback if libproc cannot see zombies: kqueue `EVFILT_PROC` with `NOTE_EXIT`/`NOTE_EXITSTATUS` |
+| Zombie visibility | `bsdinfo`, `wait_state` | A zombie must still answer `proc_pidinfo` with `pbi_status == SZOMB`. A miss with `arg` 0 is retried once with `arg` 1 (xnu is believed to look up a zombie only then) | Linux: the retry, with a fake `libproc` (`test_a_zombie_that_answers_only_with_arg_1_is_read_by_the_retry`); that macOS answers for a zombie at all, and with which `arg`: **needs a Mac** | If it answers `ESRCH` for both, a held zombie leader reads as dead: `signal_group(allow_zombie=True)` refuses, `adopt_shims` does not adopt a zombie shim |
+| Boot id | `DarwinLibproc.boot_uuid` | `/usr/sbin/sysctl -n kern.bootsessionuuid` through `gateway.run`, 5 s timeout; empty, non-zero exit, missing binary or timeout is `BootIdUnavailable` (liveness unknown) | Linux (fake `gateway.run`: non-zero exit is empty, missing binary and timeout propagate and `DarwinHost.boot_id` maps them to unavailable); real value: Mac needed | None found statically; the absolute path avoids cron's short `PATH` |
+| Held-leader wait | `gateway_proc.waitid_nowait` -> `emulated_waitid_nowait` | `os.waitid` does not exist on macOS CPython. The shim, `_leader_exited`, `_own_unreaped_child` and `run_hook` all call it. It now reads the zombie state and wait status (`pbi_xstatus`) from libproc instead of `waitid(WEXITED\|WNOWAIT)`; a non-child or vanished PID raises `ChildProcessError(ECHILD)`; a blocking wait polls every 20 ms | Linux (fake state, decoding of exit 0, 7, 255, signals and a core dump, errors); that `pbi_xstatus` holds the wait status of an exited process: **needs a Mac** (the live test checks exit 7, exit 3 and SIGKILL through the emulated path) | **Before this branch the shim could not even be imported on macOS** (`shim_pump` named `os.waitid_result` at import time) and every wait raised `ENOSYS`. If `pbi_xstatus` is not the wait status, exit codes are wrong; the live tests check exits 7 and 3 and SIGKILL. Fallback if libproc cannot see zombies: kqueue `EVFILT_PROC` with `NOTE_EXIT`/`NOTE_EXITSTATUS` |
 | Signaling | `proc_signal`, `gateway_proc.kill/killpg` | No pidfd (`pidfd_supported()` is False): identity re-check, then `kill`/`killpg` | Linux (fake host) | Documented window between the check and the signal for processes jobsctl did not spawn ([Residual risks](interface.md#residual-risks)) |
 | pidfd | `gateway_proc.pidfd_*` | Guarded by `sys.platform != "linux"`; never called on darwin | Linux | None |
-| Process groups | `gateway.spawn_job` (`process_group=0`), `DarwinHost.scan_group` | New group per job; members listed with `proc_listpids(PROC_PGRP_ONLY)`, each read with `proc_pidinfo` | Linux (fake lib); the listing size semantics: Mac needed | A listing that fails reads as an empty group (no error is raised for `group_pids`): a count of 0 would then be wrong. Verified only by the live test |
-| `scan_children` | `DarwinHost.scan_children`, `child_pids` | **New.** `proc_listpids(PROC_PPID_ONLY=6)` then each PID read and filtered by `ppid`; a failed listing is an incomplete scan | Linux (fake lib); constant and listing: Mac needed | macOS has no child subreaper, so an orphan goes to `launchd` and is **not found**: only live or zombie direct children of the shim count. This is a limit of the platform, documented in [Platform notes](interface.md#platform-notes) |
-| Dumpability | `proc_linux.set_undumpable`, `env_file.disable_dumpable` | No-ops off Linux (`PR_SET_DUMPABLE` does not exist). There is no `/proc/<pid>/environ` on macOS; whether another same-user process can read a process's environment some other way (for example `sysctl` `KERN_PROCARGS2`) was not checked | Static | The `env_file` secrets are not protected from a same-user process the way they are on Linux. Residual risk to document or accept |
+| Process groups | `gateway.spawn_job` (`process_group=0`), `DarwinHost.scan_group` | New group per job; members listed with `proc_listpids(PROC_PGRP_ONLY)`, each read with `proc_pidinfo` | Linux (fake lib; `proc_listpids` size handling, with a fake `libproc`: a buffer that fills is retried larger, up to 5 times); the real listing size semantics: **needs a Mac** | A listing that fails reads as an empty group (no error is raised for `group_pids`): a count of 0 would then be wrong. This asymmetry with `child_pids` (which raises) is deliberate and kept: the group listing is probed again by later passes. Verified only by the live test |
+| `scan_children` | `DarwinHost.scan_children`, `child_pids` | **New.** `proc_listpids(PROC_PPID_ONLY=6)` then each PID read and filtered by `ppid`; a failed listing, in either `proc_listpids` call, or one that keeps outgrowing its buffer, is an incomplete scan | Linux (fake lib); constant and listing: needs a Mac | macOS has no child subreaper, so an orphan goes to `launchd` and is **not found**: only live or zombie direct children of the shim count. This is a limit of the platform, documented in [Platform notes](interface.md#platform-notes) |
+| Dumpability | `proc_linux.set_undumpable`, `env_file.disable_dumpable` | No-ops off Linux (`PR_SET_DUMPABLE` does not exist). There is no `/proc/<pid>/environ` on macOS; whether another same-user process can read a process's environment some other way (for example `sysctl` `KERN_PROCARGS2`) was not checked | Static | The `env_file` secrets are not protected from a same-user process the way they are on Linux. Recorded under [Residual risks](interface.md#residual-risks); the `KERN_PROCARGS2` question needs a Mac |
 | Child subreaper | `proc_linux.set_child_subreaper` | No-op (returns False) | Linux (`test_non_linux_helpers_are_noops`) | See `scan_children` |
 | `flock` | `gateway.flock_exclusive`, `log_files`, `cron` lock | `fcntl.flock` on local APFS is advisory and exclusive; the lock dies with the process | Static; live test: 12 concurrent `add` | NFS and other network volumes may emulate `flock` weakly; deliberately not tested (see [Not covered](#not-covered)). The state directory must be on a local volume |
 | Durability | `os.fsync` in `result_file`, `log_files`, SQLite | On macOS `fsync` does not force the drive cache to media (`F_FULLFSYNC` does) | Static | Only matters for power loss; Linux already accepts `synchronous=NORMAL` ([Durability](interface.md#residual-risks)). Not changed |
@@ -44,11 +44,19 @@ Evidence levels used below:
 
 ### Linux-only tests that run unmarked
 
-These read `/proc` directly and have no skip mark. A full `uv run pytest` on a Mac is expected to fail on them
-until they are marked or ported; list them in the results, do not treat them as product bugs:
-`tests/test_runner.py` (`/proc` descriptor listing through `tests/runner_helpers.py`), `tests/test_shim.py`
-(`_zombie_state`, `grep SigIgn /proc/self/status`), `tests/test_wait_processes.py` (`/proc/<pid>/fd`) and the
-`/proc` reads in `tests/test_shim_processes.py`. They are test gaps, not covered by this branch.
+These use Linux-only facilities and have no skip mark. A full `uv run pytest` on a Mac is expected to fail on
+them until they are marked or ported; list them in the results, do not treat them as product bugs:
+
+- read `/proc` directly: `tests/test_runner.py` (descriptor listing through `tests/runner_helpers.py`),
+  `tests/test_shim.py` (`_zombie_state`, `grep SigIgn /proc/self/status`), `tests/test_wait_processes.py`
+  (`/proc/<pid>/fd`) and the `/proc` reads in `tests/test_shim_processes.py`;
+- call `prctl` (child subreaper) or `os.waitid`, which macOS lacks: `tests/test_leftovers.py`,
+  `tests/test_shim_exit.py` (its `os.waitid` helper).
+
+`tests/test_reconcile_processes.py`, `tests/test_shim_output.py`, `tests/test_runner_processes.py`,
+`tests/test_upgrade.py` and `tests/test_claims.py` start real processes through shared helpers
+(`tests/shim_real.py`, `tests/shim_helpers.py`, `tests/runner_helpers.py`, `tests/store_helpers.py`). Whether they
+pass on macOS was not checked and is **unclassified**: record their result. They are test gaps, not covered by this branch.
 
 ### Not covered
 
@@ -71,11 +79,16 @@ if a step fails; do not "fix" the machine.
 - Start with a private environment for everything except the cron section:
 
   ```sh
+  export HOME_REAL="$HOME"   # keep the real one: step 7 needs it (or use a fresh shell for step 7)
   export SCRATCH="$(mktemp -d /private/tmp/jobsctl-mac.XXXXXX)"
   export HOME="$SCRATCH/home" XDG_CONFIG_HOME="$SCRATCH/home/.config" XDG_STATE_HOME="$SCRATCH/home/.local/state"
   mkdir -p "$HOME" "$XDG_CONFIG_HOME/jobsctl" "$XDG_STATE_HOME"
   printf 'auto_run: false\n' > "$XDG_CONFIG_HOME/jobsctl/config.yaml"
   ```
+
+  `HOME`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME` now point into the scratch directory; any `XDG_*` variable you had
+  set before is lost in this shell. Do step 7 in a **fresh shell** (or restore `HOME` from `$HOME_REAL` and unset or
+  restore the `XDG_*` values) so `cron install` does not write scratch paths into the real crontab.
 
   (A private `HOME` hides your `uv` cache; run `uv sync` first and call `.venv/bin/jobsctl` and `.venv/bin/python`
   afterwards, or set `UV_CACHE_DIR`.)
@@ -128,51 +141,69 @@ sysctl -n kern.bootsessionuuid
 ```
 
 Expected: `darwin`, the same UUID twice, an identity `boot:pid:start` and an alive result. Then, as another user
-if you can (`sudo -u <other> sleep 60 &`, note the PID), repeat `check_identity` for that PID: **expected
-`unknown`/`denied` or alive, never `gone`**. Record what you see; a "gone" result is a bug (liveness risk above).
+if you can, start a process and read its own PID (`$!` after `sudo -u <other> sleep 60 &` is `sudo`'s PID, not the
+`sleep`'s): `sudo -u <other> sh -c 'echo $$ > /private/tmp/other.pid; exec sleep 60' &`, then `cat /private/tmp/other.pid`.
+Repeat `check_identity` for that PID (the identity from `identify`, which may itself fail: record the error). `Liveness`
+is `alive`, `dead` or `unknown` (the reason string says why, for example unreadable): **expected `alive` or `unknown`,
+never `dead`**. Record what you see; a `dead` result is a bug (liveness risk above).
 
 ### 3. Manual: process groups and leftovers
 
 ```sh
-.venv/bin/jobsctl add -- sh -c 'sleep 300 & echo $! > "$SCRATCH/left.pid"'
+.venv/bin/jobsctl add -- sh -c 'sleep 300 & echo $! > "$HOME/left.pid"'
 .venv/bin/jobsctl run
 sleep 2
 .venv/bin/jobsctl show --json "$(.venv/bin/jobsctl --json list | python3 -c 'import sys,json;print(json.load(sys.stdin)["jobs"][0]["id"])')" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["status"],d["leftovers"])'
-ps -o pid,ppid,pgid,stat,command -p "$(cat "$SCRATCH/left.pid")"
+ps -o pid,ppid,pgid,stat,command -p "$(cat "$HOME/left.pid")"
 ```
 
 Expected: `done 1`, and `ps` shows the `sleep` still running with the job's process group. Then stop it by its
-recorded PID only: `kill "$(cat "$SCRATCH/left.pid")"`.
+recorded PID only: `kill "$(cat "$HOME/left.pid")"`. (`HOME` is inherited by jobs and private here; `$SCRATCH` is not in a job's
+environment, so job scripts use `$HOME`; the shell you type in still sees both.)
 
-A daemon that leaves the group (`sh -c 'perl -e "use POSIX; POSIX::setsid(); sleep 300" & echo $! > "$SCRATCH/d.pid"'`)
+A daemon that leaves the group (`sh -c 'perl -e "use POSIX; POSIX::setsid(); sleep 300" & echo $! > "$HOME/d.pid"'`)
 is **expected not to be counted** (no subreaper; it goes to `launchd`). Confirm `leftovers` is 0 and record it;
-kill it by its PID file.
+kill it by `"$HOME/d.pid"`.
 
 ### 4. Manual: signal sequence
 
 `cancel --force` needs a human actor: pass `--actor human:<you>` outside a terminal.
 
 ```sh
-.venv/bin/jobsctl add --kill-grace 3s -- sh -c 'trap "" TERM; echo $$ > "$SCRATCH/l.pid"; exec sleep 300'
+.venv/bin/jobsctl add --kill-grace 3s -- sh -c 'trap "" TERM; echo $$ > "$HOME/l.pid"; exec sleep 300'
 .venv/bin/jobsctl run
 .venv/bin/jobsctl cancel --force --actor human:me --wait-timeout 60s <id>
 .venv/bin/jobsctl --json show <id>
 ```
 
 Expected: status `canceled`, `exit.kind` `signaled` with signal 9 after about 3 s (TERM ignored, then KILL); a job without
-the `trap` ends with signal 15. `kill -0 "$(cat "$SCRATCH/l.pid")"` fails afterwards.
+the `trap` ends with signal 15. `kill -0 "$(cat "$HOME/l.pid")"` fails afterwards.
 
 ### 5. Manual: shim survives the parent, `kill` of the shim
 
 ```sh
-.venv/bin/jobsctl add -- sh -c 'sleep 20; touch "$SCRATCH/done"'
+.venv/bin/jobsctl add -- sh -c 'sleep 20; touch "$HOME/done"'
 .venv/bin/jobsctl run          # returns at once
 ```
 
-Close the terminal tab that ran `run` (or log out of the shell). After 25 s `"$SCRATCH/done"` must exist and the job be `done`.
-Then start another, find the shim in `jobsctl show --json` (`attempts[0].shim_identity`, the PID is the second
-field from the end), `kill` that **recorded PID** with SIGKILL, and run `jobsctl reconcile`: the job must follow the documented
-`shim_lost` handling in [interface.md](interface.md#statuses-and-reasons), not stay `running` (record the status and reason you see).
+Close the terminal tab that ran `run` (or log out of the shell). After 25 s `"$HOME/done"` (in a new tab, with the same
+private `HOME`) must exist and the job be `done`.
+
+Then start another job that records its leader PID, and find its shim as the leader's parent:
+
+```sh
+.venv/bin/jobsctl add -- sh -c 'echo $$ > "$HOME/leader.pid"; exec sleep 300'
+.venv/bin/jobsctl run
+sleep 2
+LEADER="$(cat "$HOME/leader.pid")"
+SHIM="$(ps -o ppid= -p "$LEADER" | tr -d ' ')"
+ps -o pid,ppid,command -p "$LEADER,$SHIM"     # confirm the shim is a `jobsctl _shim` process
+kill -9 "$SHIM"                               # that exact, confirmed PID only
+.venv/bin/jobsctl reconcile
+```
+
+The job must follow the documented `shim_lost` handling in [interface.md](interface.md#statuses-and-reasons), not stay
+`running` (record the status and reason you see). Afterwards stop the job's `sleep` by `"$LEADER"` if it is still alive.
 
 ### 6. Manual: state directory and `flock` on APFS
 
@@ -183,28 +214,37 @@ field from the end), `kill` that **recorded PID** with SIGKILL, and run `jobsctl
 
 ### 7. Manual: cron (real crontab)
 
-Use a throwaway user if you can (`sudo sysadminctl -addUser jobsctltest ...` and a login shell as that user). Otherwise back up
-first and restore after:
+Do this in a **fresh shell**, not the one from step 0 (its `HOME` and `XDG_*` are scratch paths that `cron install` would write into the
+real crontab). Use a throwaway user if you can (`sudo sysadminctl -addUser jobsctltest ...` and a login shell as that user; the exact
+`sysadminctl` options are **needs a Mac**: check `man sysadminctl`). Otherwise back up first and restore after. In the fresh shell,
+`HOME_REAL` is simply `$HOME`:
 
 ```sh
-crontab -l > "$HOME_REAL/crontab.backup" 2>"$HOME_REAL/crontab.err"; echo "rc=$?"; cat "$HOME_REAL/crontab.err"
+export HOME_REAL="$HOME"
+crontab -l > "$HOME_REAL/crontab.backup" 2>"$HOME_REAL/crontab.err"; echo "$?" > "$HOME_REAL/crontab.rc"
+cat "$HOME_REAL/crontab.rc" "$HOME_REAL/crontab.err"
 ```
 
-`HOME_REAL` is a directory you chose before changing `HOME`; the file must exist before any install. Record the exact
-"no crontab" message if there is none (expected: `crontab: no crontab for <user>`, exit 1).
+The recorded exit status in `crontab.rc` decides how to restore: `0` means a crontab existed and `crontab.backup` is
+its content; `1` with a "no crontab" message means there was none and the backup is empty. Any other status: stop and record it.
+Record the exact "no crontab" message (expected: `crontab: no crontab for <user>`, exit 1).
 
 1. `jobsctl cron install` -> `crontab -l` shows one `# jobsctl managed` block with an absolute path, a `PATH` without any
    `/var/folders` entry, and `XDG_*` values. Run it twice: the second is `changed: false`.
 2. `crontab -` (stdin install) must have worked (it is how `install` writes). If macOS answers with an
    `Operation not permitted`, grant **Full Disk Access** to the terminal app (System Settings -> Privacy & Security),
    and to `/usr/sbin/cron` for the entry to run (`sudo launchctl list | grep cron`), then repeat. Record that this was needed.
+   All of this (the need for Full Disk Access, for it on `/usr/sbin/cron`, and the `launchctl list` output) is **needs a Mac**: not
+   verified, written from memory of macOS and may be out of date.
 3. Run `tests/test_cron_live.py` only if cron is running on this Mac (`JOBSCTL_LIVE_CRON=1 uv run pytest -m live tests/test_cron_live.py`; it
    saves and restores the crontab byte for byte, takes up to 3 minutes and refuses to run if a block exists). It is Linux-oriented:
    the macOS cron daemon may be disabled; a skip or timeout here is a result to record, not a failure of the entry.
 4. `jobsctl cron uninstall` -> the block is gone and the rest is byte-identical to the backup
-   (`crontab -l | cmp - "$HOME_REAL/crontab.backup"`). If there was no crontab before, `crontab -l` fails with the same
+   (`crontab -l | cmp - "$HOME_REAL/crontab.backup"`) when `crontab.rc` is `0`. If there was no crontab before (`1`), `crontab -l` fails with the same
    "no crontab for" message.
-5. Restore if anything went wrong: `crontab "$HOME_REAL/crontab.backup"` (or `crontab -r` when there was none).
+5. Restore if anything went wrong, by the recorded status: if `cat "$HOME_REAL/crontab.rc"` is `0`, `crontab "$HOME_REAL/crontab.backup"`
+   (only if that file exists and is the backup you took); if it is `1` (there was no crontab), `crontab -r`. Either one **overwrites
+   every change made to the crontab since the backup**.
 
 ### 8. Manual: `run --loop` re-exec
 
@@ -244,7 +284,7 @@ Checklist run: <date>   Commit: <sha>
 Mac: <model/arch>   macOS: <version>   Python: <x.y.z>   SQLite: <x.y.z>   Volume: APFS / other
 
 1  make live-macos                      pass / fail / skipped: <n passed, failures: names>
-2  identity, liveness, boot id           pass / fail   other-user pid read as: alive / unknown / gone
+2  identity, liveness, boot id           pass / fail   other-user pid read as: alive / unknown / dead
 3  process groups and leftovers          pass / fail   setsid daemon counted: yes / no
 4  signal sequence                       pass / fail   TERM-ignored job ended by signal: <n> after <s>
 5  shim survives the parent / reconcile  pass / fail

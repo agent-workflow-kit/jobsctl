@@ -296,6 +296,7 @@ PROC_PIDTBSDINFO = 3
 PROC_PGRP_ONLY = 2
 PROC_PPID_ONLY = 6
 SZOMB = 5
+_LIST_ATTEMPTS = 5
 
 
 class _ProcBsdInfo(ctypes.Structure):
@@ -345,18 +346,26 @@ class DarwinLibproc:
     def _read(pid: int) -> _ProcBsdInfo | None:
         """The ``proc_bsdinfo`` of ``pid``; ``None`` if there is no such process."""
         lib = _get_libproc()
+        size = ctypes.sizeof(_ProcBsdInfo)
+        # xnu looks a zombie up only when the `arg` is 1, so a miss is retried once with it
+        # (unverified on a Mac: docs/macos-checklist.md)
         info = _ProcBsdInfo()
-        size = ctypes.sizeof(info)
-        ctypes.set_errno(0)
-        got = lib.proc_pidinfo(
-            ctypes.c_int(pid),
-            ctypes.c_int(PROC_PIDTBSDINFO),
-            ctypes.c_uint64(0),
-            ctypes.byref(info),
-            ctypes.c_int(size),
-        )
-        if got <= 0:
+        got = 0
+        for arg in (0, 1):
+            info = _ProcBsdInfo()
+            ctypes.set_errno(0)
+            got = lib.proc_pidinfo(
+                ctypes.c_int(pid),
+                ctypes.c_int(PROC_PIDTBSDINFO),
+                ctypes.c_uint64(arg),
+                ctypes.byref(info),
+                ctypes.c_int(size),
+            )
+            if got > 0:
+                break
             err = ctypes.get_errno()
+            if err == errno.ESRCH and arg == 0:
+                continue
             if err in (0, errno.ESRCH):
                 return None
             raise OSError(err, os.strerror(err))
@@ -399,14 +408,26 @@ class DarwinLibproc:
             return []
         count = need // 4 + 16
         buf = (ctypes.c_int32 * count)()
-        got = lib.proc_listpids(
-            ctypes.c_uint32(kind),
-            ctypes.c_uint32(arg),
-            buf,
-            ctypes.c_int(ctypes.sizeof(buf)),
-        )
-        if got <= 0:
-            return []
+        got = 0
+        for _ in range(_LIST_ATTEMPTS):
+            buf = (ctypes.c_int32 * count)()
+            ctypes.set_errno(0)
+            got = lib.proc_listpids(
+                ctypes.c_uint32(kind),
+                ctypes.c_uint32(arg),
+                buf,
+                ctypes.c_int(ctypes.sizeof(buf)),
+            )
+            if got <= 0:
+                err = ctypes.get_errno()
+                if strict and err not in (0, errno.ESRCH):
+                    raise OSError(err, os.strerror(err))
+                return []
+            if got < ctypes.sizeof(buf):
+                return [int(p) for p in buf[: got // 4] if p > 0]
+            count *= 2  # the buffer filled: more may have appeared since the sizing call
+        if strict:
+            raise OSError(errno.EIO, "proc_listpids kept outgrowing its buffer")
         return [int(p) for p in buf[: got // 4] if p > 0]
 
     def group_pids(self, pgid: int) -> list[int]:
