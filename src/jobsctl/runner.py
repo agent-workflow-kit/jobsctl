@@ -371,6 +371,7 @@ class Runner:
                 {
                     "code": "env_file_unsafe",
                     "message": "env_file is not trusted and is treated as unavailable",
+                    "reason": unsafe.reason,
                 }
             )
 

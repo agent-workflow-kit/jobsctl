@@ -221,6 +221,11 @@ def test_schema_accepts_env_file_unsafe_reasons(reason: str) -> None:
     assert warning_validator().is_valid(instance)
 
 
+def test_schema_requires_a_reason_on_env_file_unsafe() -> None:
+    instance = {"code": "env_file_unsafe", "message": "env_file unsafe"}
+    assert not warning_validator().is_valid(instance)
+
+
 @pytest.mark.parametrize("reason", _DROPPED_REASONS)
 def test_schema_rejects_dropped_reason_on_env_file_unsafe(reason: str) -> None:
     instance = {"code": "env_file_unsafe", "message": "env_file unsafe", "reason": reason}

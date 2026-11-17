@@ -519,7 +519,10 @@
                   "read"
                 ]
               }
-            }
+            },
+            "required": [
+              "reason"
+            ]
           }
         },
         {
