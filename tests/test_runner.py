@@ -725,7 +725,7 @@ def test_an_untrusted_env_file_keeps_pass_env_jobs_queued_and_warns(
 
 def _exempt_tmp_ancestors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """pytest's tmp dir sits under the world-writable /tmp, which would fail every env_file with
-    `ancestor`: exempt the ancestors up to tmp_path so the check under test is the one that fails."""
+    `ancestor`: exempt the ancestors up to tmp_path so the check under test is the one failing."""
 
     def load(path: str | None) -> Any:
         return env_file_module.load_env_file(path, check_ancestors_from=tmp_path)
@@ -766,7 +766,9 @@ def _env_file_for_reason(reason: str, tmp_path: Path, monkeypatch: pytest.Monkey
     return str(target)
 
 
-@pytest.mark.parametrize("reason", ["path", "open", "not_regular", "owner", "mode", "size", "ancestor"])
+@pytest.mark.parametrize(
+    "reason", ["path", "open", "not_regular", "owner", "mode", "size", "ancestor"]
+)
 def test_the_run_warning_names_the_failed_check_and_matches_the_log_record(
     reason: str,
     store: Store,
