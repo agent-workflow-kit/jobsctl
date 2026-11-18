@@ -367,3 +367,15 @@ def test_check_label_secrets_is_one_check_for_key_value_and_joined_text() -> Non
         assert info.value.message == message
         expected = {"code": "secret_in_label"} | ({"label": label} if label else {})
         assert info.value.details == expected
+
+
+def test_check_label_secrets_names_no_key_when_the_secret_starts_in_the_key() -> None:
+    import pytest
+
+    from jobsctl.errors import JobsctlError
+
+    m = em.masking_set_of(["tok.en=value12345", "value12345"])
+    with pytest.raises(JobsctlError) as info:
+        em.check_label_secrets([("tok.en", "value12345")], m)
+    assert info.value.message == "a label contains a secret value"
+    assert info.value.details == {"code": "secret_in_label"}

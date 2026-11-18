@@ -288,3 +288,21 @@ def test_a_secret_spanning_the_equals_sign_of_a_label_is_refused_without_naming_
     assert error["message"] == "a label contains a secret value"
     assert "tok.en" not in res.out + res.err + state_text()
     assert not (resolve_state_dir() / "state.db").exists()
+
+
+def test_a_label_value_secret_overlapping_a_longer_secret_from_the_key_does_not_name_the_key(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MASKED_VAR", JOINED)
+    monkeypatch.setenv("MASKED_VAR2", "value12345")
+    cfg = write_config(
+        tmp_path,
+        mask_env=["MASKED_VAR", "MASKED_VAR2"],
+        env={"inherit": ["MASKED_VAR", "MASKED_VAR2"]},
+    )
+    res = run_add_cwd(capsys, cfg, ["--label", JOINED])
+    assert res.code == 2
+    error = res.envelope()["error"]
+    assert error["details"] == {"code": "secret_in_label"}
+    assert error["message"] == "a label contains a secret value"
+    assert "tok.en" not in res.out + res.err + state_text()
