@@ -197,7 +197,8 @@ def _interrupted(ctx: Context, store: Store | None, job_id: str | None, text: st
 
 
 def print_summary(ctx: Context, job: dict[str, Any]) -> None:
-    """Human output. TODO(#11): `show`'s human rendering replaces this."""
+    """Human output: the status line and the tail. Deliberately not `show`'s report (decided on
+    #71: `wait` keeps its short summary, so its output does not change)."""
     detail = job["reason"] or job["hold_reason"]
     suffix = f" ({sanitize(str(detail), inline=True)})" if detail else ""
     sys.stdout.write(f"{sanitize(job['id'], inline=True)}: {job['status']}{suffix}\n")

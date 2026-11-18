@@ -31,11 +31,10 @@ from jobsctl.claims import LogRecord, transition_record
 from jobsctl.config import Config
 from jobsctl.delivery import Deliverer, EventPlan
 from jobsctl.errors import JobsctlError
-from jobsctl.hook_events import attempt_object
 from jobsctl.hook_payload import build_payload, encode_payload
 from jobsctl.hook_run import HookResult
 from jobsctl.hook_select import pre_start_event_id, select_hooks
-from jobsctl.job_view import job_object
+from jobsctl.job_view import attempt_object, job_object
 from jobsctl.shim_store import ClaimView, post_event, read_claim, read_claim_in
 from jobsctl.store_db import Store, Tx
 from jobsctl.store_ops import transition_job_by_claim, update_attempt_by_claim

@@ -1,9 +1,10 @@
 """The Job object (interface.md, Job object) built from a `jobs` row.
 
-Shared by the commands that print a job (`add`, `list`, `show`, the mutating commands). `rank`
-and `blocked_by` are computed, never stored, by `order.py`. `current_attempt` is the one
-implementation of the current-attempt rule (interface.md, Job object); `attempt_object` renders
-an Attempt object for `show`.
+Shared by the commands that print a job (`add`, `list`, `show`, `wait`, the mutating commands).
+`rank` and `blocked_by` are computed, never stored, by `order.py`. `current_attempt` is the one
+implementation of the current-attempt rule (interface.md, Job object); `attempt_object` is the
+one Attempt object builder, for `show`, `wait` and the hook payloads. Both are public: other
+modules (`job_detail`, `show`, `hook_events`, `pre_start`) import them.
 
 Strings in these objects are printed as stored. A job's argv and `--env` values are stored
 losslessly (a non-UTF-8 byte is a lone surrogate); `print_json` prints such a byte as the text

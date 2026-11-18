@@ -1,50 +1,25 @@
-"""The job as `show`, `wait` and `add --wait` print it: the Job object plus `attempts` and
-`output` (`schemas/defs.json` `job_detail`).
+"""The job as `show`, `wait`, `add --wait` and the browse TUI print it: the Job object plus
+`attempts` and `output` (`schemas/defs.json` `job_detail`).
 
-TODO(#11): `show` reuses `job_detail` (adding `--attempt N` and `--no-output`) and decides the
-human rendering; `wait` prints a short summary until then.
+The output of an attempt is read in one of two ways, because the commands differ on purpose:
+`show` ("raise") fails when the tail cannot be read and sanitizes it again; `wait` ("warn")
+turns an unreadable tail into `output: null` plus a warning, so its exit code still reports the
+job's status. `wait`'s human summary stays its own (`print_summary`): it is a one-line status
+with the tail, not `show`'s full report.
 """
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import sys
-from typing import Any
+from typing import Any, Literal
 
 from jobsctl.config import Config
 from jobsctl.errors import JobsctlError
-from jobsctl.job_view import current_attempt, job_object
+from jobsctl.job_view import attempt_object, current_attempt, job_object
 from jobsctl.output_store import load_tail
 from jobsctl.store_db import Tx
 from jobsctl.textsafe import sanitize
-
-
-def attempt_object(row: sqlite3.Row) -> dict[str, Any]:
-    """One entry of `attempts` (schemas/defs.json `attempt`)."""
-    effective = row["effective"]
-    exit_record = row["exit"]
-    return {
-        "attempt": row["n"],
-        "status": row["status"],
-        "reason": row["reason"],
-        "hold_reason": row["hold_reason"],
-        "claimed_at": row["claimed_at"],
-        "running_at": row["running_at"],
-        "ended_at": row["ended_at"],
-        "exit": None if exit_record is None else json.loads(exit_record),
-        "leftovers": row["leftovers"],
-        "resolved_path": row["resolved_path"],
-        "effective": None if effective is None else json.loads(effective),
-        "escalated_hooks": json.loads(row["escalated_hooks"]),
-        "vetoed_by": row["vetoed_by"],
-        "hook_messages": json.loads(row["hook_messages"]),
-        "decision_ids": json.loads(row["decision_ids"]),
-        "force_requested_by": row["force_requested_by"],
-        "resolved_by": row["resolved_by"],
-        "note": row["note"],
-        "jobsctl_version": row["jobsctl_version"],
-    }
 
 
 def output_object(tx: Tx, job_id: str, n: int, *, quiet: bool = False) -> dict[str, Any] | None:
@@ -73,6 +48,29 @@ def output_object(tx: Tx, job_id: str, n: int, *, quiet: bool = False) -> dict[s
     }
 
 
+def shown_output_object(tx: Tx, job_id: str, n: int) -> dict[str, Any] | None:
+    """The stored tail of attempt `n` as `show` prints it, or `None` when there is none.
+
+    The tail is untrusted: an undecodable byte becomes `\\xNN` and the text is sanitized again,
+    in `--json` as well as in human output. A compressed tail raises `internal`.
+    """
+    row = tx.one("SELECT * FROM outputs WHERE job_id = ? AND n = ?", [job_id, n])
+    if row is None:
+        return None
+    if row["compressed"]:
+        # TODO(#16): output capture owns the compression format; read it here once it exists.
+        raise JobsctlError("internal", "a compressed output tail cannot be read yet")
+    return {
+        "tail": sanitize(bytes(row["tail"]).decode("utf-8", "backslashreplace")),
+        "bytes_seen": row["bytes_seen"],
+        "truncated": bool(row["truncated"]),
+        "updated_at": row["updated_at"],
+    }
+
+
+OutputMode = Literal["warn", "raise", "off"]
+
+
 def job_detail(
     tx: Tx,
     row: sqlite3.Row,
@@ -81,12 +79,27 @@ def job_detail(
     env_file_unavailable: bool,
     now: str,
     quiet: bool = False,
+    attempt: int | None = None,
+    output: OutputMode = "warn",
 ) -> dict[str, Any]:
-    job = job_object(tx, row, config, env_file_unavailable=env_file_unavailable, now=now)
+    """The job object with `attempts` and `output`.
+
+    `output` is the attempt `attempt` (default: the current attempt, `null` when there is none)
+    read as `output` says: "warn" (`output_object`), "raise" (`shown_output_object`) or "off"
+    (`output: null`). An `attempt` the job does not have is `not_found`.
+    """
     attempts = tx.all("SELECT * FROM attempts WHERE job_id = ? ORDER BY n", [row["id"]])
     current = current_attempt(tx, row)
+    wanted: int | None = None if current is None else int(current["n"])
+    if attempt is not None:
+        if all(a["n"] != attempt for a in attempts):
+            raise JobsctlError("not_found", f"job {row['id']} has no attempt {attempt}")
+        wanted = attempt
+    job = job_object(tx, row, config, env_file_unavailable=env_file_unavailable, now=now)
     job["attempts"] = [attempt_object(a) for a in attempts]
-    job["output"] = (
-        None if current is None else output_object(tx, row["id"], current["n"], quiet=quiet)
-    )
+    job["output"] = None
+    if wanted is not None and output == "warn":
+        job["output"] = output_object(tx, row["id"], wanted, quiet=quiet)
+    elif wanted is not None and output == "raise":
+        job["output"] = shown_output_object(tx, row["id"], wanted)
     return job

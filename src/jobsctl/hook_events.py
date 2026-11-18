@@ -16,6 +16,7 @@ import sqlite3
 from typing import Any
 
 from jobsctl.config import Config
+from jobsctl.job_view import attempt_object
 from jobsctl.store_db import Tx
 from jobsctl.store_ops import OutboxEvent, counter_incr, outbox_insert
 
@@ -28,31 +29,6 @@ def hook_job(job: dict[str, Any]) -> dict[str, Any]:
     reduced = {k: v for k, v in job.items() if k != "env"}
     reduced["env_names"] = sorted(job["env"])
     return reduced
-
-
-def attempt_object(row: sqlite3.Row) -> dict[str, Any]:
-    """The Attempt object of an `attempts` row (interface.md, Attempt object)."""
-    return {
-        "attempt": row["n"],
-        "status": row["status"],
-        "reason": row["reason"],
-        "hold_reason": row["hold_reason"],
-        "claimed_at": row["claimed_at"],
-        "running_at": row["running_at"],
-        "ended_at": row["ended_at"],
-        "exit": None if row["exit"] is None else json.loads(row["exit"]),
-        "leftovers": row["leftovers"],
-        "resolved_path": row["resolved_path"],
-        "effective": None if row["effective"] is None else json.loads(row["effective"]),
-        "escalated_hooks": json.loads(row["escalated_hooks"]),
-        "vetoed_by": row["vetoed_by"],
-        "hook_messages": json.loads(row["hook_messages"]),
-        "decision_ids": json.loads(row["decision_ids"]),
-        "force_requested_by": row["force_requested_by"],
-        "resolved_by": row["resolved_by"],
-        "note": row["note"],
-        "jobsctl_version": row["jobsctl_version"],
-    }
 
 
 def _output_available(tx: Tx, attempt: sqlite3.Row | None) -> bool:
