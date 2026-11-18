@@ -16,6 +16,7 @@ from jobsctl.env_file import load_env_file
 from jobsctl.errors import JobsctlError
 from jobsctl.job_text import show_text
 from jobsctl.job_view import attempt_object, current_attempt, job_object
+from jobsctl.output_store import tail_bytes
 from jobsctl.store_db import OpenMode, Store, Tx
 from jobsctl.textsafe import sanitize
 from jobsctl.timestamps import format_timestamp
@@ -23,11 +24,12 @@ from jobsctl.view_lookup import job_by_id, job_by_unique_key
 
 
 def decode_tail(blob: bytes, compressed: int) -> str:
-    """The stored tail as text; an undecodable byte becomes `\\xNN` (interface.md, step 2)."""
-    if compressed:
-        # TODO(#16): output capture owns the compression format; read it here once it exists.
-        raise JobsctlError("internal", "a compressed output tail cannot be read yet")
-    return bytes(blob).decode("utf-8", "backslashreplace")
+    """The stored tail as text; an undecodable byte becomes `\\xNN` (interface.md, step 2).
+
+    The bytes are checked and inflated as for `wait` (`output_store.tail_bytes`); only the
+    UTF-8 step is tolerant here.
+    """
+    return tail_bytes(blob, bool(compressed)).decode("utf-8", "backslashreplace")
 
 
 def _output(tx: Tx, job_id: str, n: int) -> dict[str, Any] | None:
