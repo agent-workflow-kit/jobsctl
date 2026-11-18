@@ -77,9 +77,29 @@ def test_output_off_gives_null_output_but_keeps_attempts() -> None:
     assert job["output"] is None and len(job["attempts"]) == 2
 
 
-def test_a_queued_job_has_no_output_even_for_an_explicit_attempt() -> None:
+def test_a_queued_job_has_no_default_output() -> None:
     seed_job("jb-bbbbbb22")
     assert detail_of("jb-bbbbbb22")["output"] is None
+
+
+def test_a_requeued_job_has_output_only_for_an_explicit_earlier_attempt() -> None:
+    seed_job(
+        "jb-eeeeee22",
+        attempt=1,
+        attempts=[ran()],
+        output=tail(b"earlier\n"),
+        output_attempt=1,
+    )
+    assert detail_of("jb-eeeeee22")["output"] is None
+    assert detail_of("jb-eeeeee22", attempt=1)["output"]["tail"] == "earlier\n"
+
+
+def test_an_invalid_attempt_is_not_found_with_output_off() -> None:
+    seed_two_attempts()
+    with pytest.raises(JobsctlError) as err:
+        detail_of("jb-aaaaaa22", attempt=99, output="off")
+    assert err.value.code == "not_found"
+    assert err.value.message == "job jb-aaaaaa22 has no attempt 99"
 
 
 def test_unreadable_tail_raise_vs_warn(capsys: pytest.CaptureFixture[str]) -> None:

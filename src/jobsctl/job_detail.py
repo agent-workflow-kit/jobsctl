@@ -68,6 +68,12 @@ def shown_output_object(tx: Tx, job_id: str, n: int) -> dict[str, Any] | None:
     }
 
 
+def require_attempt(tx: Tx, job_id: str, attempt: int) -> None:
+    """Raise `not_found` unless the job has attempt `attempt`."""
+    if tx.one("SELECT 1 FROM attempts WHERE job_id = ? AND n = ?", [job_id, attempt]) is None:
+        raise JobsctlError("not_found", f"job {job_id} has no attempt {attempt}")
+
+
 OutputMode = Literal["warn", "raise", "off"]
 
 
@@ -92,8 +98,7 @@ def job_detail(
     current = current_attempt(tx, row)
     wanted: int | None = None if current is None else int(current["n"])
     if attempt is not None:
-        if all(a["n"] != attempt for a in attempts):
-            raise JobsctlError("not_found", f"job {row['id']} has no attempt {attempt}")
+        require_attempt(tx, row["id"], attempt)
         wanted = attempt
     job = job_object(tx, row, config, env_file_unavailable=env_file_unavailable, now=now)
     job["attempts"] = [attempt_object(a) for a in attempts]
