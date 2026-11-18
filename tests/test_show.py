@@ -49,7 +49,7 @@ def finished(**over: Any) -> dict[str, Any]:
     return ran(**over)
 
 
-def tail(text: bytes, **over: Any) -> dict[str, Any]:
+def tail(text: bytes | str, **over: Any) -> dict[str, Any]:
     return {"tail": text, "bytes_seen": len(text), "truncated": 0, **over}
 
 
@@ -291,23 +291,32 @@ def test_a_compressed_tail_is_sanitized_again(capsys: pytest.CaptureFixture[str]
 
 
 @pytest.mark.parametrize(
-    "blob",
+    ("blob", "compressed"),
     [
-        b"not zlib at all",
-        zlib.compress(b"x" * 6000)[:-6],
-        zlib.compress(b"x" * 6000) + b"trailing",
-        zlib.compress(b"x" * 300000),
+        (b"not zlib at all", 1),
+        (zlib.compress(b"x" * 6000)[:-6], 1),
+        (zlib.compress(b"x" * 6000) + b"trailing", 1),
+        (zlib.compress(b"x" * 300000), 1),
+        (b"a" * 262145, 0),
+        ("text", 0),
     ],
-    ids=["garbage", "truncated", "trailing-data", "expands-beyond-maximum"],
+    ids=[
+        "garbage",
+        "truncated",
+        "trailing-data",
+        "expands-beyond-maximum",
+        "uncompressed-beyond-maximum",
+        "non-blob",
+    ],
 )
-def test_a_damaged_compressed_tail_is_an_internal_error(
-    capsys: pytest.CaptureFixture[str], blob: bytes
+def test_an_unreadable_stored_tail_is_an_internal_error(
+    capsys: pytest.CaptureFixture[str], blob: bytes | str, compressed: int
 ) -> None:
     seed_job(
         "jb-aaaaaa22",
         **FAILED_ATTEMPT,
         attempts=[finished()],
-        output=tail(blob, compressed=1),
+        output=tail(blob, compressed=compressed),
     )
     res = fail(capsys, "jb-aaaaaa22")
     assert res.code == 1 and res.envelope()["error"]["code"] == "internal"

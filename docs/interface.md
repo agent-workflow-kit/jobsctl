@@ -524,7 +524,7 @@ Lists jobs: by queue (sorted by name; byte order), then queued jobs by `rank`, t
 
 `jobsctl show (<id> | --unique-key K) [--attempt N] [--no-output]`
 
-Shows one job with its `attempts` (oldest first; empty before the first claim) and the `output` tail of the current attempt (or of `--attempt N`; an attempt that does not exist exits 10). `--unique-key K` selects the non-terminal job holding K, else the most recently created job with K (ties on `created_at` go to the job added to the database last); none: exit 10. `--attempt N` is checked against the job's attempts even with `--no-output`; `output` is `null` when there is no current attempt and no `--attempt`, when the attempt has no stored tail, and with `--no-output`. The tail is sanitized again in both human and `--json` output. Output: `schemas/cli/show.json`.
+Shows one job with its `attempts` (oldest first; empty before the first claim) and the `output` tail of the current attempt (or of `--attempt N`; an attempt that does not exist exits 10). `--unique-key K` selects the non-terminal job holding K, else the most recently created job with K (ties on `created_at` go to the job added to the database last); none: exit 10. `--attempt N` is checked against the job's attempts even with `--no-output`; `output` is `null` when there is no current attempt and no `--attempt`, when the attempt has no stored tail, and with `--no-output`. The tail is sanitized again in both human and `--json` output. A stored tail that cannot be read (damaged, or beyond the largest tail) exits 1 (`internal`); `--no-output` does not read it. Output: `schemas/cli/show.json`.
 
 ### `wait`
 
