@@ -60,8 +60,8 @@ FIELDS = list(secret_flags(TOKEN))
 WORDING = {
     "queue": "--queue contains a secret value",
     "unique_key": "--unique-key contains a secret value",
-    "label_value": "the value of --label ticket contains a secret value",
-    "label_key": "a --label key contains a secret value",
+    "label_value": "the value of label ticket contains a secret value",
+    "label_key": "a label key contains a secret value",
     "cwd": "the working directory contains a secret value",
 }
 
@@ -271,3 +271,20 @@ def test_a_cwd_error_for_a_relative_path_does_not_echo_it(
     res = run_add_cwd(capsys, cfg_for(tmp_path), ["--cwd", TOKEN])
     assert res.code == 2
     assert_clean(res, TOKEN)
+
+
+JOINED = "tok.en=value12345"
+
+
+def test_a_secret_spanning_the_equals_sign_of_a_label_is_refused_without_naming_the_key(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MASKED_VAR", JOINED)
+    cfg = write_config(tmp_path, mask_env=["MASKED_VAR"], env={"inherit": ["MASKED_VAR"]})
+    res = run_add_cwd(capsys, cfg, ["--label", JOINED])
+    assert res.code == 2
+    error = res.envelope()["error"]
+    assert error["details"] == {"code": "secret_in_label"}
+    assert error["message"] == "a label contains a secret value"
+    assert "tok.en" not in res.out + res.err + state_text()
+    assert not (resolve_state_dir() / "state.db").exists()

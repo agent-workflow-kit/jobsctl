@@ -347,3 +347,23 @@ def test_spans_equal_the_old_behavior_on_small_inputs_with_overlapping_secrets()
         s = em.masking_set_of(values)
         text = "".join(rng.choice("abcx") for _ in range(rng.randint(0, 120)))
         assert s.spans(text) == _old_spans(s, text)
+
+
+def test_check_label_secrets_is_one_check_for_key_value_and_joined_text() -> None:
+    import pytest
+
+    from jobsctl.errors import JobsctlError
+
+    m = mset(cfg(mask_env=["S"], env={"inherit": ["S"]}), {"S": "tok.en=value12345"})
+    em.check_label_secrets([("a", "b")], m)  # clean
+    cases = [
+        ([("tok.en=value12345", "x")], "a label key contains a secret value", None),
+        ([("n", "xtok.en=value12345")], "the value of label n contains a secret value", "n"),
+        ([("tok.en", "value12345")], "a label contains a secret value", None),
+    ]
+    for pairs, message, label in cases:
+        with pytest.raises(JobsctlError) as info:
+            em.check_label_secrets(pairs, m)
+        assert info.value.message == message
+        expected = {"code": "secret_in_label"} | ({"label": label} if label else {})
+        assert info.value.details == expected

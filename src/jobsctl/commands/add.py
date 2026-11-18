@@ -24,7 +24,7 @@ from jobsctl.commands.wait import WaitResult, print_summary, wait_for_job
 from jobsctl.env_canonical import CanonicalEnv, build_canonical_env
 from jobsctl.env_file import EnvFile, load_env_file
 from jobsctl.env_logging import log_env_file_state, log_path_state
-from jobsctl.env_mask import MaskingSet, masking_values
+from jobsctl.env_mask import MaskingSet, check_label_secrets, masking_values
 from jobsctl.errors import ExitCode, JobsctlError, usage_error
 from jobsctl.ids import generate_job_id
 from jobsctl.job_view import job_object, job_row
@@ -238,15 +238,7 @@ def _check_fields(req: Request, masking: MaskingSet) -> None:
         raise usage_error("--queue contains a secret value", code="secret_in_queue")
     if req.unique_key is not None and masking.contains_secret(req.unique_key):
         raise usage_error("--unique-key contains a secret value", code="secret_in_unique_key")
-    for key, value in req.labels:
-        if masking.contains_secret(key):
-            raise usage_error("a --label key contains a secret value", code="secret_in_label")
-        if masking.contains_secret(value):
-            raise usage_error(
-                f"the value of --label {key} contains a secret value",
-                code="secret_in_label",
-                label=key,
-            )
+    check_label_secrets(req.labels, masking)
     # As given (`//`, `/./` or a trailing `/` are normalized away but leave the secret readable)
     # and as stored (`..` that drops a secret never reaches the log or the store).
     if masking.contains_secret(req.cwd_given) or masking.contains_secret(req.cwd):

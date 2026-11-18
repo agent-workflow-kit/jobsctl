@@ -22,6 +22,7 @@ from typing import Final
 from jobsctl.config import Config
 from jobsctl.env_canonical import CanonicalEnv
 from jobsctl.env_file import EnvFile, EnvWarning
+from jobsctl.errors import usage_error
 
 MIN_MASKED_LENGTH: Final = 8
 REPLACEMENT: Final = "***"
@@ -221,3 +222,21 @@ def _trie_pattern(strings: list[str], depth: int) -> str:
     if ends_here:
         branches.append("")
     return "(?:" + "|".join(branches) + ")"
+
+
+def check_label_secrets(pairs: Iterable[tuple[str, str]], masking: MaskingSet) -> None:
+    """Exit 2 (`secret_in_label`) for a label pair holding a masked value; the one check behind
+    `add --label` and `label add`. Key, value and the joined `key=value` text are each tested.
+    `details.label` names the key for a value hit only: for a key hit or a joined hit, naming
+    the key would echo the secret (or part of it)."""
+    for key, value in pairs:
+        if masking.contains_secret(key):
+            raise usage_error("a label key contains a secret value", code="secret_in_label")
+        if masking.contains_secret(value):
+            raise usage_error(
+                f"the value of label {key} contains a secret value",
+                code="secret_in_label",
+                label=key,
+            )
+        if masking.contains_secret(f"{key}={value}"):  # a secret spanning the `=`
+            raise usage_error("a label contains a secret value", code="secret_in_label")
