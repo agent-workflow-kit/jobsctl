@@ -148,6 +148,8 @@ def test_the_polling_wait_retries_after_a_transient_unreadable_fd_directory(
     calls: list[Path] = []
 
     def flaky(self: Path) -> Any:
+        if self.parts[:2] != ("/", "proc"):
+            return real_iterdir(self)
         calls.append(self)
         if len(calls) == 1:
             raise PermissionError(13, "refused", str(self))
