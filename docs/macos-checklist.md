@@ -40,23 +40,41 @@ Evidence levels used below:
 | Signals in `run` | `commands/run.py` | `pthread_sigmask` in the main thread | Static | None expected |
 | Browse TUI | `tui/`, `tests/test_browse_pty.py` | Nothing under `tui/` reads `/proc`. The pty tests use `pty.openpty` and `termios`, which exist on macOS | Linux; macOS: Mac needed | The `linux_only` mark was replaced by a capability check; a macOS run is the first evidence. Terminal.app and iTerm2 are manual below |
 | Hooks | `hook_run` | Uses `wait_exited_keep`, now through the emulation | Mac needed | `tests/test_hook_run.py`, `test_hook_interrupt.py` stay Linux-only; the hook leader's group reservation on macOS is unproven |
-| Test harness | `tests/kill_guard.py`, `tests/spike_helpers.py` | Read `/proc` for "is this a descendant" and start times; on macOS they find nothing and the guard refuses (safe direction) or skips | Static | `Procs.adopt` asserts on `/proc`; only the Linux spike tests use it |
+| Test harness | `tests/kill_guard.py`, `tests/spike_helpers.py` | `kill_guard` finds a parent through the platform host (libproc on macOS); `spike_helpers` reads `/proc` and is `linux_only` | Linux (fake host for the guard); libproc side: Mac needed | A failed read means "not a descendant": the guard refuses, never allows. `Procs.adopt` asserts on `/proc`; only the Linux spike tests use it |
 
-### Linux-only tests that run unmarked
+### Linux-only tests: marked, and what is still unclassified
 
-These use Linux-only facilities and have no skip mark. A full `uv run pytest` on a Mac is expected to fail on
-them until they are marked or ported; list them in the results, do not treat them as product bugs:
+Tests that need a facility macOS lacks carry a skip on the **capability**, from `tests/capabilities.py`:
+`needs_proc` (`/proc/<pid>/...` readable), `needs_waitid` (`os.waitid`) and `needs_prctl` (child subreaper,
+dumpable flag; the platform check jobsctl itself uses). A skip names its reason (`needs /proc (Linux)`). The
+marks are written from reading the tests; **none has been run on a Mac**, so a Mac run may find more tests to
+mark and may find marked ones that would pass.
 
-- read `/proc` directly: `tests/test_runner.py` (descriptor listing through `tests/runner_helpers.py`),
-  `tests/test_shim.py` (`_zombie_state`, `grep SigIgn /proc/self/status`), `tests/test_wait_processes.py`
-  (`/proc/<pid>/fd`) and the `/proc` reads in `tests/test_shim_processes.py`;
-- call `prctl` (child subreaper) or `os.waitid`, which macOS lacks: `tests/test_leftovers.py`,
-  `tests/test_shim_exit.py` (its `os.waitid` helper).
+The list is not kept by hand: `tests/test_platform_marks.py` greps every test file for `/proc`, `waitid`, `prctl`
+and `subreaper`, and fails if a file that matches is missing from its `CLASSIFIED` table or a file classified as
+marked has no skip. The table gives the class and reason for each file. In short:
 
-`tests/test_reconcile_processes.py`, `tests/test_shim_output.py`, `tests/test_runner_processes.py`,
-`tests/test_upgrade.py` and `tests/test_claims.py` start real processes through shared helpers
-(`tests/shim_real.py`, `tests/shim_helpers.py`, `tests/runner_helpers.py`, `tests/store_helpers.py`). Whether they
-pass on macOS was not checked and is **unclassified**: record their result. They are test gaps, not covered by this branch.
+- **marked** (capability skip): `test_runner.py` and `test_runner_processes.py` (the fake shim's descriptor
+  listing, and a spy on `os.waitid`), `test_shim.py` (`/proc/<pid>/stat`, `SigIgn`), `test_shim_processes.py`
+  (`/proc` reads, subreaper, dumpable), `test_leftovers.py` (a real subreaper and `os.waitid`), `test_shim_exit.py`
+  (the whole module: `os.waitid` and `os.CLD_*`), `test_shim_output.py` (the tests using a `LinuxHost`
+  subclass), `test_wait_processes.py` (`/proc/<pid>/fd`), `test_env_file.py` (`prctl`), plus the files that
+  were already marked: `test_proc_real.py`, `test_spike_*.py`, `test_hook_run.py`, `test_hook_interrupt.py`,
+  `test_cron_command.py` (`/proc/locks`);
+- **ported**: `tests/kill_guard.py` reads the parent PID through the platform host (`/proc` on Linux, libproc through
+  `DarwinHost` on macOS) instead of `/proc`; the Linux side is tested with a fake host, the libproc side is
+  **Mac needed**. `tests/spike_helpers.py` stays Linux-only (`linux_only`): it exists for the `/proc`, pidfd and
+  `prctl` spikes, which have no macOS equivalent to port;
+- **hooks**: `test_hook_run.py` and `test_hook_interrupt.py` stay Linux-only until the live run shows the `run_hook`
+  `waitid` emulation works on a Mac.
+
+`tests/test_reconcile_processes.py`, `tests/test_shim_output.py` (the tests that do not use the `LinuxHost`
+subclass), `tests/test_runner_processes.py` (the rest), `tests/test_upgrade.py` and `tests/test_claims.py` name no
+Linux-only facility but start real processes through shared helpers (`tests/shim_real.py`,
+`tests/shim_helpers.py`, `tests/runner_helpers.py`, `tests/store_helpers.py`). They run on a Mac unmarked; whether they
+pass was not checked and stays **unclassified** until step 10: record their result. The fake shim in
+`tests/runner_helpers.py` lists its descriptors only where `/proc/self/fd` exists (macOS has no equivalent that was
+ported).
 
 ### Not covered
 
@@ -120,8 +138,7 @@ identified, and bound every wait (60 s). What each covers:
 | `test_concurrent_adds_are_all_recorded_with_distinct_ranks` | `flock` and SQLite locking on this volume |
 | `test_run_loop_re_execs_in_place_and_stops_on_sigterm` | `run --loop` re-exec |
 
-The `uv run pytest` suite itself (`-m 'not live'`) is also worth running once; see [Linux-only tests that run
-unmarked](#linux-only-tests-that-run-unmarked).
+The `uv run pytest` suite itself (`-m 'not live'`) is also worth running once; see [Linux-only tests](#linux-only-tests-marked-and-what-is-still-unclassified).
 
 ### 2. Manual: identity, liveness, boot id
 
@@ -293,7 +310,7 @@ Mac: <model/arch>   macOS: <version>   Python: <x.y.z>   SQLite: <x.y.z>   Volum
                                           "no crontab" message: <exact text>   restored byte-identical: yes / no
 8  run --loop re-exec                    pass / fail
 9  browse TUI  Terminal.app / iTerm2     pass / fail / pass / fail   pty tests: <n passed>
-10 full `uv run pytest`                  <n passed, n failed: names (expected: the unmarked /proc tests)>
+10 full `uv run pytest`                  <n passed, n skipped (reasons), n failed: names; the five unclassified files>
 
 Surprises / decisions needed:
 ```

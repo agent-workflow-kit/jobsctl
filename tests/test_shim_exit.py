@@ -17,6 +17,12 @@ from jobsctl.shim_exit import (
     natural_outcome,
     post_hook,
 )
+from tests.capabilities import needs_waitid
+
+# The whole module: its helper calls os.waitid and its parametrization reads os.CLD_*, which exist
+# only where os.waitid does. The pure mapping tests in it are skipped there too: unmarking them
+# would need a Mac run first, to see that the constants exist.
+pytestmark = needs_waitid
 
 
 def _wait(code: str) -> os.waitid_result:

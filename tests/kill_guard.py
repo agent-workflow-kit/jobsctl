@@ -19,8 +19,10 @@ from typing import Any
 import pytest
 
 from jobsctl import gateway_proc
+from jobsctl.proc_host import default_host
 
 _allowed: set[int] = set()
+_host = default_host()
 violations: list[str] = []
 
 
@@ -30,15 +32,15 @@ def allow(pid: int) -> None:
 
 
 def _parent_of(pid: int) -> int | None:
+    """The parent PID through the platform's own host (``/proc`` on Linux, libproc on macOS).
+
+    Anything unreadable is "unknown", which the guard treats as not a descendant: it refuses.
+    """
     try:
-        with open(f"/proc/{pid}/stat", "rb") as f:
-            raw = f.read(4096)
-    except OSError:
+        info = _host.process_info(pid)
+    except (OSError, ValueError):
         return None
-    try:
-        return int(raw[raw.rindex(b")") + 2 :].split()[1])
-    except (ValueError, IndexError):
-        return None
+    return None if info is None else info.ppid
 
 
 def _descendant_of_us(pid: int) -> bool:

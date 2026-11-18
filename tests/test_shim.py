@@ -16,6 +16,7 @@ import pytest
 from jobsctl.config import Config
 from jobsctl.errors import JobsctlError
 from jobsctl.store_db import Store
+from tests.capabilities import needs_proc
 from tests.conftest import validate_against
 from tests.shim_helpers import (
     JOB,
@@ -661,6 +662,7 @@ def test_a_job_canceled_while_the_shim_waits_for_the_lease_is_never_started(
     assert store.query_one("SELECT 1 FROM leases WHERE name = ?", [f"job:{JOB}"]) is None
 
 
+@needs_proc
 def test_the_job_leader_is_reaped_after_the_final_commit_and_returncode_is_set(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1067,6 +1069,7 @@ def test_a_conclusive_answer_resets_the_inconclusive_clock(
     assert clock[0] >= 100  # 40 s + a fresh 60 s, not 60 s in total
 
 
+@needs_proc
 def test_a_job_started_by_a_shim_with_ignored_signals_gets_default_dispositions(
     store: Store,
 ) -> None:
