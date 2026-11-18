@@ -43,6 +43,23 @@ def _spawn_wait(
     )
 
 
+def _holds_state_db(fd_dir: Path) -> bool:
+    """Whether a descriptor under `fd_dir` (/proc/<pid>/fd) points at state.db. The directory is
+    unreadable (EACCES) while the child execs, and gone when it exits: both mean "not yet"
+    here (the caller's `poll()` assertion catches an exit), never an error (#88)."""
+    try:
+        fds = list(fd_dir.iterdir())
+    except OSError:
+        return False
+    for fd in fds:
+        try:
+            if os.readlink(fd).endswith("state.db"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _await_polling(proc: subprocess.Popen[str]) -> None:
     """Block (bounded) until the process holds state.db open: its handlers are installed before
     the database is opened, so from then on a signal is handled, not fatal."""
@@ -50,12 +67,8 @@ def _await_polling(proc: subprocess.Popen[str]) -> None:
     fd_dir = Path(f"/proc/{proc.pid}/fd")
     while time.monotonic() < deadline:
         assert proc.poll() is None, "the wait ended before it was polling"
-        for fd in fd_dir.iterdir():
-            try:
-                if os.readlink(fd).endswith("state.db"):
-                    return
-            except OSError:
-                continue
+        if _holds_state_db(fd_dir):
+            return
         time.sleep(0.02)
     raise AssertionError("the wait never opened the database")
 
@@ -98,6 +111,27 @@ def test_a_waiting_process_that_gets_signals_prints_the_job_and_exits_130(
     assert doc["id"] == job_id and doc["status"] == "queued"
     assert "Traceback" not in err
     assert row(job_id)["status"] == "queued"
+
+
+@pytest.mark.parametrize("exc", [PermissionError, FileNotFoundError, ProcessLookupError])
+def test_the_readiness_probe_treats_an_unreadable_fd_directory_as_not_ready(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, exc: type[OSError]
+) -> None:
+    # /proc/<pid>/fd is unreadable (EACCES) while a child execs, and gone once it exits (#88).
+    def refuse(self: Path) -> Any:
+        raise exc(13, "refused", str(self))
+
+    monkeypatch.setattr(Path, "iterdir", refuse)
+    assert _holds_state_db(tmp_path) is False
+
+
+def test_the_readiness_probe_sees_a_descriptor_on_state_db(tmp_path: Path) -> None:
+    fd_dir = tmp_path / "fd"
+    fd_dir.mkdir()
+    (fd_dir / "3").symlink_to(tmp_path / "other.txt")
+    assert _holds_state_db(fd_dir) is False
+    (fd_dir / "4").symlink_to(tmp_path / "state.db")
+    assert _holds_state_db(fd_dir) is True
 
 
 def test_a_sighup_ignored_at_start_does_not_end_the_wait(
