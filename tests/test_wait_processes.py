@@ -43,13 +43,16 @@ def _spawn_wait(
     )
 
 
-def _holds_state_db(fd_dir: Path) -> bool:
+def _holds_state_db(fd_dir: Path, errors: list[OSError] | None = None) -> bool:
     """Whether a descriptor under `fd_dir` (/proc/<pid>/fd) points at state.db. The directory is
     unreadable (EACCES) while the child execs, and gone when it exits: both mean "not yet"
-    here (the caller's `poll()` assertion catches an exit), never an error (#88)."""
+    here (the caller's `poll()` assertion catches an exit), never an error (#88). Each such
+    error is appended to `errors` when given, so a final failure can name its cause."""
     try:
         fds = list(fd_dir.iterdir())
-    except OSError:
+    except OSError as exc:
+        if errors is not None:
+            errors.append(exc)
         return False
     for fd in fds:
         try:
@@ -65,12 +68,14 @@ def _await_polling(proc: subprocess.Popen[str]) -> None:
     the database is opened, so from then on a signal is handled, not fatal."""
     deadline = time.monotonic() + READY
     fd_dir = Path(f"/proc/{proc.pid}/fd")
+    errors: list[OSError] = []
     while time.monotonic() < deadline:
         assert proc.poll() is None, "the wait ended before it was polling"
-        if _holds_state_db(fd_dir):
+        if _holds_state_db(fd_dir, errors):
             return
         time.sleep(0.02)
-    raise AssertionError("the wait never opened the database")
+    last = repr(errors[-1]) if errors else "none"
+    raise AssertionError(f"the wait never opened the database (last /proc error: {last})")
 
 
 def _finish(proc: subprocess.Popen[str]) -> tuple[str, str]:
@@ -134,6 +139,56 @@ def test_the_readiness_probe_sees_a_descriptor_on_state_db(tmp_path: Path) -> No
     assert _holds_state_db(fd_dir) is False
     (fd_dir / "4").symlink_to(tmp_path / "state.db")
     assert _holds_state_db(fd_dir) is True
+
+
+def test_the_polling_wait_retries_after_a_transient_unreadable_fd_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    real_iterdir = Path.iterdir
+    calls: list[Path] = []
+
+    def flaky(self: Path) -> Any:
+        calls.append(self)
+        if len(calls) == 1:
+            raise PermissionError(13, "refused", str(self))
+        return real_iterdir(self)
+
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import sys, time; f = open(sys.argv[1], 'w'); time.sleep(60)",
+            str(tmp_path / "state.db"),
+        ],
+        stdin=subprocess.DEVNULL,
+    )
+    try:
+        monkeypatch.setattr(Path, "iterdir", flaky)
+        _await_polling(holder)  # type: ignore[arg-type]
+    finally:
+        monkeypatch.undo()
+        holder.terminate()  # the exact child this test spawned
+        holder.wait(timeout=10)
+    assert len(calls) >= 2
+
+
+def test_a_wait_that_never_opens_the_database_reports_the_last_proc_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refuse(self: Path) -> Any:
+        raise PermissionError(13, "refused", str(self))
+
+    class Stub:
+        pid = os.getpid()
+
+        def poll(self) -> None:
+            return None
+
+    monkeypatch.setattr(Path, "iterdir", refuse)
+    monkeypatch.setattr(sys.modules[__name__], "READY", 0.2)
+    with pytest.raises(AssertionError, match=r"last /proc error: PermissionError"):
+        _await_polling(Stub())  # type: ignore[arg-type]
 
 
 def test_a_sighup_ignored_at_start_does_not_end_the_wait(
