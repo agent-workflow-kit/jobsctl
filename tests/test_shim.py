@@ -15,7 +15,7 @@ import pytest
 
 from jobsctl.config import Config
 from jobsctl.errors import JobsctlError
-from jobsctl.proc_host import default_host
+from jobsctl.proc_host import ProcParseError, default_host
 from jobsctl.store_db import Store
 from tests.capabilities import needs_proc
 from tests.conftest import validate_against
@@ -710,7 +710,10 @@ def test_the_job_leader_is_reaped_after_the_final_commit_and_returncode_is_set(
 def _zombie_state(pid: int) -> int | None:
     """The process state letter as a number (``ord("Z")`` for a zombie), through the platform host
     (``/proc`` on Linux, libproc on macOS); ``None`` if the process is gone."""
-    info = default_host().process_info(pid)
+    try:
+        info = default_host().process_info(pid)
+    except (OSError, ProcParseError):
+        return None
     return None if info is None else ord(info.state)
 
 

@@ -50,8 +50,8 @@ dumpable flag; the platform check jobsctl itself uses). A skip names its reason 
 marks are written from reading the tests; **none has been run on a Mac**, so a Mac run may find more tests to
 mark and may find marked ones that would pass.
 
-The list is not kept by hand: `tests/test_platform_marks.py` greps every test file for `/proc`, `waitid`, `prctl`
-and `subreaper`, and, since the review, `pidfd`, `fdinfo` and `LinuxHost`. It fails if a file that matches is missing from its `CLASSIFIED` table or a file classified as
+The list is not kept by hand: `tests/test_platform_marks.py` greps every test file for `/proc`, `waitid`, `prctl`,
+`subreaper`, `pidfd`, `fdinfo` and `LinuxHost`. It fails if a file that matches is missing from its `CLASSIFIED` table or a file classified as
 marked contains no capability skip. The check is per file: a file naming a Linux facility must carry a capability
 skip or be classified; marking each test inside it is by review. The table gives the class and reason for each file. In short:
 

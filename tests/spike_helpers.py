@@ -25,7 +25,7 @@ from collections.abc import Callable, Iterator
 import pytest
 
 from jobsctl import gateway_proc
-from jobsctl.proc_host import default_host
+from jobsctl.proc_host import ProcInfo, ProcParseError, default_host
 from tests.kill_guard import allow
 
 PY = [sys.executable, "-I"]
@@ -47,16 +47,25 @@ def stat_fields(pid: int) -> list[str] | None:
     return raw[raw.rindex(b")") + 2 :].decode("ascii").split()
 
 
+def _info(pid: int) -> ProcInfo | None:
+    """The process record; an unreadable process (any ``OSError``, a garbled record) reads as gone,
+    as the old ``/proc/<pid>/stat`` read did."""
+    try:
+        return default_host().process_info(pid)
+    except (OSError, ProcParseError):
+        return None
+
+
 def start_time(pid: int) -> str | None:
     """The process start time as text (Linux: clock ticks since boot, the same value as field 22
     of ``/proc/<pid>/stat``; macOS: microseconds since the epoch); ``None`` if it is gone."""
-    info = default_host().process_info(pid)
+    info = _info(pid)
     return None if info is None else str(info.start)
 
 
 def alive(pid: int) -> bool:
     """Exists and is not a zombie."""
-    info = default_host().process_info(pid)
+    info = _info(pid)
     return info is not None and info.state not in ("Z", "X")
 
 

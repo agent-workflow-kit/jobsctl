@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from jobsctl.proc_host import ProcInfo
-from tests import capabilities, kill_guard
+from jobsctl.proc_host import ProcInfo, ProcParseError
+from tests import capabilities, kill_guard, spike_helpers, test_shim
 from tests.proc_fakes import FakeHost, proc
 
 TESTS = Path(__file__).resolve().parent
@@ -146,7 +146,7 @@ def test_test_shim_exit_collects_without_os_waitid_and_the_cld_constants() -> No
     )
     res = subprocess.run(
         [sys.executable, "-c", code],
-        env={"HOME": os.environ["HOME"]},
+        env={"HOME": os.environ.get("HOME", "/")},
         capture_output=True,
         timeout=60,
         stdin=subprocess.DEVNULL,
@@ -175,3 +175,21 @@ def test_the_kill_guard_builds_its_host_lazily_and_fails_safe(
 
     monkeypatch.setattr(kill_guard, "_host", lambda: RaisingHost())
     assert kill_guard._parent_of(os.getpid()) is None
+
+
+@pytest.mark.parametrize("error", [PermissionError("hidden"), ProcParseError("garbled")])
+def test_the_probe_helpers_read_an_unreadable_process_as_gone(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """``start_time``, ``alive`` and the shim's zombie probe keep the old ``/proc`` read's meaning:
+    a process that cannot be read is gone, not an error."""
+
+    class UnreadableHost(FakeHost):
+        def process_info(self, pid: int) -> ProcInfo | None:
+            raise error
+
+    monkeypatch.setattr(spike_helpers, "default_host", lambda: UnreadableHost())
+    monkeypatch.setattr(test_shim, "default_host", lambda: UnreadableHost())
+    assert spike_helpers.start_time(1) is None
+    assert spike_helpers.alive(1) is False
+    assert test_shim._zombie_state(1) is None
