@@ -74,6 +74,8 @@ def _await_polling(proc: subprocess.Popen[str]) -> None:
 
 
 def _finish(proc: subprocess.Popen[str]) -> tuple[str, str]:
+    """Collect the wait's output. A 30 s `TimeoutExpired` here is usually a symptom: the test body
+    raised before it ended the wait (the first exception in the log is the cause, see #88)."""
     try:
         return proc.communicate(timeout=30)
     finally:
