@@ -1,4 +1,11 @@
-"""Helpers for the platform probes in test_spike_*.py (no jobsctl code: they probe the host).
+"""Helpers for the platform probes in test_spike_*.py, and the ``Procs`` process recorder that
+tests/test_browse_pty.py also uses (so it runs on macOS too).
+
+Portable (through ``default_host().process_info``: ``/proc`` on Linux, libproc on macOS):
+``start_time``, ``alive``, ``wait_for``, ``read_line``, ``Procs`` and the ``spike_procs`` fixture.
+Linux-only: ``stat_fields`` (raw ``/proc/<pid>/stat``), ``Procs.adopt`` (it asserts on the
+start time read through ``start_time``, but is used only by the Linux spikes) and the pidfd path
+of ``Procs._kill_if_still``, which falls back to ``kill`` where no pidfd exists.
 
 Every process a probe starts is recorded at launch and killed at teardown by that exact PID,
 only while its recorded start time still matches (so a reused PID is never signaled). Nothing is
@@ -18,6 +25,7 @@ from collections.abc import Callable, Iterator
 import pytest
 
 from jobsctl import gateway_proc
+from jobsctl.proc_host import default_host
 from tests.kill_guard import allow
 
 PY = [sys.executable, "-I"]
@@ -40,14 +48,16 @@ def stat_fields(pid: int) -> list[str] | None:
 
 
 def start_time(pid: int) -> str | None:
-    fields = stat_fields(pid)
-    return fields[19] if fields else None
+    """The process start time as text (Linux: clock ticks since boot, the same value as field 22
+    of ``/proc/<pid>/stat``; macOS: microseconds since the epoch); ``None`` if it is gone."""
+    info = default_host().process_info(pid)
+    return None if info is None else str(info.start)
 
 
 def alive(pid: int) -> bool:
     """Exists and is not a zombie."""
-    fields = stat_fields(pid)
-    return fields is not None and fields[0] not in ("Z", "X")
+    info = default_host().process_info(pid)
+    return info is not None and info.state not in ("Z", "X")
 
 
 def wait_for(cond: Callable[[], bool], timeout: float = 15.0) -> bool:

@@ -40,7 +40,7 @@ Evidence levels used below:
 | Signals in `run` | `commands/run.py` | `pthread_sigmask` in the main thread | Static | None expected |
 | Browse TUI | `tui/`, `tests/test_browse_pty.py` | Nothing under `tui/` reads `/proc`. The pty tests use `pty.openpty` and `termios`, which exist on macOS | Linux; macOS: Mac needed | The `linux_only` mark was replaced by a capability check; a macOS run is the first evidence. Terminal.app and iTerm2 are manual below |
 | Hooks | `hook_run` | Uses `wait_exited_keep`, now through the emulation | Mac needed | `tests/test_hook_run.py`, `test_hook_interrupt.py` stay Linux-only; the hook leader's group reservation on macOS is unproven |
-| Test harness | `tests/kill_guard.py`, `tests/spike_helpers.py` | `kill_guard` finds a parent through the platform host (libproc on macOS); `spike_helpers` reads `/proc` and is `linux_only` | Linux (fake host for the guard); libproc side: Mac needed | A failed read means "not a descendant": the guard refuses, never allows. `Procs.adopt` asserts on `/proc`; only the Linux spike tests use it |
+| Test harness | `tests/kill_guard.py`, `tests/spike_helpers.py` | `kill_guard` finds a parent through the platform host (libproc on macOS); `spike_helpers` reads start time and liveness through the host (`start_time`, `alive`; `Procs` is used by `tests/test_browse_pty.py` on macOS too) and keeps `stat_fields` (raw `/proc`) Linux-only | Linux (fake host for the guard; the helpers on the real Linux host); libproc side: Mac needed | A failed read, or a host that cannot be built, means "not a descendant": the guard refuses, never allows. The host is built on first use, so a libproc load failure cannot break the import of every test module. `Procs.adopt` and `stat_fields` are used only by the Linux spike tests |
 
 ### Linux-only tests: marked, and what is still unclassified
 
@@ -51,30 +51,33 @@ marks are written from reading the tests; **none has been run on a Mac**, so a M
 mark and may find marked ones that would pass.
 
 The list is not kept by hand: `tests/test_platform_marks.py` greps every test file for `/proc`, `waitid`, `prctl`
-and `subreaper`, and fails if a file that matches is missing from its `CLASSIFIED` table or a file classified as
-marked has no skip. The table gives the class and reason for each file. In short:
+and `subreaper`, and, since the review, `pidfd`, `fdinfo` and `LinuxHost`. It fails if a file that matches is missing from its `CLASSIFIED` table or a file classified as
+marked contains no capability skip. The check is per file: a file naming a Linux facility must carry a capability
+skip or be classified; marking each test inside it is by review. The table gives the class and reason for each file. In short:
 
-- **marked** (capability skip): `test_runner.py` and `test_runner_processes.py` (the fake shim's descriptor
-  listing, and a spy on `os.waitid`), `test_shim.py` (`/proc/<pid>/stat`, `SigIgn`), `test_shim_processes.py`
+- **marked** (capability skip): `test_runner.py` (the fake shim's descriptor listing and a spy on `os.waitid`),
+  `test_runner_processes.py` (the `/dev/null` descriptor test), `test_shim.py` (the `SigIgn` read from `/proc`; the
+  zombie-state probe now goes through the host and is unmarked), `test_shim_processes.py`
   (`/proc` reads, subreaper, dumpable), `test_leftovers.py` (a real subreaper and `os.waitid`), `test_shim_exit.py`
-  (the whole module: `os.waitid` and `os.CLD_*`), `test_shim_output.py` (the tests using a `LinuxHost`
+  (the whole module: `os.waitid`; the `os.CLD_*` constants are read with `getattr` so the module still collects without them), `test_shim_output.py` (the tests using a `LinuxHost`
   subclass), `test_wait_processes.py` (`/proc/<pid>/fd`), `test_env_file.py` (`prctl`), plus the files that
-  were already marked: `test_proc_real.py`, `test_spike_*.py`, `test_hook_run.py`, `test_hook_interrupt.py`,
-  `test_cron_command.py` (`/proc/locks`);
+  were already marked: `test_proc_real.py`, `test_spike_*.py`, `test_hook_run.py`, `test_hook_interrupt.py` (classified by review in the
+  table: it names no facility itself), `test_cron_command.py` (`/proc/locks`). Other files that name pidfd or
+  `LinuxHost` only through fake hosts are classified `faked`; `tests/hook_real.py` is a Linux helper used by the marked hook tests;
 - **ported**: `tests/kill_guard.py` reads the parent PID through the platform host (`/proc` on Linux, libproc through
   `DarwinHost` on macOS) instead of `/proc`; the Linux side is tested with a fake host, the libproc side is
-  **Mac needed**. `tests/spike_helpers.py` stays Linux-only (`linux_only`): it exists for the `/proc`, pidfd and
-  `prctl` spikes, which have no macOS equivalent to port;
+  **Mac needed**. `tests/spike_helpers.py`: `start_time` and `alive` (and so `Procs`, used by `tests/test_browse_pty.py` on macOS) read
+  through the host; `stat_fields` and `Procs.adopt` stay Linux-only (raw `/proc/<pid>/stat`, used by the `linux_only` spikes);
 - **hooks**: `test_hook_run.py` and `test_hook_interrupt.py` stay Linux-only until the live run shows the `run_hook`
   `waitid` emulation works on a Mac.
 
-`tests/test_reconcile_processes.py`, `tests/test_shim_output.py` (the tests that do not use the `LinuxHost`
-subclass), `tests/test_runner_processes.py` (the rest), `tests/test_upgrade.py` and `tests/test_claims.py` name no
-Linux-only facility but start real processes through shared helpers (`tests/shim_real.py`,
-`tests/shim_helpers.py`, `tests/runner_helpers.py`, `tests/store_helpers.py`). They run on a Mac unmarked; whether they
-pass was not checked and stays **unclassified** until step 10: record their result. The fake shim in
-`tests/runner_helpers.py` lists its descriptors only where `/proc/self/fd` exists (macOS has no equivalent that was
-ported).
+The five files named in [#80](https://github.com/agent-workflow-kit/jobsctl/issues/80) (`tests/test_reconcile_processes.py`,
+`tests/test_shim_output.py` (the tests that do not use the `LinuxHost` subclass), `tests/test_runner_processes.py` (the
+rest), `tests/test_upgrade.py` and `tests/test_claims.py`), and any other test that starts real processes through the
+shared helpers (`tests/shim_real.py`, `tests/shim_helpers.py`, `tests/runner_helpers.py`, `tests/store_helpers.py`),
+name no Linux-only facility, so they run unmarked and unchecked on macOS. Whether they pass was not checked and stays
+**unclassified** until step 10: record their result. The fake shim in `tests/runner_helpers.py` lists its descriptors
+only where `/proc/self/fd` exists (macOS has no equivalent that was ported).
 
 ### Not covered
 
