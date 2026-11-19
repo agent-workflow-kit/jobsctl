@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import zlib
 from typing import Any
 
 import pytest
@@ -48,7 +49,7 @@ def finished(**over: Any) -> dict[str, Any]:
     return ran(**over)
 
 
-def tail(text: bytes, **over: Any) -> dict[str, Any]:
+def tail(text: bytes | str, **over: Any) -> dict[str, Any]:
     return {"tail": text, "bytes_seen": len(text), "truncated": 0, **over}
 
 
@@ -238,21 +239,88 @@ def test_undecodable_tail_bytes_print_as_backslash_x(capsys: pytest.CaptureFixtu
     assert show(capsys, "jb-aaaaaa22")["output"]["tail"] == "ok \\xff\\xfe end\n"
 
 
-def test_a_compressed_tail_is_not_readable_until_the_output_issue(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    # TODO(#16): the compression format is owned by output capture; show reads it then.
+def zipped(data: bytes, **over: Any) -> dict[str, Any]:
+    """An `outputs` row the way output capture stores a tail above 4 KiB."""
+    return tail(zlib.compress(data), compressed=1, bytes_seen=len(data) + 7, truncated=1, **over)
+
+
+FAILED_ATTEMPT = {"status": "failed", "reason": "exit", "attempt": 1, "ended_at": ENDED}
+
+
+def test_a_compressed_tail_is_shown_in_json(capsys: pytest.CaptureFixture[str]) -> None:
+    text = b"abcdefghij\n" * 1000
+    seed_job("jb-aaaaaa22", **FAILED_ATTEMPT, attempts=[finished()], output=zipped(text))
+    out = show(capsys, "jb-aaaaaa22")["output"]
+    assert out["tail"] == text.decode()
+    assert (out["bytes_seen"], out["truncated"]) == (len(text) + 7, True)
+    assert out["updated_at"] == "2026-03-10T11:00:00.000Z"
+
+
+def test_a_compressed_tail_is_shown_in_human_output(capsys: pytest.CaptureFixture[str]) -> None:
+    seed_job("jb-aaaaaa22", **FAILED_ATTEMPT, attempts=[finished()], output=zipped(b"zed\n" * 2000))
+    res = run_cli(capsys, "show", "jb-aaaaaa22")
+    assert res.code == 0 and res.out.count("zed") == 2000
+
+
+def test_a_compressed_tail_is_shown_by_attempt_flag(capsys: pytest.CaptureFixture[str]) -> None:
     seed_job(
         "jb-aaaaaa22",
-        status="failed",
-        reason="exit",
-        attempt=1,
-        ended_at=ENDED,
+        status="queued",
+        attempt=2,
+        attempts=[finished(), finished()],
+        output=zipped(b"first\n" * 900),
+        output_attempt=1,
+    )
+    assert show(capsys, "jb-aaaaaa22")["output"] is None
+    assert show(capsys, "jb-aaaaaa22", "--attempt", "1")["output"]["tail"] == "first\n" * 900
+
+
+def test_an_undecodable_byte_in_a_compressed_tail_prints_as_backslash_x(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data = b"ok \xff\xfe end\n" + b"x" * 5000
+    seed_job("jb-aaaaaa22", **FAILED_ATTEMPT, attempts=[finished()], output=zipped(data))
+    assert show(capsys, "jb-aaaaaa22")["output"]["tail"] == "ok \\xff\\xfe end\n" + "x" * 5000
+
+
+def test_a_compressed_tail_is_sanitized_again(capsys: pytest.CaptureFixture[str]) -> None:
+    data = b"\x1b[31mred\x1b[0m \x1b]0;title\x07rest\n" + b"x" * 5000
+    seed_job("jb-aaaaaa22", **FAILED_ATTEMPT, attempts=[finished()], output=zipped(data))
+    assert show(capsys, "jb-aaaaaa22")["output"]["tail"] == "red rest\n" + "x" * 5000
+    assert "\x1b" not in run_cli(capsys, "show", "jb-aaaaaa22").out
+
+
+@pytest.mark.parametrize(
+    ("blob", "compressed"),
+    [
+        (b"not zlib at all", 1),
+        (zlib.compress(b"x" * 6000)[:-6], 1),
+        (zlib.compress(b"x" * 6000) + b"trailing", 1),
+        (zlib.compress(b"x" * 300000), 1),
+        (b"a" * 262145, 0),
+        ("text", 0),
+    ],
+    ids=[
+        "garbage",
+        "truncated",
+        "trailing-data",
+        "expands-beyond-maximum",
+        "uncompressed-beyond-maximum",
+        "non-blob",
+    ],
+)
+def test_an_unreadable_stored_tail_is_an_internal_error(
+    capsys: pytest.CaptureFixture[str], blob: bytes | str, compressed: int
+) -> None:
+    seed_job(
+        "jb-aaaaaa22",
+        **FAILED_ATTEMPT,
         attempts=[finished()],
-        output=tail(b"zz", compressed=1),
+        output=tail(blob, compressed=compressed),
     )
     res = fail(capsys, "jb-aaaaaa22")
     assert res.code == 1 and res.envelope()["error"]["code"] == "internal"
+    assert run_cli(capsys, "show", "--no-output", "jb-aaaaaa22").code == 0
 
 
 # -- the current-attempt rule ----------------------------------------------------------------

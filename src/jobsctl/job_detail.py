@@ -17,7 +17,7 @@ from typing import Any, Literal
 from jobsctl.config import Config
 from jobsctl.errors import JobsctlError
 from jobsctl.job_view import attempt_object, current_attempt, job_object
-from jobsctl.output_store import load_tail
+from jobsctl.output_store import load_tail, tail_bytes
 from jobsctl.store_db import Tx
 from jobsctl.textsafe import sanitize
 
@@ -52,16 +52,15 @@ def shown_output_object(tx: Tx, job_id: str, n: int) -> dict[str, Any] | None:
     """The stored tail of attempt `n` as `show` prints it, or `None` when there is none.
 
     The tail is untrusted: an undecodable byte becomes `\\xNN` and the text is sanitized again,
-    in `--json` as well as in human output. A compressed tail raises `internal`.
+    in `--json` as well as in human output.
     """
     row = tx.one("SELECT * FROM outputs WHERE job_id = ? AND n = ?", [job_id, n])
     if row is None:
         return None
-    if row["compressed"]:
-        # TODO(#16): output capture owns the compression format; read it here once it exists.
-        raise JobsctlError("internal", "a compressed output tail cannot be read yet")
     return {
-        "tail": sanitize(bytes(row["tail"]).decode("utf-8", "backslashreplace")),
+        "tail": sanitize(
+            tail_bytes(row["tail"], bool(row["compressed"])).decode("utf-8", "backslashreplace")
+        ),
         "bytes_seen": row["bytes_seen"],
         "truncated": bool(row["truncated"]),
         "updated_at": row["updated_at"],

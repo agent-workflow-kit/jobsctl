@@ -30,20 +30,24 @@ def encode_tail(text: str) -> tuple[bytes, bool]:
     return data, False
 
 
-def decode_tail(blob: bytes, compressed: bool) -> str:
-    """The stored text. A row is untrusted input (anything with write access to `state.db` can
-    store anything): a value that is not a blob, output beyond the largest tail, a damaged or
-    partial zlib frame, data after the frame and invalid UTF-8 (stored tails always are valid)
-    are refused."""
+def tail_bytes(blob: bytes, compressed: bool) -> bytes:
+    """The stored tail as bytes. A row is untrusted input (anything with write access to
+    `state.db` can store anything): a value that is not a blob, output beyond the largest tail,
+    a damaged or partial zlib frame and data after the frame are refused."""
     if not isinstance(blob, bytes | memoryview):
         raise _corrupt("a stored tail is not a blob")
     blob = bytes(blob)
     if compressed:
-        blob = _inflate(blob)
-    elif len(blob) > MAX_TAIL_BYTES:
+        return _inflate(blob)
+    if len(blob) > MAX_TAIL_BYTES:
         raise _corrupt("a stored tail is larger than the maximum")
+    return blob
+
+
+def decode_tail(blob: bytes, compressed: bool) -> str:
+    """The stored text; invalid UTF-8 is refused too (stored tails always are valid)."""
     try:
-        return blob.decode("utf-8")
+        return tail_bytes(blob, compressed).decode("utf-8")
     except UnicodeDecodeError as exc:
         raise _corrupt("a stored tail is not valid UTF-8") from exc
 
