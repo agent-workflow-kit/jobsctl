@@ -173,6 +173,7 @@
         "cancel_pending",
         "version_skew",
         "interrupted",
+        "vetoed",
         "needs_human",
         "refused",
         "ambiguous",
@@ -209,6 +210,7 @@
     },
     "hook_name": {
       "enum": [
+        "pre-add",
         "pre-start",
         "post-start",
         "post-finish",

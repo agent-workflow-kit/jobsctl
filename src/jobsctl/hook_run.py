@@ -54,6 +54,7 @@ __all__ = [
 
 EXIT_ESCALATE = 13
 PRE_START = "pre-start"
+PRE_HOOKS = frozenset({"pre-add", PRE_START})  # hooks that can veto and escalate
 _READ_CHUNK = 65536
 _TICK = 0.02
 
@@ -106,14 +107,14 @@ class HookResult:
         set (the leader outlived SIGKILL and was left unreaped) is an internal error for the
         callers, not a veto."""
         return (
-            self.hook == PRE_START
+            self.hook in PRE_HOOKS
             and self.stopped is None
             and self.outcome in ("veto", "timeout", "failed")
         )
 
     @property
     def escalates(self) -> bool:
-        return self.hook == PRE_START and self.stopped is None and self.outcome == "escalate"
+        return self.hook in PRE_HOOKS and self.stopped is None and self.outcome == "escalate"
 
     def log_fields(self, job_id: str) -> dict[str, Any]:
         """The fields of the `hook_ran` log record (`schemas/log.json`), without seq, ts, level.
@@ -134,13 +135,13 @@ class HookResult:
 
 
 def classify(hook: str, exit_code: int | None, *, timed_out: bool) -> str:
-    """Design guide section 8: exit 0 allows, exit 13 escalates (`pre-start` only), a timeout is
-    `timeout`; any other non-zero exit vetoes a `pre-start` hook and merely fails a post hook."""
+    """Design guide section 8: exit 0 allows, exit 13 escalates (the `pre-` hooks only), a timeout is
+    `timeout`; any other non-zero exit vetoes a `pre-` hook and merely fails a post hook."""
     if timed_out:
         return "timeout"
     if exit_code == 0:
         return "allow"
-    if hook == PRE_START:
+    if hook in PRE_HOOKS:
         return "escalate" if exit_code == EXIT_ESCALATE else "veto"
     return "failed"
 
@@ -378,7 +379,7 @@ def run_hook(
     except (OSError, ValueError) as exc:
         sel.close()
         text = os.strerror(exc.errno) if isinstance(exc, OSError) and exc.errno else "invalid"
-        message = f"hook could not be started ({text})" if hook == PRE_START else None
+        message = f"hook could not be started ({text})" if hook in PRE_HOOKS else None
         return HookResult(
             hook, hook_id, "failed", None, None, (), (), "", message, False, False, None,
             None, text, (), False, time.monotonic() - began,
@@ -473,7 +474,7 @@ def _supervise(
     message = None
     if outcome != "allow":
         log_stderr = excerpt(run.err, LOG_STDERR_LIMIT, mask)
-        if hook == PRE_START:
+        if hook in PRE_HOOKS:
             message = excerpt(run.err, MESSAGE_LIMIT, mask)
     return HookResult(
         hook=hook,

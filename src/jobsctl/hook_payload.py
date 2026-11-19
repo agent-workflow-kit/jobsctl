@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-__all__ = ["OUTPUT_HOOKS", "build_payload", "encode_payload"]
+__all__ = ["OUTPUT_HOOKS", "build_add_payload", "build_payload", "encode_payload"]
 
 # Hooks whose payload carries `output_available` and `output_tail`.
 OUTPUT_HOOKS = frozenset({"post-finish", "post-fail", "post-held", "post-cancel"})
@@ -53,6 +53,58 @@ def build_payload(
             else None
         )
     return payload
+
+
+def build_add_payload(
+    *,
+    event_id: str,
+    job_id: str,
+    queue: str,
+    argv: list[str],
+    cwd: str,
+    env_names: list[str],
+    pass_env: list[str],
+    labels: list[str],
+    unique_key: str | None,
+    priority: int,
+    pinned: bool,
+    top: bool,
+    overrides: Mapping[str, Any],
+    actor: str,
+    decision_ids: list[str],
+) -> dict[str, Any]:
+    """The `pre-add` payload (`schemas/hooks/pre-add.json`): the job `add` would store, which
+    does not exist yet. `job_id` is the id it would get; `previous_status` and `attempt` are
+    `null`; `job` has no status, rank or attempt fields. Only variable *names* appear
+    (`env_names`, `pass_env`): `add` has refused every secret before this is built, and no value
+    of `--env` is ever included."""
+    return {
+        "tool": "jobsctl",
+        "hook": "pre-add",
+        "event_id": event_id,
+        "object_type": "job",
+        "object_id": job_id,
+        "repo": None,
+        "labels": list(labels),
+        "previous_status": None,
+        "job": {
+            "id": job_id,
+            "queue": queue,
+            "argv": list(argv),
+            "cwd": cwd,
+            "env_names": sorted(env_names),
+            "pass_env": list(pass_env),
+            "labels": list(labels),
+            "unique_key": unique_key,
+            "priority": priority,
+            "pinned": pinned,
+            "top": top,
+            "overrides": dict(overrides),
+            "actor": actor,
+            "decision_ids": list(decision_ids),
+        },
+        "attempt": None,
+    }
 
 
 def encode_payload(payload: Mapping[str, Any]) -> bytes:

@@ -39,13 +39,14 @@ def test_exit_code_table_matches_interface() -> None:
         "cancel_pending": 12,
         "version_skew": 12,
         "interrupted": 130,
+        "vetoed": 11,
         "needs_human": 13,
         "refused": 20,
         "ambiguous": 21,
         "busy": 1,
         "internal": 1,
     }
-    assert 11 not in set(ERROR_EXIT.values()) | {int(c) for c in ExitCode}
+    assert ExitCode.VETOED == 11  # only add, vetoed by a pre-add hook
     assert ExitCode.WAIT_TIMEOUT == 22
 
 
