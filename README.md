@@ -172,14 +172,15 @@ The same table applies to every command; `wait` adds the job outcomes (Details: 
 | 1 | internal error, or database busy |
 | 2 | usage error, invalid config, `browse` without the TUI extra (`tui_missing`) or without a terminal |
 | 10 | not found, or unknown queue (only with `strict_queues`) |
+| 11 | `add` vetoed by a `pre-add` hook (nothing stored) |
 | 12 | `wait`: job failed; `cancel --force`: still pending; `wait`/`add --wait`/`cancel`: `version_skew` |
-| 13 | needs a human (`cancel --force`, `release --override-escalation`); `wait`: job held |
+| 13 | needs a human (`cancel --force`, `release --override-escalation`, `add` escalated by a `pre-add` hook); `wait`: job held |
 | 20 | refused, with a `reason`; `wait`: job canceled |
 | 21 | ambiguous id prefix or selector |
 | 22 | `wait` timed out |
 | 130 | `wait` or `add --wait` interrupted, or a command interrupted while it ran a hook |
 
-jobsctl never exits 11. With `--json`, every non-zero exit other than the `wait` outcomes prints `{"error": {"code", "message", ...}}` on stdout; see [Errors](docs/interface.md#errors) for the codes and refusal reasons. Examples (real output):
+Exit 11 is only `add` vetoed by a `pre-add` hook. With `--json`, every non-zero exit other than the `wait` outcomes prints `{"error": {"code", "message", ...}}` on stdout; see [Errors](docs/interface.md#errors) for the codes and refusal reasons. Examples (real output):
 
 ```text
 $ jobsctl wait jb-zzzz
@@ -234,7 +235,7 @@ jb-xhnk3ecp: canceled
 
 ### Hooks and decision ids
 
-Hooks are shell commands configured by the operator (see [Hooks](#hooks-and-the-pre-start-gate)). A hook receives a JSON payload on stdin and may print `{"decision_id": "..."}` as its stdout; those ids are recorded on the attempt and in the log, and appear in `show --json` under `attempts[].decision_ids`. A submitter does not attach hooks to a job: hooks run in the shim and are selected by queue and labels, which is why consistent labels matter. Payload shapes: [schemas/hooks/](schemas/hooks); rules: [Hooks](docs/interface.md#hooks).
+Hooks are shell commands configured by the operator (see [Hooks](#hooks-and-the-pre-start-gate)). A hook receives a JSON payload on stdin and may print `{"decision_id": "..."}` as its stdout; those ids are recorded on the attempt and in the log, and appear in `show --json` under `attempts[].decision_ids`. A submitter does not attach hooks to a job: hooks run in the shim (`pre-add` hooks in `add` itself) and are selected by queue and labels, which is why consistent labels matter. Payload shapes: [schemas/hooks/](schemas/hooks); rules: [Hooks](docs/interface.md#hooks).
 
 ## Operator guide
 
@@ -297,7 +298,7 @@ Each attempt keeps a masked, sanitized tail (default last 16 KiB or 200 lines, w
 
 ### Hooks and the pre-start gate
 
-Hooks are lists under `hooks.<name>` in config; names are `pre-start`, `post-start`, `post-finish`, `post-fail`, `post-held` and `post-cancel`:
+Hooks are lists under `hooks.<name>` in config; names are `pre-add`, `pre-start`, `post-start`, `post-finish`, `post-fail`, `post-held` and `post-cancel`:
 
 ```yaml
 hooks:
@@ -324,7 +325,9 @@ The **pre-start gate** runs in the shim, after the claim and before the job star
 | any other non-zero exit | veto: the job is `canceled` with reason `vetoed`; no more hooks run |
 | timeout, killed by a signal, or cannot start | fails closed, as a veto |
 
-So a pre-start hook's `timeout` matters: a slow policy check that times out cancels the job. The default is 30 s. A veto is not an exit code of any jobsctl command (jobsctl never exits 11); it shows as the job's final status.
+So a pre-start hook's `timeout` matters: a slow policy check that times out cancels the job. The default is 30 s. A pre-start veto is not an exit code of any jobsctl command; it shows as the job's final status.
+
+The **pre-add gate** runs in `add` itself, once a job would be created and before it is stored (not for `--dry-run`, and not for an add that hits a live unique key). Same outcomes as above, but nothing is ever stored: exit 0 continues, any other non-zero exit, a timeout, a signal or a start failure is a veto (`add` exits 11, `vetoed`, with the hook's stderr in the message), and exit 13 escalates (the remaining hooks still run, then `add` exits 13, `needs_human`, no job). There is no held state for a job that was never stored and no override flag: a human who wants an escalated add to go through changes the input or the hook and adds again. The payload ([schemas/hooks/pre-add.json](schemas/hooks/pre-add.json)) describes the job to be created, with variable names and never values.
 
 Here a vetoing hook wrote `denied by policy` to stderr with `printf` (a trailing newline would show as a literal `\n`):
 

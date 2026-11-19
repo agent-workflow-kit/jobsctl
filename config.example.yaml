@@ -84,9 +84,15 @@ env_file: null
 # per job; include_output puts the (untrusted) output tail into the payload; queues null means
 # every queue; labels are key=value pairs that must all match. Hook output is not stored: its
 # stderr appears only (masked, sanitized, at most 2 KiB) in the hook_ran log records, and a
-# vetoing or escalating pre-start hook's stderr is also kept on the attempt.
+# vetoing or escalating pre-start hook's stderr is also kept on the attempt. A pre-add hook
+# runs in `add` before the job is stored: a veto exits 11, exit 13 escalates (exit 13, nothing
+# stored), and any failure or timeout vetoes; it does not run for --dry-run or a unique-key hit.
 hooks: {}
 # hooks:
+#   pre-add:
+#     - name: gate-add
+#       cmd: "gatectl check enqueue --timeout 20"
+#       timeout: 30s
 #   pre-start:
 #     - name: gate-start
 #       cmd: "gatectl check start-work --timeout 540"
@@ -97,7 +103,7 @@ hooks: {}
 #       cmd: "notice-route send --stdin-json"
 #       async: true
 #       exclude_queues: [respond]
-# Hook names: pre-start, post-start, post-finish, post-fail, post-held, post-cancel.
+# Hook names: pre-add, pre-start, post-start, post-finish, post-fail, post-held, post-cancel.
 # Variables removed from hook environments (env_file variables are not removed otherwise).
 hooks_strip_env: []
 

@@ -9,7 +9,7 @@ environment of the `add` process (the rules of every hook). Fail-closed, like `p
   escalation;
 - exit 13 escalates and the rest still run; without a veto the add is refused with
   `needs_human` (exit 13). Nothing is stored either way: there is no held state for a job that
-  does not exist, and no override at add (D55);
+  does not exist, and no override at add (D54);
 - a hook stopped by SIGINT, SIGHUP or SIGTERM, or whose leader outlived SIGKILL, ends the add
   with `interrupted` (130, SIGINT) or `internal` (1), storing nothing.
 

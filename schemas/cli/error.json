@@ -67,6 +67,19 @@
             "label": {
               "$ref": "../defs.json#/$defs/label_key",
               "description": "secret_in_label: the key of the label whose value holds a secret; never the value (from add and label add). Absent for a key hit, a joined key=value hit, or a secret that starts in the key."
+            },
+            "hook_id": {
+              "$ref": "../defs.json#/$defs/hook_id",
+              "description": "vetoed: the identity of the pre-add hook that vetoed the add (masked and sanitized)."
+            },
+            "hook_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "../defs.json#/$defs/hook_id"
+              },
+              "minItems": 1,
+              "uniqueItems": true,
+              "description": "needs_human from add: the identities of the pre-add hooks that escalated it (masked and sanitized); absent for the other needs_human errors."
             }
           },
           "additionalProperties": {},
@@ -219,6 +232,30 @@
             "properties": {
               "code": {
                 "const": "usage"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "vetoed"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "required": [
+                  "hook_id"
+                ]
               }
             }
           }
