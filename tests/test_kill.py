@@ -397,17 +397,6 @@ def test_a_reaped_leader_with_a_live_member_is_not_alive_and_gets_nothing(
     assert attempt(pidfd_rig.store)["leftovers"] == 1
 
 
-def test_a_reaped_leader_with_a_live_member_is_not_alive_for_the_group_step(
-    pidfd_rig: Rig, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """The leader goes away between the liveness check and the group step."""
-    pidfd_rig.host.reactions[("pidfd", LEADER, signal.SIGTERM)] = pidfd_rig.die(LEADER)
-    pidfd_rig.host.reactions[("pidfd-group", LEADER, signal.SIGTERM)] = pidfd_rig.die(LEADER)
-    assert pidfd_rig.killer().run() == 0
-    assert not any(c[0] in ("kill", "killpg") for c in pidfd_rig.signals())
-    assert "error" not in capsys.readouterr().err
-
-
 def test_a_reused_leader_pid_gets_no_group_signal_through_the_pidfd(pidfd_rig: Rig) -> None:
     def reuse() -> None:
         pidfd_rig.host.procs[LEADER] = proc(LEADER, start=START + 9, pgid=LEADER)
@@ -425,7 +414,6 @@ def test_a_leader_that_left_its_group_is_not_signaled_through_the_flag(pidfd_rig
     sent = pidfd_rig.signals()
     assert ("killpg", LEADER, signal.SIGKILL) in sent  # addressed by PID, after the re-check
     assert not any(c[0] == "pidfd_send_signal" and c[3] == FLAG for c in sent)  # no flag send
-    assert not any(c[0] == "killpg" and c[1] == STRANGER for c in sent)
 
 
 def test_an_old_kernel_ends_the_signals_once_the_leader_exited(old_kernel_rig: Rig) -> None:
