@@ -7,7 +7,7 @@ import json
 import jsonschema
 import pytest
 
-from jobsctl.hook_payload import build_payload, encode_payload
+from jobsctl.hook_payload import build_add_payload, build_payload, encode_payload
 from tests.conftest import validate_against
 from tests.hook_fixtures import JOB_ID, TS, attempt_object, job_object
 
@@ -144,3 +144,50 @@ def test_encoding_is_ascii_json_with_newline_even_for_lone_surrogates() -> None:
     raw = encode_payload(payload)
     assert raw.isascii() and raw.endswith(b"\n") and raw.count(b"\n") == 1
     assert json.loads(raw)["labels"] == ["k=\ud800", "k=é "]
+
+
+def pre_add() -> dict[str, object]:
+    return build_add_payload(
+        event_id=f"pre-add:{JOB_ID}:0",
+        job_id=JOB_ID,
+        queue="default",
+        argv=["echo", "h\u00e9llo"],
+        cwd="/work",
+        env_names=["B", "A"],
+        pass_env=["TOKEN"],
+        labels=["k=v"],
+        unique_key=None,
+        priority=-3,
+        pinned=False,
+        top=True,
+        overrides={"timeout": "none", "max_retries": 2},
+        actor="human:me",
+        decision_ids=["d1"],
+    )
+
+
+def test_pre_add_payload_validates_and_carries_names_only() -> None:
+    payload = pre_add()
+    validate_against("hooks/pre-add.json", payload)
+    assert payload["job"]["env_names"] == ["A", "B"]  # type: ignore[index]
+    assert payload["previous_status"] is None and payload["attempt"] is None
+    assert encode_payload(payload).isascii()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda p: p["job"].update(env={"A": "1"}),
+        lambda p: p["job"].update(status="queued"),
+        lambda p: p.update(attempt={}),
+        lambda p: p.update(hook="pre-start"),
+        lambda p: p.update(event_id="x"),
+        lambda p: p["job"].pop("top"),
+        lambda p: p.update(output_tail=None),
+    ],
+)
+def test_pre_add_schema_rejects_a_deviation(mutate) -> None:  # type: ignore[no-untyped-def]
+    payload = pre_add()
+    mutate(payload)
+    with pytest.raises(jsonschema.ValidationError):
+        validate_against("hooks/pre-add.json", payload)
