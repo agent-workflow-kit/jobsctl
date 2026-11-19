@@ -136,7 +136,13 @@ def signal_process(
 
 
 def signal_group(
-    host: Host, leader: Identity, sig: int, *, allow_zombie: bool = True, use_pidfd: bool = False
+    host: Host,
+    leader: Identity,
+    sig: int,
+    *,
+    allow_zombie: bool = True,
+    use_pidfd: bool = False,
+    fallback_allow_zombie: bool | None = None,
 ) -> SignalOutcome:
     """Send ``sig`` to the process group whose leader is ``leader`` (pgid == leader PID).
 
@@ -148,6 +154,13 @@ def signal_group(
     re-check. If it left the group the flag is never used (it targets the leader's current
     group): ``killpg(leader PID)`` follows an identity re-check, and ``ESRCH`` (no such group)
     reads as ``NOT_ALIVE``.
+
+    ``allow_zombie`` applies to the pidfd path, where a leader that exited but is not reaped still
+    is the process the pidfd refers to (a reaped one gives ``ESRCH``, and a reused PID fails the
+    start-time check), so it cannot redirect the signal. ``fallback_allow_zombie`` (default: the
+    same value) applies to the ``killpg`` fallback, where a zombie leader the caller does not hold
+    could be reaped and its PID reused between the check and the call: a caller that does not hold
+    the leader passes ``False`` there and nothing is signaled once the leader is a zombie.
     """
     validate_pid(leader.pid)
     validate_signal(sig)
@@ -155,4 +168,6 @@ def signal_group(
         out = _pidfd_path(host, leader, sig, PIDFD_SIGNAL_PROCESS_GROUP, allow_zombie)
         if out is not None:
             return out
-    return _fallback(host, leader, sig, allow_zombie, group=True)
+    if fallback_allow_zombie is None:
+        fallback_allow_zombie = allow_zombie
+    return _fallback(host, leader, sig, fallback_allow_zombie, group=True)

@@ -759,6 +759,7 @@ class Shim:
             own_child=lambda: _own_unreaped_child(popen),
             now=gateway.monotonic,
             diag=self._diag,
+            pidfd_group=True,
         )
         pump = Pump(
             stdout_fd,

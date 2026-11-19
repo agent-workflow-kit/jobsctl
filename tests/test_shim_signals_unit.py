@@ -6,6 +6,7 @@ import errno
 import signal
 from dataclasses import dataclass, field
 
+from jobsctl import gateway_proc
 from jobsctl.proc_identity import Identity
 from jobsctl.shim_signals import Phase, SignalSequence
 from tests.proc_fakes import FakeHost, oserror, proc
@@ -22,7 +23,9 @@ class Rig:
     own: bool = True
     notes: list[str] = field(default_factory=list)
 
-    def seq(self, grace: float = 10) -> SignalSequence:
+    def seq(
+        self, grace: float = 10, *, pidfd_group: bool = False, allow_zombie: bool = True
+    ) -> SignalSequence:
         return SignalSequence(
             self.host,
             IDENT,
@@ -31,6 +34,8 @@ class Rig:
             own_child=lambda: self.own,
             now=lambda: self.now,
             diag=self.notes.append,
+            allow_zombie=allow_zombie,
+            pidfd_group=pidfd_group,
         )
 
     def sent(self) -> list[tuple]:
@@ -234,3 +239,105 @@ def test_no_fallback_signal_is_sent_for_a_child_reaped_elsewhere() -> None:
     seq = r.seq()
     seq.start("timeout")
     assert r.sent() == []
+
+
+# --- PIDFD_SIGNAL_PROCESS_GROUP (#35), against a faked kernel --------------------------------
+
+FLAG = gateway_proc.PIDFD_SIGNAL_PROCESS_GROUP
+
+
+def test_the_group_steps_use_the_pidfd_group_flag_when_enabled() -> None:
+    r = rig()
+    seq = r.seq(pidfd_group=True)
+    seq.start("timeout")
+    r.now = 10
+    seq.advance()
+    r.now = 20
+    seq.advance()
+    assert ("pidfd_send_signal", LEADER, signal.SIGTERM, FLAG) in r.sent()
+    assert ("pidfd_send_signal", LEADER, signal.SIGKILL, FLAG) in r.sent()
+    assert not any(c[0] == "killpg" for c in r.sent())
+    assert seq.sent == ["term:pid", "term:group", "kill:group", "kill:pid"]
+
+
+def test_a_kernel_without_the_flag_gives_the_same_sequence_through_killpg() -> None:
+    plain = rig(pidfd_ok=False)
+    old = rig(pidfd_send_error={FLAG: oserror(errno.EINVAL)})
+    results = []
+    for r, group in ((plain, False), (old, True)):
+        seq = r.seq(pidfd_group=group)
+        seq.start("timeout")
+        r.now = 10
+        seq.advance()
+        r.now = 20
+        seq.advance()
+        results.append((seq.sent, seq.phase, [c[0] for c in r.sent() if c[0] == "killpg"]))
+    assert results[0] == results[1]
+
+
+def test_the_group_signal_is_not_sent_when_the_leader_pid_was_reused() -> None:
+    r = rig()
+    seq = r.seq(pidfd_group=True)
+    seq.start("timeout")
+    r.host.procs[LEADER] = proc(LEADER, start=5555)
+    r.now = 10
+    seq.advance()
+    assert [c for c in r.sent() if c[2] == signal.SIGTERM and len(c) == 4 and c[3]] == []
+    assert not any(c[0] == "killpg" for c in r.sent())
+
+
+def test_an_own_child_retries_a_refused_group_flag_signal_with_killpg() -> None:
+    """The shim holds the leader unreaped, so its group id is reserved: a pidfd that reports the
+    leader gone (a kernel that does not reach a zombie leader's group) must not lose the signal."""
+    r = rig(pidfd_send_error={FLAG: oserror(errno.ESRCH)})
+    seq = r.seq(pidfd_group=True)
+    seq.start("timeout")
+    r.exited = True
+    seq.advance()
+    assert r.sent()[-1] == ("killpg", LEADER, signal.SIGTERM)
+    assert "term:group" in seq.sent
+
+
+def test_a_leader_that_is_not_our_child_is_never_retried_with_killpg() -> None:
+    r = rig(pidfd_send_error={FLAG: oserror(errno.ESRCH)})
+    r.own = False
+    seq = r.seq(pidfd_group=True, allow_zombie=False)
+    seq.start("forced")
+    r.exited = True
+    seq.advance()
+    assert not any(c[0] == "killpg" for c in r.sent())
+    assert seq.group_unreachable
+
+
+def test_a_zombie_leader_not_held_by_us_is_signaled_only_through_the_pidfd() -> None:
+    r = rig()
+    r.own = False
+    r.host.procs[LEADER] = proc(LEADER, start=1000, zombie=True)
+    seq = r.seq(pidfd_group=True, allow_zombie=False)
+    seq.start("forced")  # SIGTERM to the PID: a zombie reads as gone, nothing sent
+    r.exited = True
+    seq.advance()
+    assert r.sent() == [("pidfd_send_signal", LEADER, signal.SIGTERM, FLAG)]
+    assert not seq.group_unreachable
+
+
+def test_a_zombie_leader_not_held_by_us_gets_no_killpg_on_an_old_kernel() -> None:
+    r = rig(pidfd_send_error={FLAG: oserror(errno.EINVAL)})
+    r.own = False
+    r.host.procs[LEADER] = proc(LEADER, start=1000, zombie=True)
+    seq = r.seq(pidfd_group=True, allow_zombie=False)
+    seq.start("forced")
+    r.exited = True
+    seq.advance()
+    assert not any(c[0] in ("kill", "killpg") for c in r.sent())
+    assert seq.group_unreachable
+
+
+def test_the_group_is_reachable_until_a_group_signal_is_refused() -> None:
+    r = rig()
+    seq = r.seq(pidfd_group=True)
+    assert not seq.group_unreachable
+    seq.start("timeout")
+    r.now = 10
+    seq.advance()
+    assert not seq.group_unreachable

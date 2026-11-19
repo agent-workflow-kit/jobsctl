@@ -307,3 +307,110 @@ def test_ctypes_fallback_refused_off_allow_list(monkeypatch: pytest.MonkeyPatch)
     assert ei2.value.errno == errno.ENOSYS
     monkeypatch.delattr("signal.pidfd_send_signal", raising=False)
     assert gateway_proc.pidfd_supported() is False
+
+
+# --- PIDFD_SIGNAL_PROCESS_GROUP (#35): faked kernel; the real 6.9+ path is tests/test_pidfd_group_live.py
+
+
+def test_group_flag_value_is_the_kernel_uapi_value():
+    # include/uapi/linux/pidfd.h: PIDFD_SIGNAL_PROCESS_GROUP (1UL << 2), Linux 6.9
+    assert gateway_proc.PIDFD_SIGNAL_PROCESS_GROUP == 1 << 2
+
+
+def test_group_pidfd_path_checks_identity_after_open_and_before_send():
+    host = host_with()
+    out = signal_group(host, IDENT, signal.SIGTERM, use_pidfd=True)
+    order = names(host)
+    assert out.method == "pidfd-group"
+    assert order.index("pidfd_open") < order.index("process_info") < order.index("pidfd_send_signal")
+    assert order[-1] == "close"
+
+
+def test_group_pidfd_path_refuses_a_reused_leader_pid_and_sends_nothing():
+    host = FakeHost(procs={5: proc(5, start=77)})
+    out = signal_group(host, IDENT, signal.SIGKILL, use_pidfd=True)
+    assert out.result is Result.NOT_ALIVE and out.detail == "reused"
+    assert host.sent() == []
+    assert ("close", 5) in host.calls
+
+
+def test_group_pidfd_path_refuses_a_pid_reused_between_open_and_check():
+    host = host_with()
+    host.after_open = lambda: host.procs.__setitem__(5, proc(5, start=77))
+    out = signal_group(host, IDENT, signal.SIGKILL, use_pidfd=True)
+    assert out.result is Result.NOT_ALIVE
+    assert host.sent() == []
+
+
+@pytest.mark.parametrize("value", [-1, 6])
+def test_group_pidfd_path_refuses_a_pidfd_that_is_not_the_leader(value: int):
+    host = host_with(pidfd_pid_value=value)
+    out = signal_group(host, IDENT, signal.SIGKILL, use_pidfd=True)
+    assert out.result is Result.NOT_ALIVE and out.detail == "pidfd_process_mismatch"
+    assert host.sent() == []
+
+
+def test_group_pidfd_path_leader_gone_before_send_is_not_alive_and_never_killpg():
+    host = host_with()
+    host.after_open = None
+    flag = gateway_proc.PIDFD_SIGNAL_PROCESS_GROUP
+    host.pidfd_send_error = {flag: oserror(errno.ESRCH)}
+    out = signal_group(host, IDENT, signal.SIGKILL, use_pidfd=True)
+    assert out.result is Result.NOT_ALIVE and out.method == "pidfd-group"
+    assert not any(c[0] in ("kill", "killpg") for c in host.calls)
+
+
+@pytest.mark.parametrize("code", [errno.EINVAL, errno.ENOSYS])
+def test_group_pidfd_kernel_without_the_flag_falls_back_with_a_recheck(code: int):
+    flag = gateway_proc.PIDFD_SIGNAL_PROCESS_GROUP
+    host = host_with(pidfd_send_error={flag: oserror(code)})
+    out = signal_group(host, IDENT, signal.SIGTERM, use_pidfd=True)
+    assert out.sent and out.method == "killpg"
+    assert names(host)[-2:] == ["process_info", "killpg"]
+
+
+def test_group_pidfd_einval_is_not_a_fallback_for_other_errors():
+    flag = gateway_proc.PIDFD_SIGNAL_PROCESS_GROUP
+    host = host_with(pidfd_send_error={flag: oserror(errno.EIO)})
+    out = signal_group(host, IDENT, signal.SIGTERM, use_pidfd=True)
+    assert out.result is Result.ERROR and out.method == "pidfd-group"
+    assert not any(c[0] == "killpg" for c in host.calls)
+
+
+def test_group_zombie_leader_is_signaled_through_the_pidfd_when_the_caller_allows_it():
+    host = FakeHost(procs={5: proc(5, start=9, zombie=True), 11: proc(11, pgid=5)})
+    out = signal_group(
+        host, IDENT, signal.SIGKILL, use_pidfd=True, allow_zombie=True, fallback_allow_zombie=False
+    )
+    assert out.sent and out.method == "pidfd-group"
+
+
+def test_group_zombie_leader_never_reaches_killpg_when_the_fallback_refuses_zombies():
+    flag = gateway_proc.PIDFD_SIGNAL_PROCESS_GROUP
+    host = FakeHost(
+        procs={5: proc(5, start=9, zombie=True)}, pidfd_send_error={flag: oserror(errno.EINVAL)}
+    )
+    out = signal_group(
+        host, IDENT, signal.SIGKILL, use_pidfd=True, allow_zombie=True, fallback_allow_zombie=False
+    )
+    assert out.result is Result.NOT_ALIVE and out.detail == "zombie"
+    assert not any(c[0] in ("kill", "killpg") for c in host.calls)
+
+
+def test_group_fallback_zombie_setting_defaults_to_allow_zombie():
+    host = FakeHost(procs={5: proc(5, start=9, zombie=True)}, pidfd_ok=False)
+    assert signal_group(host, IDENT, signal.SIGTERM).sent
+    assert signal_group(host, IDENT, signal.SIGTERM, allow_zombie=False).result is Result.NOT_ALIVE
+
+
+def test_group_flag_is_never_sent_when_the_leader_is_not_its_own_group_leader():
+    host = FakeHost(procs={5: proc(5, start=9, pgid=2000)})
+    signal_group(host, IDENT, signal.SIGTERM, use_pidfd=True)
+    assert not any(c[0] == "pidfd_send_signal" and c[3] for c in host.calls)
+    assert host.sent() == [("killpg", 5, signal.SIGTERM)]
+
+
+def test_group_flag_not_used_when_use_pidfd_is_off():
+    host = host_with()
+    assert signal_group(host, IDENT, signal.SIGTERM).method == "killpg"
+    assert not any(c[0] == "pidfd_open" for c in host.calls)
