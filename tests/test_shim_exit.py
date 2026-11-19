@@ -17,6 +17,17 @@ from jobsctl.shim_exit import (
     natural_outcome,
     post_hook,
 )
+from tests.capabilities import needs_waitid
+
+# The whole module: its helper calls os.waitid and its tests read os.CLD_*, which exist
+# only where os.waitid does. The pure mapping tests in it are skipped there too: unmarking them
+# would need a Mac run first, to see that the constants exist.
+pytestmark = needs_waitid
+
+# Read at import (parametrization): getattr, so a platform without them still collects the module
+# (the skip above then applies); the values are the Linux and macOS ones.
+CLD_STOPPED = getattr(os, "CLD_STOPPED", 5)
+CLD_CONTINUED = getattr(os, "CLD_CONTINUED", 6)
 
 
 def _wait(code: str) -> os.waitid_result:
@@ -52,7 +63,7 @@ def test_a_core_dump_sets_core() -> None:
     assert exit_record(os.CLD_DUMPED, 11) == ExitRecord("signaled", signal=11, core=True)
 
 
-@pytest.mark.parametrize("si_code", [0, os.CLD_STOPPED, os.CLD_CONTINUED, 99])
+@pytest.mark.parametrize("si_code", [0, CLD_STOPPED, CLD_CONTINUED, 99])
 def test_other_wait_results_are_refused(si_code: int) -> None:
     with pytest.raises(UnknownWaitStatus):
         exit_record(si_code, 0)

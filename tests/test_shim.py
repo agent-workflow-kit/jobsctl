@@ -15,7 +15,9 @@ import pytest
 
 from jobsctl.config import Config
 from jobsctl.errors import JobsctlError
+from jobsctl.proc_host import ProcParseError, default_host
 from jobsctl.store_db import Store
+from tests.capabilities import needs_proc
 from tests.conftest import validate_against
 from tests.shim_helpers import (
     JOB,
@@ -706,11 +708,13 @@ def test_the_job_leader_is_reaped_after_the_final_commit_and_returncode_is_set(
 
 
 def _zombie_state(pid: int) -> int | None:
+    """The process state letter as a number (``ord("Z")`` for a zombie), through the platform host
+    (``/proc`` on Linux, libproc on macOS); ``None`` if the process is gone."""
     try:
-        text = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
+        info = default_host().process_info(pid)
+    except (OSError, ProcParseError):
         return None
-    return ord(text.rsplit(")", 1)[1].split()[0])
+    return None if info is None else ord(info.state)
 
 
 def test_a_job_spawned_but_not_recorded_is_killed_so_no_unknown_process_runs(
@@ -1067,6 +1071,7 @@ def test_a_conclusive_answer_resets_the_inconclusive_clock(
     assert clock[0] >= 100  # 40 s + a fresh 60 s, not 60 s in total
 
 
+@needs_proc
 def test_a_job_started_by_a_shim_with_ignored_signals_gets_default_dispositions(
     store: Store,
 ) -> None:

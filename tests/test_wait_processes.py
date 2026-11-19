@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from jobsctl.store_dir import resolve_state_dir
+from tests.capabilities import HAS_PROC
 from tests.conftest import validate_against
 from tests.helpers import run_cli
 from tests.manual_helpers import add_job, config_file, make_done, row
@@ -66,6 +67,8 @@ def _holds_state_db(fd_dir: Path, errors: list[OSError] | None = None) -> bool:
 def _await_polling(proc: subprocess.Popen[str]) -> None:
     """Block (bounded) until the process holds state.db open: its handlers are installed before
     the database is opened, so from then on a signal is handled, not fatal."""
+    if not HAS_PROC:
+        pytest.skip("needs /proc/<pid>/fd (Linux)")
     deadline = time.monotonic() + READY
     fd_dir = Path(f"/proc/{proc.pid}/fd")
     errors: list[OSError] = []

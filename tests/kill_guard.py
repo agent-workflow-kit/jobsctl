@@ -10,6 +10,7 @@ Signal 0 passes. A test that really must signal something else carries
 
 from __future__ import annotations
 
+import functools
 import os
 import signal
 import subprocess
@@ -19,6 +20,7 @@ from typing import Any
 import pytest
 
 from jobsctl import gateway_proc
+from jobsctl.proc_host import Host, default_host
 
 _allowed: set[int] = set()
 violations: list[str] = []
@@ -29,16 +31,25 @@ def allow(pid: int) -> None:
     _allowed.add(pid)
 
 
+@functools.cache
+def _host() -> Host:
+    """The platform host, built on first use: every test module imports this one (autouse via
+    conftest), so a host that fails to construct (a libproc load error) must not break the import.
+    """
+    return default_host()
+
+
 def _parent_of(pid: int) -> int | None:
+    """The parent PID through the platform's own host (``/proc`` on Linux, libproc on macOS).
+
+    Anything unreadable, or a host that cannot be built, is "unknown", which the guard treats as
+    not a descendant: it refuses (the guard fails safe).
+    """
     try:
-        with open(f"/proc/{pid}/stat", "rb") as f:
-            raw = f.read(4096)
-    except OSError:
+        info = _host().process_info(pid)
+    except Exception:  # noqa: BLE001 - any failure means "unknown", never "allowed"
         return None
-    try:
-        return int(raw[raw.rindex(b")") + 2 :].split()[1])
-    except (ValueError, IndexError):
-        return None
+    return None if info is None else info.ppid
 
 
 def _descendant_of_us(pid: int) -> bool:

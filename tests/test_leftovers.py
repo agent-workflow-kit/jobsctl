@@ -11,6 +11,7 @@ import time
 from jobsctl import gateway_proc
 from jobsctl.leftovers import Leftovers, count_leftovers
 from jobsctl.proc_host import LinuxHost
+from tests.capabilities import needs_prctl, needs_proc, needs_waitid
 from tests.proc_fakes import FakeHost, proc
 
 SHIM = 100
@@ -117,6 +118,9 @@ def test_the_unknown_exit_kind_keeps_null_for_an_empty_incomplete_scan() -> None
     assert Leftovers((), True).recorded_unless_unproven == 0
 
 
+@needs_proc
+@needs_prctl
+@needs_waitid
 def test_real_processes_group_members_and_a_setsid_orphan_are_counted_and_not_signaled() -> None:
     """A real subreaper: this test process adopts a daemonized grandchild."""
     gateway_proc.prctl(gateway_proc.PR_SET_CHILD_SUBREAPER, 1)

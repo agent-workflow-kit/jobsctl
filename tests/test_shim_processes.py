@@ -19,6 +19,7 @@ from jobsctl.runner import PassResult, Runner
 from jobsctl.store_db import Store
 from jobsctl.store_dir import resolve_state_dir
 from jobsctl.store_ops import take_lease
+from tests.capabilities import needs_prctl, needs_proc
 from tests.runner_helpers import add_queued, job_ids, make_runner
 from tests.shim_helpers import JOB, shims_dir
 from tests.shim_real import RealShims
@@ -38,6 +39,7 @@ def test_a_real_shim_runs_a_job_to_done_and_exits(real_shims: RealShims) -> None
     assert not (shims_dir() / f"{JOB}.log").exists()
 
 
+@needs_proc
 def test_the_shim_survives_sighup_and_sigint_and_the_job_gets_default_dispositions(
     real_shims: RealShims, tmp_path: Path
 ) -> None:
@@ -63,6 +65,7 @@ def test_the_shim_survives_sighup_and_sigint_and_the_job_gets_default_dispositio
     assert popen.wait(timeout=60) == 0
 
 
+@needs_proc
 def test_the_job_does_not_inherit_signals_the_shims_spawner_ignored(
     real_shims: RealShims, tmp_path: Path
 ) -> None:
@@ -89,6 +92,8 @@ def test_the_job_does_not_inherit_signals_the_shims_spawner_ignored(
     assert popen.wait(timeout=60) == 0
 
 
+@needs_proc
+@needs_prctl
 def test_the_shim_is_non_dumpable_and_the_job_is_not(real_shims: RealShims, tmp_path: Path) -> None:
     """Spike C4: the shim's /proc/<pid>/environ is unreadable to another process; the flag resets
     on exec, so the job's is readable."""
@@ -116,6 +121,7 @@ def test_the_job_leads_a_new_group_inside_the_shims_session_not_the_shims_group(
     real_shims.wait_status("done")
 
 
+@needs_prctl
 def test_a_daemon_that_left_the_group_is_adopted_by_the_subreaper_and_counted(
     real_shims: RealShims, tmp_path: Path
 ) -> None:
@@ -166,6 +172,7 @@ def test_a_job_that_writes_after_the_shim_died_gets_sigpipe_spike_b4(
     raise AssertionError("the writing job survived the loss of its reader")
 
 
+@needs_proc
 def test_a_flood_of_output_stays_in_bounded_memory_spike_b4(
     real_shims: RealShims,
 ) -> None:
