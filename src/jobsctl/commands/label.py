@@ -4,7 +4,7 @@ One `BEGIN IMMEDIATE` transaction resolves the job, applies the change and build
 object; the `label` log record is appended after the commit. `--dry-run` runs the same
 decisions in a read transaction on a read-only connection and writes nothing. Labels are
 identifier fields the log builders do not mask, so a secret is refused here, before the
-database is opened (`add` is to get the same refusal for its labels from issue #46); `label
+database is opened (`add` shares the check, `env_mask.check_label_secrets`); `label
 remove` skips the check so that a label stored with a secret can still be removed.
 """
 
@@ -22,15 +22,15 @@ from jobsctl.cli_output import print_json
 from jobsctl.cli_registry import Context, command
 from jobsctl.env_canonical import build_canonical_env
 from jobsctl.env_file import load_env_file
-from jobsctl.env_mask import MaskingSet, masking_values
+from jobsctl.env_mask import MaskingSet, check_label_secrets, masking_values
 from jobsctl.errors import JobsctlError, usage_error
+from jobsctl.job_lookup import find_job
 from jobsctl.job_view import job_labels, job_object
 from jobsctl.log_writer import RecordWriter
 from jobsctl.store_db import OpenMode, Store, Tx
 from jobsctl.store_dir import resolve_state_dir
 from jobsctl.timestamps import format_timestamp
 from jobsctl.validate import MAX_LABELS
-from jobsctl.view_lookup import job_by_id
 
 Pair = tuple[str, str]
 
@@ -43,27 +43,10 @@ class Outcome:
     queue: str
 
 
-def check_label_secrets(pairs: list[Pair], masking: MaskingSet) -> None:
-    """Exit 2 (`secret_in_label`) for a label holding a masked value. `details.label` names the
-    key for a value hit and is left out for a key or a joined `key=value` hit: naming the key
-    would echo the secret (or part of it)."""
-    for key, value in pairs:
-        if masking.contains_secret(key):
-            raise usage_error("a label key contains a secret value", code="secret_in_label")
-        if masking.contains_secret(value):
-            raise usage_error(
-                f"the value of label {key} contains a secret value",
-                code="secret_in_label",
-                label=key,
-            )
-        if masking.contains_secret(f"{key}={value}"):  # a secret spanning the `=`
-            raise usage_error("a label contains a secret value", code="secret_in_label")
-
-
 def _decide(tx: Tx, ctx: Context, *, write: bool) -> Outcome:
     adding = ctx.command == "label add"
     wanted = set(ctx.args.labels)
-    row = job_by_id(tx, ctx.args.id)
+    row = find_job(tx, ctx.args.id)
     have = {tuple(label.split("=", 1)) for label in job_labels(tx, row["id"])}
     delta = wanted - have if adding else wanted & have
     after = have | delta if adding else have - delta

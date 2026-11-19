@@ -25,6 +25,7 @@ from jobsctl.store_db import Store
 from jobsctl.store_ops import counter_get, counter_incr, lease_since, take_lease
 from jobsctl.timestamps import format_timestamp
 from jobsctl.triggers import PASS_REQUESTED, request_pass
+from tests.capabilities import needs_proc, needs_waitid
 from tests.conftest import validate_against, validate_record_file
 from tests.runner_fixtures import PassSpawns
 from tests.runner_helpers import (
@@ -87,6 +88,7 @@ def log_events(store: Store) -> list[dict[str, Any]]:
 # -- a pass that claims and spawns ---------------------------------------------------------------
 
 
+@needs_proc
 def test_a_pass_claims_spawns_a_detached_shim_and_records_its_identity(
     store: Store,
     kit: ShimKit,
@@ -1024,6 +1026,7 @@ def test_the_pass_summary_is_logged_only_when_something_changed(
     assert [e["event"] for e in log_events(store)][-1] == "pass"
 
 
+@needs_waitid
 def test_reaping_waits_for_exact_pids_never_for_any_child(
     store: Store, runners: list[Runner], monkeypatch: pytest.MonkeyPatch
 ) -> None:

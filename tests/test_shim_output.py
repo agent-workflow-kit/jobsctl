@@ -19,6 +19,7 @@ from jobsctl.proc_host import GroupScan, LinuxHost
 from jobsctl.result_file import read_result
 from jobsctl.store_db import OpenMode, Store
 from jobsctl.store_dir import resolve_state_dir
+from tests.capabilities import needs_proc
 from tests.conftest import validate_against, validate_record_file
 from tests.helpers import run_cli
 from tests.kill_guard import allow
@@ -170,7 +171,7 @@ def test_a_clean_exit_records_zero_leftovers_and_logs_nothing(store: Store) -> N
     assert [r for r in log_records("leftovers") if r["level"] == "warn"] == []
 
 
-class _IncompleteScanHost(LinuxHost):
+class _IncompleteScanHost(LinuxHost):  # reads /proc: its users carry needs_proc
     """The real host whose `/proc` scans always report one unreadable entry (a loaded host, or
     `hidepid`): what they find is unchanged, but they are never complete."""
 
@@ -183,6 +184,7 @@ class _IncompleteScanHost(LinuxHost):
         return GroupScan(got.members, got.unreadable + 1, got.hidden)
 
 
+@needs_proc
 @pytest.mark.parametrize(("script", "kind"), [("exit 3", "exited"), ("kill -KILL $$", "signaled")])
 def test_an_incomplete_scan_records_zero_and_the_show_document_validates(
     store: Store, capsys: pytest.CaptureFixture[str], script: str, kind: str
@@ -201,6 +203,7 @@ def test_an_incomplete_scan_records_zero_and_the_show_document_validates(
     validate_record_file(resolve_state_dir() / "log.jsonl", "log.json")
 
 
+@needs_proc
 def test_an_incomplete_scan_that_finds_a_process_records_the_count_and_warns(
     store: Store, tmp_path: Path
 ) -> None:
@@ -280,6 +283,7 @@ def test_a_final_commit_that_never_succeeds_leaves_the_result_file_for_reconcile
     assert record is not None and record.status == "done" and record.tail.text == "kept\n"
 
 
+@needs_proc
 def test_an_unknown_exit_on_an_incomplete_empty_scan_keeps_null_leftovers(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -295,6 +299,7 @@ def test_an_unknown_exit_on_an_incomplete_empty_scan_keeps_null_leftovers(
     assert attempt(store)["leftovers"] is None
 
 
+@needs_proc
 def test_an_incomplete_scan_writes_zero_to_the_result_file_for_an_exited_job(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1,11 +1,12 @@
-"""Finding jobs: an id or unique prefix, and the cancel selectors (interface.md, Identifiers,
-Selectors)."""
+"""Finding jobs: an id or unique prefix, a unique key, and the cancel selectors (interface.md,
+Identifiers, Selectors). The one place a job is looked up for every command."""
 
 from __future__ import annotations
 
 import sqlite3
 from collections.abc import Sequence
 
+from jobsctl.errors import JobsctlError
 from jobsctl.ids import resolve_job_id
 from jobsctl.store_db import Tx
 from jobsctl.store_schema import NON_TERMINAL_STATUSES
@@ -28,6 +29,22 @@ def find_job(tx: Tx | None, text: str) -> sqlite3.Row:
     assert tx is not None  # a match needs a database
     row = tx.one("SELECT * FROM jobs WHERE id = ?", [job_id])
     assert row is not None
+    return row
+
+
+def job_by_unique_key(tx: Tx, key: str) -> sqlite3.Row:
+    """The non-terminal job holding `key`, else the most recently created job with it (ties by
+    insertion order); exit 10 when no job has it."""
+    live = ", ".join("?" for _ in NON_TERMINAL_STATUSES)
+    row = tx.one(
+        f"SELECT * FROM jobs WHERE unique_key = ? AND status IN ({live})",
+        [key, *NON_TERMINAL_STATUSES],
+    ) or tx.one(
+        "SELECT * FROM jobs WHERE unique_key = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        [key],
+    )
+    if row is None:
+        raise JobsctlError("not_found", "no job has that unique key")
     return row
 
 

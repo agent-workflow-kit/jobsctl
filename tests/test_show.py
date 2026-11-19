@@ -609,3 +609,15 @@ def test_exit_text_sanitizes_its_fields() -> None:
         {"kind": "signaled", "code": None, "signal": FORGE, "core": False},
     ):
         _assert_no_forgery(exit_text(record))
+
+
+def test_a_bad_attempt_is_not_found_before_the_env_file_is_read(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("the env file was read before the attempt was checked")
+
+    monkeypatch.setattr("jobsctl.commands.show.load_env_file", boom)
+    seed_job("jb-pepepe22", pass_env=["TOKEN"], attempt=1, attempts=[ran()])
+    res = run_cli(capsys, "--json", "show", "jb-pepepe22", "--attempt", "99")
+    assert res.code == 10 and res.envelope()["error"]["code"] == "not_found"

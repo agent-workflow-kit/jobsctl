@@ -18,6 +18,8 @@ concurrency:
 jobs:
   ci:
     uses: agent-workflow-kit/awkit-ci/.github/workflows/python-ci.yml@v0.1.0
+    with:
+      python-versions: '["3.12","3.13","3.14"]'
 
   release:
     needs: ci

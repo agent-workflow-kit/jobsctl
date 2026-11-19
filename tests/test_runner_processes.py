@@ -26,6 +26,7 @@ from jobsctl.proc_host import default_host
 from jobsctl.proc_identity import check_identity
 from jobsctl.store_db import Store
 from jobsctl.store_dir import resolve_state_dir
+from tests.capabilities import needs_proc
 from tests.conftest import validate_against
 from tests.manual_helpers import config_file
 from tests.runner_helpers import ShimKit, add_queued, attempts_of, job_ids, job_row
@@ -205,6 +206,7 @@ def test_claims_without_the_lease_still_never_exceed_the_cap(pool: Pool) -> None
 # -- detached shims --------------------------------------------------------------------------------
 
 
+@needs_proc
 def test_a_shim_survives_its_passes_exit_and_a_hangup_and_reads_dev_null(
     pool: Pool, kit: ShimKit
 ) -> None:
