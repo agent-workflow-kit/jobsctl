@@ -85,13 +85,9 @@ def run_pre_add(
                 host=deliverer.host,
                 tuning=deliverer.tuning,
             )
-            deliverer.record(
-                EventPlan(event_id, job_id, (), queue=payload_fields["queue"]), result
-            )
+            deliverer.record(EventPlan(event_id, job_id, (), queue=payload_fields["queue"]), result)
             if result.unkillable:
-                raise JobsctlError(
-                    "internal", "a pre-add hook outlived SIGKILL; nothing was added"
-                )
+                raise JobsctlError("internal", "a pre-add hook outlived SIGKILL; nothing was added")
             if result.stopped is not None or guard.signum is not None:
                 name = signal.Signals(guard.signum).name if guard.signum else str(result.stopped)
                 code = "interrupted" if guard.signum == signal.SIGINT else "internal"

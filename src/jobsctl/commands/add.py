@@ -625,8 +625,8 @@ def add(ctx: Context) -> int:
     canonical = build_canonical_env(ctx.config, dict(os.environ))
     masking = masking_values(ctx.config, canonical, env_file)
     check_secrets(req, masking, ctx.config.mask_env, env_file)
-    # The pre-add hook runs inside `_write`, once a job would really be created: after the unique-key
-    # lookup and strict_queues, before the insert (not for `--dry-run`).
+    # The pre-add hook runs inside `_write`, once a job would really be created: after the
+    # unique-key lookup and strict_queues, before the insert (not for `--dry-run`).
     now = format_timestamp(gateway.utc_now())
     if args.dry_run:
         out = _dry_run(ctx, req, env_file, now)

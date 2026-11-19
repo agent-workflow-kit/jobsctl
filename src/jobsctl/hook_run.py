@@ -135,7 +135,7 @@ class HookResult:
 
 
 def classify(hook: str, exit_code: int | None, *, timed_out: bool) -> str:
-    """Design guide section 8: exit 0 allows, exit 13 escalates (the `pre-` hooks only), a timeout is
+    """Design guide section 8: exit 0 allows, exit 13 escalates (`pre-` hooks only), a timeout is
     `timeout`; any other non-zero exit vetoes a `pre-` hook and merely fails a post hook."""
     if timed_out:
         return "timeout"

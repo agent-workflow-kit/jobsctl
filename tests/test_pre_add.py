@@ -18,8 +18,8 @@ from jobsctl.env_file import load_env_file
 from jobsctl.hook_run import HookResult
 from jobsctl.store_dir import resolve_state_dir
 from tests.conftest import validate_against, validate_record_file
-from tests.hook_real import HookTracker, tracker_fixture
 from tests.helpers import Result, run_cli
+from tests.hook_real import HookTracker, tracker_fixture
 
 pytestmark = pytest.mark.usefixtures("validated_records")
 
@@ -118,7 +118,7 @@ def test_allow_stores_the_job_and_the_payload_validates(
     hook = script(
         tmp_path,
         "allow",
-        f'cat > {seen}/payload.json\npwd > {seen}/cwd\n'
+        f"cat > {seen}/payload.json\npwd > {seen}/cwd\n"
         f'echo "$JOBSCTL_HOOK $JOBSCTL_ID $JOBSCTL_OBJECT_TYPE" > {seen}/env\nexit 0\n',
     )
     res = add(
@@ -246,9 +246,7 @@ def test_escalation_exits_13_needs_human_and_stores_nothing(
     marker = tmp_path / "second-ran"
     first = script(tmp_path, "first", "echo 'ask a human' >&2\nexit 13\n")
     second = script(tmp_path, "second", f"touch {marker}\n")
-    res = add(
-        capsys, config(tmp_path, {"name": "a", "cmd": first}, {"name": "b", "cmd": second})
-    )
+    res = add(capsys, config(tmp_path, {"name": "a", "cmd": first}, {"name": "b", "cmd": second}))
     assert res.code == 13, res.out + res.err
     err = error(res)
     assert err["code"] == "needs_human" and err["details"]["hook_ids"] == ["a"]
@@ -263,9 +261,7 @@ def test_a_veto_beats_an_escalation(
 ) -> None:
     first = script(tmp_path, "first", "exit 13\n")
     second = script(tmp_path, "second", "exit 1\n")
-    res = add(
-        capsys, config(tmp_path, {"name": "a", "cmd": first}, {"name": "b", "cmd": second})
-    )
+    res = add(capsys, config(tmp_path, {"name": "a", "cmd": first}, {"name": "b", "cmd": second}))
     assert res.code == 11 and error(res)["details"]["hook_id"] == "b"
     assert jobs() == []
 
@@ -395,7 +391,7 @@ def test_a_secret_in_hook_stderr_is_masked_in_the_error_and_the_log(
     env_file = tmp_path / "secrets.env"
     env_file.write_text(f"API_TOKEN={SECRET}\n")
     env_file.chmod(0o600)
-    hook = script(tmp_path, "h", f'echo "denied for $API_TOKEN" >&2\nexit 1\n')
+    hook = script(tmp_path, "h", 'echo "denied for $API_TOKEN" >&2\nexit 1\n')
     cfg = config(tmp_path, {"cmd": hook}, env_file=str(env_file))
     res = add(capsys, cfg)
     assert res.code == 11
@@ -489,3 +485,21 @@ def test_no_hook_configured_changes_nothing(
 ) -> None:
     res = add(capsys, config(tmp_path))
     assert res.code == 0 and len(jobs()) == 1 and tracker.spawned == []
+
+
+def test_a_taken_id_runs_the_hooks_again_with_a_fresh_one(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: HookTracker,
+) -> None:
+    first = add(capsys, config(tmp_path))
+    taken = jobs()[0]["id"]
+    ids = iter([taken, "jb-aaaaaaaa"])
+    monkeypatch.setattr(add_module, "new_job_id", lambda: next(ids))
+    log = tmp_path / "ids"
+    hook = script(tmp_path, "h", f'echo "$JOBSCTL_ID" >> {log}\n')
+    res = add(capsys, config(tmp_path, {"cmd": hook}))
+    assert first.code == 0 and res.code == 0, res.out + res.err
+    assert log.read_text().split() == [taken, "jb-aaaaaaaa"]
+    assert {row["id"] for row in jobs()} == {taken, "jb-aaaaaaaa"}

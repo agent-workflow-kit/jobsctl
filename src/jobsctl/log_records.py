@@ -249,7 +249,15 @@ _LOG_FIELD_CHECKS: Final[Mapping[str, Check]] = {
     "attempt_reason": _nullable(_is_reason),
     "retry_pending": lambda v: isinstance(v, bool),
     "hook": _nullable(
-        _enum("pre-add", "pre-start", "post-start", "post-finish", "post-fail", "post-held", "post-cancel")
+        _enum(
+            "pre-add",
+            "pre-start",
+            "post-start",
+            "post-finish",
+            "post-fail",
+            "post-held",
+            "post-cancel",
+        )
     ),
     "hook_id": _nullable(lambda v: isinstance(v, str) and len(v) >= 1),
     "outcome": _nullable(_enum("allow", "escalate", "veto", "failed", "timeout")),
