@@ -630,7 +630,9 @@ def test_sigint_during_a_hook_stops_it_and_stores_nothing(
         end = time.monotonic() + 20
         while time.monotonic() < end and not (pidfile.exists() and pidfile.read_text().strip()):
             time.sleep(0.02)
-        os.kill(os.getpid(), signal.SIGINT)  # this process: the add; the hook is running
+        if pidfile.exists() and pidfile.read_text().strip():
+            os.kill(os.getpid(), signal.SIGINT)  # this process: the add; the hook is running
+        # else: no signal; the exit-code assertion below fails cleanly
 
     thread = threading.Thread(target=fire)
     thread.start()
@@ -675,14 +677,19 @@ def test_a_decision_id_holding_a_secret_is_dropped_and_never_logged(
     env_file = tmp_path / "secrets.env"
     env_file.write_text(f"API_TOKEN={SECRET}\n")
     env_file.chmod(0o600)
-    body = 'echo "{\\"decision_id\\": [\\"$API_TOKEN\\", \\"ok1\\"]}"\n'
+    seen = tmp_path / "seen_token"
+    body = f'printf %s "$API_TOKEN" > {seen}\n' + (
+        'echo "{\\"decision_id\\": [\\"$API_TOKEN\\", \\"ok1\\"]}"\n'
+    )
     cfg = config(
         tmp_path, {"cmd": script(tmp_path, "h", body)}, env_file=str(env_file),
         mask_env=["API_TOKEN"],
     )  # fmt: skip
     res = add(capsys, cfg)
     assert res.code == 0, res.out + res.err
-    assert SECRET not in (resolve_state_dir() / "log.jsonl").read_text()
+    assert seen.read_text() == SECRET  # the secret really reached the hook
+    log_text = (resolve_state_dir() / "log.jsonl").read_text()
+    assert SECRET not in log_text and "***" in log_text  # dropped, echoed masked
     assert hook_records()[0]["decision_ids"] == ["ok1"]
 
 
