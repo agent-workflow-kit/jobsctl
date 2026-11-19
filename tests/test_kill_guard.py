@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from jobsctl import gateway_proc
 from tests import kill_guard
 
 FABRICATED = 4_000_001  # no real call may be made for it: the fakes below record any
@@ -99,3 +100,36 @@ def test_a_real_grandchild_is_a_descendant_and_an_unrelated_pid_is_not() -> None
         child.wait(timeout=15)
         if child.stdout is not None:
             child.stdout.close()
+
+
+def test_the_raw_group_flag_refuses_the_test_runners_own_group() -> None:
+    """PIDFD_SIGNAL_PROCESS_GROUP on a pidfd of the test runner would signal its whole group."""
+    calls: list[int] = []
+    raw = kill_guard.guarded_raw(lambda number, *args: calls.append(number) or 0)
+    me = os.getpid()
+    if not gateway_proc.pidfd_supported():
+        pytest.skip("no pidfd_open")
+    fd = gateway_proc.pidfd_open(me)
+    try:
+        with pytest.raises(pytest.fail.Exception):
+            raw(424, fd, signal.SIGKILL, 0, 4)  # the flag
+    finally:
+        os.close(fd)
+    assert calls == []
+    kill_guard.violations.clear()
+
+
+def test_the_raw_group_flag_is_allowed_for_a_started_leader_in_its_own_group() -> None:
+    if not gateway_proc.pidfd_supported():
+        pytest.skip("no pidfd_open")
+    calls: list[int] = []
+    raw = kill_guard.guarded_raw(lambda number, *args: calls.append(number) or 0)
+    proc = subprocess.Popen(["sleep", "30"], process_group=0)
+    fd = gateway_proc.pidfd_open(proc.pid)
+    try:
+        raw(424, fd, signal.SIGKILL, 0, 4)
+        assert calls == [424]
+    finally:
+        os.close(fd)
+        os.kill(proc.pid, signal.SIGKILL)
+        proc.wait()

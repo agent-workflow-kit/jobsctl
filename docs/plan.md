@@ -148,5 +148,5 @@ Interim behavior until the dependent issues land: `_kill` ends a forced cancel a
 - **0.5** (stage 5): cron, upgrades and macOS readiness.
 - **0.6** (stage 6): `browse`.
 - **1.0**: stages 0–6 done; the v1 review and ticket slices have run through jobsctl without interface changes; the macOS checklist passed; the interface is declared stable (a deliberate breaking-change commit per architecture §18.3).
-- **1.x** (additive): an opt-in masked full output log; a `pre-add` hook (roadmap hook candidate); `PIDFD_SIGNAL_PROCESS_GROUP` on Linux 6.9 and later; further `blocked_by` reasons.
+- **1.x** (additive): an opt-in masked full output log; a `pre-add` hook (roadmap hook candidate); `PIDFD_SIGNAL_PROCESS_GROUP` on Linux 6.9 and later (implemented for `_kill` only, real-kernel check pending, #35); further `blocked_by` reasons.
 - **2.0**: reserved for a non-additive state or interface change, shipped with the drain step of interface.md "Upgrades".

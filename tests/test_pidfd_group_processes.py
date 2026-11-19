@@ -1,0 +1,60 @@
+"""``signal_group`` with ``use_pidfd`` against real processes, on whatever kernel this is (#35).
+
+On Linux before 6.9 the real kernel answers ``EINVAL`` to ``PIDFD_SIGNAL_PROCESS_GROUP``, so the
+re-checked ``killpg`` fallback is exercised for real; on 6.9+ the same assertions hold with the
+pidfd path. The strict 6.9+ checks are ``tests/test_pidfd_group_live.py``.
+"""
+
+from __future__ import annotations
+
+import os
+import signal
+import sys
+from collections.abc import Iterator
+
+import pytest
+
+from jobsctl.proc_host import default_host
+from jobsctl.proc_identity import Identity
+from jobsctl.proc_signal import Result, signal_group
+from tests.pidfd_group_helpers import Group, group_fixture_body, kernel_at_least
+
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux pidfds and /proc")
+
+
+@pytest.fixture
+def group() -> Iterator[Group]:
+    yield from group_fixture_body()
+
+
+def test_a_real_group_is_signaled_through_the_pidfd_or_the_killpg_fallback(group: Group) -> None:
+    out = signal_group(default_host(), group.leader, signal.SIGKILL, use_pidfd=True)
+    assert out.sent
+    assert out.method == ("pidfd-group" if kernel_at_least(6, 9) else "killpg")
+    assert group.wait_gone(group.member)
+    group.leader_proc.wait(timeout=30)
+
+
+def test_a_real_group_with_a_reused_leader_identity_is_not_signaled(group: Group) -> None:
+    wrong = Identity(group.leader.boot_id, group.leader.pid, group.leader.start + 1)
+    out = signal_group(default_host(), wrong, signal.SIGKILL, use_pidfd=True)
+    assert out.result is Result.NOT_ALIVE
+    assert group.alive(group.leader) and group.alive(group.member)
+
+
+def test_a_real_group_is_not_signaled_without_use_pidfd_on_the_old_path_either(
+    group: Group,
+) -> None:
+    wrong = Identity(group.leader.boot_id, group.leader.pid, group.leader.start + 1)
+    assert signal_group(default_host(), wrong, signal.SIGKILL).result is Result.NOT_ALIVE
+    assert group.alive(group.member)
+
+
+def test_a_reaped_leader_with_a_live_member_gets_nothing_on_a_real_kernel(group: Group) -> None:
+    """pidfd_open of a reaped leader whose member keeps the group id reserved is EINVAL (not
+    ESRCH) on a real kernel: it reads as NOT_ALIVE, and killpg is never tried."""
+    os.kill(group.leader.pid, signal.SIGKILL)
+    group.leader_proc.wait(timeout=30)
+    out = signal_group(default_host(), group.leader, signal.SIGKILL, use_pidfd=True)
+    assert out.result is Result.NOT_ALIVE
+    assert group.alive(group.member)

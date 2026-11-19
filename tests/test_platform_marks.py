@@ -34,6 +34,10 @@ HELPER = "linux-helper"  # real Linux facility, imported only by files that are 
 # file -> (class, why). Add a file here, with its mark, when the scan below finds it.
 CLASSIFIED: dict[str, tuple[str, str]] = {
     "hook_real.py": (HELPER, "real pidfd and LinuxHost; imported only by the marked hook tests"),
+    "pidfd_group_helpers.py": (
+        HELPER,
+        "real process group and kernel-version probe; imported only by the two pidfd group files",
+    ),
     "proc_fakes.py": (FAKED, "fake host; no real read"),
     "proc_real.py": (FAKED, "helper child sets its name with prctl; used by marked tests only"),
     "runner_helpers.py": (FAKED, "fake shim lists /proc/self/fd only where /proc exists"),
@@ -48,9 +52,14 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     "test_hook_interrupt.py": (MARKED, "Linux-only until the live macOS run; module skipif"),
     "test_hook_run.py": (MARKED, "Linux-only until the live macOS run (waitid emulation)"),
     "test_kill.py": (FAKED, "pidfd_ok=False on a fake host"),
-    "test_kill_guard.py": (FAKED, "a raw syscall number on a pipe; no real pidfd"),
+    "test_kill_guard.py": (
+        FAKED,
+        "a pipe as a fake pidfd; two tests use a real pidfd, skipped without pidfd support",
+    ),
     "test_leftovers.py": (MARKED, "real subreaper and os.waitid"),
     "test_macos_live.py": (LIVE, "macOS only, live"),
+    "test_pidfd_group_live.py": (LIVE, "Linux 6.9+ only, opt-in live (make live-pidfd)"),
+    "test_pidfd_group_processes.py": (MARKED, "real process group; module skipif off Linux"),
     "test_proc_identity.py": (FAKED, "parses /proc text from a fake root"),
     "test_proc_real.py": (MARKED, "module skip: Linux /proc and pidfd"),
     "test_proc_signal.py": (FAKED, "fake host pidfd answers"),

@@ -71,7 +71,11 @@ def _pidfd_path(
     except ProcessLookupError:
         return SignalOutcome(Result.NOT_ALIVE, method, "gone")
     except OSError as exc:
-        if exc.errno == errno.ESRCH:
+        if exc.errno in (errno.ESRCH, errno.EINVAL):
+            # ESRCH: no such process. EINVAL: the PID is no process any more but still names a
+            # live group (a reaped leader whose members keep the id reserved), or is not a thread
+            # group leader. The recorded identity is a leader, so either way it is gone: nothing
+            # is signaled and the killpg fallback is never tried.
             return SignalOutcome(Result.NOT_ALIVE, method, "gone")
         if exc.errno in _FALLBACK_ERRNOS:
             return None
@@ -81,7 +85,9 @@ def _pidfd_path(
         if not res.alive:
             return _refuse(res, method=method)
         if flags and (res.info is None or res.info.pgid != ident.pid):
-            # the leader left its group: the flag would hit its current group, not the job's
+            # Conservative guard: the kernel's target selection for the flag (the group id equal
+            # to the pidfd's PID, or the process's current group) is unverified (pending live
+            # check), so the flag is only sent while the leader still is its own group's leader.
             return None
         held = host.pidfd_pid(fd)
         if held is not None and held != ident.pid:
@@ -145,9 +151,11 @@ def signal_group(
     group id, even after the leader left the group. If the leader still is its own group's
     leader, ``use_pidfd`` selects ``PIDFD_SIGNAL_PROCESS_GROUP`` (Linux 6.9+, for a leader that
     is not the caller's child); older kernels (``EINVAL``) fall back to ``killpg`` with a
-    re-check. If it left the group the flag is never used (it targets the leader's current
-    group): ``killpg(leader PID)`` follows an identity re-check, and ``ESRCH`` (no such group)
-    reads as ``NOT_ALIVE``.
+    re-check. If the leader is not its own group's leader the flag is not used (conservative
+    guard: which group the kernel then targets is unverified): ``killpg(leader PID)`` follows an
+    identity re-check, and ``ESRCH`` (no such group) reads as ``NOT_ALIVE``. A ``pidfd_open``
+    that fails with ``EINVAL`` (a reaped leader whose group still has members) or ``ESRCH`` reads
+    as ``NOT_ALIVE`` and is never followed by ``killpg``.
     """
     validate_pid(leader.pid)
     validate_signal(sig)

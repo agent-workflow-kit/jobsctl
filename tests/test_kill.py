@@ -9,6 +9,7 @@ once it is gone, never to a process outside the job's group, and the job is fina
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import json
 import os
 import signal
@@ -18,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from jobsctl import gateway_proc
 from jobsctl.config import Config
 from jobsctl.kill import Killer
 from jobsctl.leases import expiry
@@ -57,6 +59,12 @@ class Host(FakeHost):
         super().killpg(pgid, sig)
         self.reactions.get(("killpg", pgid, sig), lambda: None)()
 
+    def pidfd_send_signal(self, fd: int, sig: int, flags: int = 0) -> None:
+        pid = self._fds[fd]
+        super().pidfd_send_signal(fd, sig, flags)
+        kind = "pidfd-group" if flags else "pidfd"
+        self.reactions.get((kind, pid, sig), lambda: None)()
+
 
 @dataclass
 class Rig:
@@ -95,6 +103,25 @@ class Rig:
 
 @pytest.fixture
 def rig() -> Iterator[Rig]:
+    yield from _rig(pidfd_ok=False)
+
+
+@pytest.fixture
+def pidfd_rig() -> Iterator[Rig]:
+    """A host with pidfds whose kernel has PIDFD_SIGNAL_PROCESS_GROUP (faked: 6.9+)."""
+    yield from _rig(pidfd_ok=True)
+
+
+@pytest.fixture
+def old_kernel_rig() -> Iterator[Rig]:
+    """A host with pidfds whose kernel lacks the flag (EINVAL), like Linux before 6.9."""
+    yield from _rig(
+        pidfd_ok=True,
+        pidfd_send_error={gateway_proc.PIDFD_SIGNAL_PROCESS_GROUP: OSError(errno.EINVAL, "x")},
+    )
+
+
+def _rig(**host_kw: Any) -> Iterator[Rig]:
     host = Host(
         procs={
             ME: proc(ME),
@@ -102,7 +129,7 @@ def rig() -> Iterator[Rig]:
             MEMBER: proc(MEMBER, pgid=LEADER),
             STRANGER: proc(STRANGER, pgid=STRANGER),
         },
-        pidfd_ok=False,
+        **host_kw,
     )
     with Store.open(mode=OpenMode.CLI) as store:
         seed_claimed(store, ["sleep", "600"], overrides={"kill_grace": 10})
@@ -314,6 +341,103 @@ def test_no_signal_is_sent_once_the_leader_is_gone_and_members_become_leftovers(
     assert attempt(rig.store)["leftovers"] == 1
     warn = log_records("leftovers")
     assert warn and warn[0]["level"] == "warn"
+
+
+# -- PIDFD_SIGNAL_PROCESS_GROUP (#35): the kernel is faked; the real one needs Linux 6.9+ -------
+
+FLAG = gateway_proc.PIDFD_SIGNAL_PROCESS_GROUP
+
+
+def zombify(rig: Rig, pid: int) -> Callable[[], None]:
+    def go() -> None:
+        rig.host.procs[pid] = proc(pid, start=START, zombie=True)
+
+    return go
+
+
+def test_a_live_leader_gets_its_group_signals_through_the_pidfd_flag(pidfd_rig: Rig) -> None:
+    pidfd_rig.host.reactions[("pidfd-group", LEADER, signal.SIGKILL)] = pidfd_rig.die(
+        LEADER, MEMBER
+    )
+    assert pidfd_rig.killer().run() == 0
+    assert pidfd_rig.signals() == [
+        ("pidfd_send_signal", LEADER, signal.SIGTERM, 0),
+        ("pidfd_send_signal", LEADER, signal.SIGTERM, FLAG),
+        ("pidfd_send_signal", LEADER, signal.SIGKILL, FLAG),
+    ]
+    assert not any(c[0] in ("kill", "killpg") for c in pidfd_rig.signals())
+    assert attempt(pidfd_rig.store)["leftovers"] == 0
+    assert ended(pidfd_rig)[:2] == ("canceled", "forced")
+
+
+def test_an_exited_leader_ends_the_signals_at_once_and_members_are_leftovers(
+    pidfd_rig: Rig,
+) -> None:
+    """No stepping through an exited leader (as before #35): no extra idle, members counted."""
+    pidfd_rig.host.reactions[("pidfd", LEADER, signal.SIGTERM)] = zombify(pidfd_rig, LEADER)
+    assert pidfd_rig.killer().run() == 0
+    assert pidfd_rig.signals() == [("pidfd_send_signal", LEADER, signal.SIGTERM, 0)]
+    assert pidfd_rig.now < 10  # returned without idling one kill_grace
+    assert pidfd_rig.host.procs[MEMBER].pgid == LEADER  # never signaled
+    assert attempt(pidfd_rig.store)["leftovers"] == 1
+    assert ended(pidfd_rig)[:2] == ("canceled", "forced")
+
+
+def test_a_reaped_leader_with_a_live_member_is_not_alive_and_gets_nothing(
+    pidfd_rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """pidfd_open of a reaped leader whose group still has a member is EINVAL on a real kernel:
+    that reads as gone (no signal, no killpg, no error), not as an error."""
+    pidfd_rig.host.reactions[("pidfd", LEADER, signal.SIGTERM)] = pidfd_rig.die(LEADER)
+    assert pidfd_rig.killer().run() == 0
+    assert pidfd_rig.signals() == [("pidfd_send_signal", LEADER, signal.SIGTERM, 0)]
+    assert ("pidfd_open", LEADER) in pidfd_rig.host.calls
+    assert "error" not in capsys.readouterr().err
+    assert pidfd_rig.host.procs[MEMBER].pgid == LEADER
+    assert attempt(pidfd_rig.store)["leftovers"] == 1
+
+
+def test_a_reused_leader_pid_gets_no_group_signal_through_the_pidfd(pidfd_rig: Rig) -> None:
+    def reuse() -> None:
+        pidfd_rig.host.procs[LEADER] = proc(LEADER, start=START + 9, pgid=LEADER)
+
+    pidfd_rig.host.reactions[("pidfd", LEADER, signal.SIGTERM)] = reuse
+    assert pidfd_rig.killer().run() == 0
+    assert pidfd_rig.signals() == [("pidfd_send_signal", LEADER, signal.SIGTERM, 0)]
+
+
+def test_a_leader_that_left_its_group_is_not_signaled_through_the_flag(pidfd_rig: Rig) -> None:
+    pidfd_rig.host.procs[LEADER] = proc(LEADER, start=START, pgid=STRANGER)
+    set_running(pidfd_rig.store, pgid=LEADER)
+    pidfd_rig.host.reactions[("killpg", LEADER, signal.SIGKILL)] = pidfd_rig.die(LEADER)
+    pidfd_rig.killer().run()
+    sent = pidfd_rig.signals()
+    assert ("killpg", LEADER, signal.SIGKILL) in sent  # addressed by PID, after the re-check
+    assert not any(c[0] == "pidfd_send_signal" and c[3] == FLAG for c in sent)  # no flag send
+
+
+def test_an_old_kernel_ends_the_signals_once_the_leader_exited(old_kernel_rig: Rig) -> None:
+    old_kernel_rig.host.reactions[("pidfd", LEADER, signal.SIGTERM)] = zombify(
+        old_kernel_rig, LEADER
+    )
+    assert old_kernel_rig.killer().run() == 0
+    sent = old_kernel_rig.signals()
+    assert sent == [("pidfd_send_signal", LEADER, signal.SIGTERM, 0)]
+    assert attempt(old_kernel_rig.store)["leftovers"] == 1
+    assert ended(old_kernel_rig)[:2] == ("canceled", "forced")
+
+
+def test_an_old_kernel_runs_the_whole_sequence_through_killpg(old_kernel_rig: Rig) -> None:
+    old_kernel_rig.host.reactions[("killpg", LEADER, signal.SIGKILL)] = old_kernel_rig.die(
+        LEADER, MEMBER
+    )
+    assert old_kernel_rig.killer().run() == 0
+    assert [(c[0], c[2]) for c in old_kernel_rig.signals() if c[0] != "pidfd_send_signal"] == [
+        ("killpg", signal.SIGTERM),
+        ("killpg", signal.SIGKILL),
+    ]
+    assert old_kernel_rig.now >= 20
+    assert attempt(old_kernel_rig.store)["leftovers"] == 0
 
 
 def test_a_pid_reused_after_the_first_signal_receives_nothing_more(rig: Rig) -> None:

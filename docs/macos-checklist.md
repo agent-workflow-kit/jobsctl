@@ -317,3 +317,36 @@ Mac: <model/arch>   macOS: <version>   Python: <x.y.z>   SQLite: <x.y.z>   Volum
 
 Surprises / decisions needed:
 ```
+
+## Linux 6.9+ real-kernel check (pending)
+
+Owner: the maintainer, on a Linux 6.9 or later host (not this one: it runs 5.15, where the flag is refused
+with `EINVAL` and only the `killpg` fallback runs). Issue #35 (`PIDFD_SIGNAL_PROCESS_GROUP`) is not accepted
+until this was run.
+
+```bash
+make live-pidfd
+# or
+JOBSCTL_LIVE_PIDFD=1 uv run pytest -m live tests/test_pidfd_group_live.py -v -rA
+```
+
+It starts its own process groups only and signals them by recorded identity (`tests/kill_guard.py` guards
+every signal). It skips with a reason on an older kernel. It must show four passes and no skip:
+
+| Check | Test |
+|---|---|
+| The flag reaches the leader and every member | `test_the_flag_reaches_every_member_and_the_leader` |
+| Observation: the flag reaches the members of a leader that exited but is not reaped (`_kill` does not rely on it: it stops once the leader is gone) | `test_the_flag_reaches_members_of_a_leader_that_exited_but_is_not_reaped` |
+| `pidfd_open` of a reaped leader whose member keeps the group id reserved refuses (`NOT_ALIVE`, nothing signaled) | `test_pidfd_open_of_a_reaped_leader_with_a_live_member_refuses` |
+| A wrong identity sends nothing | `test_the_flag_is_never_sent_for_a_wrong_identity` |
+
+A failure of the second one is a kernel observation, not a defect: record it on #35.
+
+Manual observations to confirm on the 6.9+ host (no automated test; the code does not depend on them, the
+`pgid == pid` check is a conservative guard):
+
+- Which group the flag targets: the group id equal to the pidfd's PID, or the process's current process
+  group. Try a leader that moved to another group (`setpgid`) and see which group receives the signal.
+- What the flag does for a pidfd of a reaped leader whose group still has live members (jobsctl refuses first,
+  because `pidfd_open` of such a PID fails with `EINVAL` and the pidfd's fdinfo `Pid` would be -1).
+- What the flag does for an exited, unreaped (zombie) leader whose group still has members.

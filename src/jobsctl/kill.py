@@ -20,7 +20,10 @@ A forced end is never retried automatically (`auto_retry.plan_requeue` applies t
 only), so there is no `lost` outcome here. A `_kill` that is killed, or gives up, finalizes
 nothing: a repeated `cancel --force` or reconcile (`force_resumed`) starts another one.
 
-Group signals use `killpg` after the identity re-check; the 6.9+ pidfd path is TODO(#35).
+Group signals go through the live leader's pidfd with ``PIDFD_SIGNAL_PROCESS_GROUP`` (Linux 6.9+,
+`proc_signal.signal_group`), which closes the PID-reuse window between the identity check and the
+signal; on an older kernel they use `killpg` after the identity re-check. Nothing more is signaled
+once the leader is gone (docs/interface.md, Shim loss).
 """
 
 from __future__ import annotations
@@ -326,6 +329,7 @@ class Killer:
             now=self._mono,
             diag=self._diag,
             allow_zombie=False,
+            pidfd_group=True,
         )
         failures = 0
         last_check = self._mono()
@@ -351,7 +355,6 @@ class Killer:
                 # reserved, so a group signal could reach a stranger. Unlike the shim's
                 # step-2-at-once rule, the sequence ends here: members that remain are counted
                 # as leftovers, not signaled.
-                # TODO(#35): signal them via PIDFD_SIGNAL_PROCESS_GROUP (Linux 6.9+).
                 if started:
                     return
             try:

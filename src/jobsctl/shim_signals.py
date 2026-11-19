@@ -55,6 +55,7 @@ class SignalSequence:
         now: Callable[[], float],
         diag: Callable[[str], None],
         allow_zombie: bool = True,
+        pidfd_group: bool = False,
     ) -> None:
         self._host = host
         self._leader = leader
@@ -67,6 +68,10 @@ class SignalSequence:
         # the group id. A leader the caller does not hold (`_kill`) counts as gone once it is a
         # zombie, and then nothing is signaled.
         self._allow_zombie = allow_zombie
+        # ``pidfd_group`` (only `_kill`, #35): group signals try ``PIDFD_SIGNAL_PROCESS_GROUP``
+        # (Linux 6.9+) and fall back to the same re-checked ``killpg``. The shim keeps plain
+        # ``killpg`` (its leader is its own unreaped child).
+        self._pidfd_group = pidfd_group
         self.phase = Phase.IDLE
         self.cause: str | None = None
         self.sent: list[str] = []  # for logs and tests: "term:pid", "term:group", "kill:group", ...
@@ -112,7 +117,13 @@ class SignalSequence:
         self._note(what, out, repeat=repeat)
 
     def _signal_group(self, sig: int, what: str, *, repeat: bool = False) -> None:
-        out = signal_group(self._host, self._leader, sig, allow_zombie=self._allow_zombie)
+        out = signal_group(
+            self._host,
+            self._leader,
+            sig,
+            allow_zombie=self._allow_zombie,
+            use_pidfd=self._pidfd_group,
+        )
         if self._fallback_ok(out):
             self._diag(f"{what}: identity not confirmed ({out.detail}); the group id is reserved")
             try:

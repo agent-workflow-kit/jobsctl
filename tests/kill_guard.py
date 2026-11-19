@@ -118,6 +118,12 @@ def guarded_raw(real: Callable[..., int]) -> Callable[..., int]:
         if number == gateway_proc.SYS_PIDFD_SEND_SIGNAL and len(args) >= 2 and args[1] != 0:
             send = guarded_pidfd_send(lambda *a, **k: None)
             send(args[0], args[1])
+            if len(args) >= 4 and args[3] & gateway_proc.PIDFD_SIGNAL_PROCESS_GROUP:
+                # the flag signals the whole group of the process behind the pidfd
+                target = _fd_target(args[0])
+                info = None if target is None or target <= 0 else _host().process_info(target)
+                if info is None or info.pgid <= 1 or info.pgid == os.getpgrp():
+                    _refuse("pidfd_send_signal(group)", -2 if info is None else info.pgid, args[1])
         return real(number, *args)
 
     return raw
