@@ -9,15 +9,21 @@ from __future__ import annotations
 
 import signal
 import sys
+from collections.abc import Iterator
 
 import pytest
 
 from jobsctl.proc_host import default_host
 from jobsctl.proc_identity import Identity
 from jobsctl.proc_signal import Result, signal_group
-from tests.pidfd_group_helpers import Group, group, kernel_at_least  # noqa: F401
+from tests.pidfd_group_helpers import Group, group_fixture_body, kernel_at_least
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux pidfds and /proc")
+
+
+@pytest.fixture
+def group() -> Iterator[Group]:
+    yield from group_fixture_body()
 
 
 def test_a_real_group_is_signaled_through_the_pidfd_or_the_killpg_fallback(group: Group) -> None:

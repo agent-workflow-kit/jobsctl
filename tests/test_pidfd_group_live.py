@@ -22,13 +22,14 @@ from __future__ import annotations
 import errno
 import os
 import signal
+from collections.abc import Iterator
 
 import pytest
 
 from jobsctl import gateway_proc
 from jobsctl.proc_host import default_host
 from jobsctl.proc_signal import Result, signal_group
-from tests.pidfd_group_helpers import Group, group, kernel_at_least  # noqa: F401
+from tests.pidfd_group_helpers import Group, group_fixture_body, kernel_at_least
 
 OPTED_IN = os.environ.get("JOBSCTL_LIVE_PIDFD") == "1"
 FLAG = gateway_proc.PIDFD_SIGNAL_PROCESS_GROUP
@@ -42,8 +43,13 @@ pytestmark = [
 ]
 
 
+@pytest.fixture
+def group() -> Iterator[Group]:
+    yield from group_fixture_body()
+
+
 @pytest.fixture(autouse=True)
-def flag_supported(group: Group) -> None:  # noqa: F811
+def flag_supported(group: Group) -> None:
     """Skip unless the running kernel accepts the flag (a harmless signal-0 probe)."""
     if not gateway_proc.pidfd_supported():
         pytest.skip("no pidfd support here")

@@ -52,7 +52,10 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     "test_hook_interrupt.py": (MARKED, "Linux-only until the live macOS run; module skipif"),
     "test_hook_run.py": (MARKED, "Linux-only until the live macOS run (waitid emulation)"),
     "test_kill.py": (FAKED, "pidfd_ok=False on a fake host"),
-    "test_kill_guard.py": (FAKED, "a pipe as a fake pidfd; two tests use a real pidfd, skipped without pidfd support"),
+    "test_kill_guard.py": (
+        FAKED,
+        "a pipe as a fake pidfd; two tests use a real pidfd, skipped without pidfd support",
+    ),
     "test_leftovers.py": (MARKED, "real subreaper and os.waitid"),
     "test_macos_live.py": (LIVE, "macOS only, live"),
     "test_pidfd_group_live.py": (LIVE, "Linux 6.9+ only, opt-in live (make live-pidfd)"),

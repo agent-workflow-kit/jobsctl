@@ -16,8 +16,6 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-import pytest
-
 from jobsctl.proc_host import default_host
 from jobsctl.proc_identity import Identity, Liveness, check_identity, identify
 from tests.kill_guard import allow
@@ -106,8 +104,9 @@ def start_group() -> Group:
     return Group(proc, leader, identify(host, member_pid))
 
 
-@pytest.fixture
-def group() -> Iterator[Group]:
+def group_fixture_body() -> Iterator[Group]:
+    """The body of the ``group`` fixture of the test files (a plain function: ruff and the
+    fixture's name would otherwise clash on import)."""
     g = start_group()
     try:
         yield g

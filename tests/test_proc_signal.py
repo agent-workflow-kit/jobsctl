@@ -309,7 +309,7 @@ def test_ctypes_fallback_refused_off_allow_list(monkeypatch: pytest.MonkeyPatch)
     assert gateway_proc.pidfd_supported() is False
 
 
-# --- PIDFD_SIGNAL_PROCESS_GROUP (#35): faked kernel; the real 6.9+ path is tests/test_pidfd_group_live.py
+# --- PIDFD_SIGNAL_PROCESS_GROUP (#35): a faked kernel; the real one: tests/test_pidfd_group_live.py
 
 
 def test_group_flag_value_is_the_kernel_uapi_value():
@@ -322,7 +322,9 @@ def test_group_pidfd_path_checks_identity_after_open_and_before_send():
     out = signal_group(host, IDENT, signal.SIGTERM, use_pidfd=True)
     order = names(host)
     assert out.method == "pidfd-group"
-    assert order.index("pidfd_open") < order.index("process_info") < order.index("pidfd_send_signal")
+    assert (
+        order.index("pidfd_open") < order.index("process_info") < order.index("pidfd_send_signal")
+    )
     assert order[-1] == "close"
 
 
