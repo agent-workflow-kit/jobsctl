@@ -24,13 +24,13 @@ from jobsctl.env_canonical import build_canonical_env
 from jobsctl.env_file import load_env_file
 from jobsctl.env_mask import MaskingSet, check_label_secrets, masking_values
 from jobsctl.errors import JobsctlError, usage_error
+from jobsctl.job_lookup import find_job
 from jobsctl.job_view import job_labels, job_object
 from jobsctl.log_writer import RecordWriter
 from jobsctl.store_db import OpenMode, Store, Tx
 from jobsctl.store_dir import resolve_state_dir
 from jobsctl.timestamps import format_timestamp
 from jobsctl.validate import MAX_LABELS
-from jobsctl.view_lookup import job_by_id
 
 Pair = tuple[str, str]
 
@@ -46,7 +46,7 @@ class Outcome:
 def _decide(tx: Tx, ctx: Context, *, write: bool) -> Outcome:
     adding = ctx.command == "label add"
     wanted = set(ctx.args.labels)
-    row = job_by_id(tx, ctx.args.id)
+    row = find_job(tx, ctx.args.id)
     have = {tuple(label.split("=", 1)) for label in job_labels(tx, row["id"])}
     delta = wanted - have if adding else wanted & have
     after = have | delta if adding else have - delta
