@@ -254,6 +254,7 @@ def test_loop_reaps_its_own_shim_children_each_iteration(
     cfg = config_file(tmp_path, run_interval="1s", auto_run=False)
     job = add_job(capsys, config=cfg)
     sleeps: list[float] = []
+    timeouts: list[str] = []
     reaped: list[int] = []
     runners: list[Runner] = []
     real_reap = Runner.reap
@@ -271,7 +272,12 @@ def test_loop_reaps_its_own_shim_children_each_iteration(
             # handles, bounded so a shim that never ends fails the test instead of hanging it.
             deadline = time.monotonic() + 60
             while any(c.popen.poll() is None for c in runners[0].children):
-                assert time.monotonic() < deadline, "the shim did not exit within 60 s"
+                if time.monotonic() >= deadline:
+                    # not an assert: the CLI turns an exception raised here into an
+                    # internal-error result and hides its message; end the loop instead
+                    timeouts.append("the shim did not exit within 60 s")
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    return
                 time.sleep(0.05)
         if len(sleeps) == 7:
             os.kill(os.getpid(), signal.SIGTERM)
@@ -279,6 +285,8 @@ def test_loop_reaps_its_own_shim_children_each_iteration(
     monkeypatch.setattr(gateway, "sleep", sleep)
     monkeypatch.setattr(Runner, "reap", counting_reap)
     res = run_cli(capsys, "--config", cfg, "--json", "run", "--loop")
+    assert timeouts == []
+    assert res.code == 0, res.err
     docs = lines(res.out)
     assert docs[0]["started"] == [job]
     assert [f for d in docs[1:] for f in d["reconciled"]] == []

@@ -236,23 +236,35 @@ def test_secrets_that_prefix_each_other_deeply() -> None:
     assert result.mask("a" * 900 + "bcccccccc") == "a" * 101 + "***"
 
 
-def cpu_seconds(work: Callable[[], object], repeats: int = 3) -> float:
-    """The least process CPU time of `repeats` runs of `work`: unlike wall-clock time it does not
-    grow with how busy the host is, and the minimum drops one-off stalls."""
-    best = float("inf")
-    for _ in range(repeats):
-        start = time.process_time()
-        work()
-        best = min(best, time.process_time() - start)
-    return best
+def cpu_seconds_pair(
+    small: Callable[[], object], large: Callable[[], object], rounds: int = 5
+) -> tuple[float, float]:
+    """The least process CPU time of `rounds` runs each of `small` and `large`, run interleaved
+    (small, large, small, large, ...) so both sample the same phases of the host's speed: CPU time
+    does not grow with how busy the host is, but the speed of a loaded or throttled core varies in
+    phases, and measuring one case fully before the other would put them in different phases. The
+    minimum drops one-off stalls."""
+    best_small = best_large = float("inf")
+    for _ in range(rounds):
+        for work, is_small in ((small, True), (large, False)):
+            start = time.process_time()
+            work()
+            took = time.process_time() - start
+            if is_small:
+                best_small = min(best_small, took)
+            else:
+                best_large = min(best_large, took)
+    return best_small, best_large
 
 
-# Each case grows its input by GROWTH. Linear work grows by about GROWTH, quadratic work by about
-# GROWTH**2; the bound sits between them. The floor keeps a fast small run from making the bound
-# tighter than timer noise.
-GROWTH = 4
-MAX_RATIO = 7
-NOISE_FLOOR = 0.02
+# Each case grows its input by GROWTH. Linear work grows by about GROWTH (8x), quadratic work by
+# about GROWTH**2 (64x); the bound sits between them with a wide margin each way (a linear case
+# measured up to about 9x under heavy load, a quadratic one never under 40x). The floor only keeps
+# a tiny small run from making the bound tighter than timer noise: every case's small run is
+# several times above it.
+GROWTH = 8
+MAX_RATIO = 24
+NOISE_FLOOR = 0.005
 
 
 def assert_scales_linearly(small: float, large: float) -> None:
@@ -265,16 +277,26 @@ def test_masking_scales_linearly_with_the_number_of_secrets() -> None:
     alphabet = string.ascii_letters + string.digits
     text = "".join(rng.choices(alphabet, k=64 * 1024))
 
-    def run(count: int) -> float:
+    def run(count: int) -> Callable[[], None]:
         secrets = {f"S{i}": "".join(rng.choices(alphabet, k=9)) for i in range(count)}
 
         def work() -> None:
             result = mset(cfg(), {}, NOFILE, secrets)
             assert result.mask(text + " " + secrets["S7"]).endswith(" ***")
 
-        return cpu_seconds(work, repeats=2)
+        return work
 
-    assert_scales_linearly(run(2_500), run(2_500 * GROWTH))
+    assert_scales_linearly(*cpu_seconds_pair(run(1_500), run(1_500 * GROWTH)))
+
+
+def test_fifty_thousand_secrets_still_mask_correctly() -> None:
+    # one untimed check at a size that took more than 100 s before the trie matcher
+    rng = random.Random(7)
+    alphabet = string.ascii_letters + string.digits
+    secrets = {f"S{i}": "".join(rng.choices(alphabet, k=9)) for i in range(50_000)}
+    text = "".join(rng.choices(alphabet, k=256 * 1024))
+    result = mset(cfg(), {}, NOFILE, secrets)
+    assert result.mask(text + " " + secrets["S7"]).endswith(" ***")
 
 
 def test_masking_scales_linearly_with_the_text_length() -> None:
@@ -284,21 +306,32 @@ def test_masking_scales_linearly_with_the_text_length() -> None:
         cfg(), {}, NOFILE, {f"S{i}": "".join(rng.choices(alphabet, k=9)) for i in range(5_000)}
     )
 
-    def run(length: int) -> float:
+    def run(length: int) -> Callable[[], None]:
         text = "".join(rng.choices(alphabet, k=length))
-        return cpu_seconds(lambda: result.mask(text))
 
-    assert_scales_linearly(run(64 * 1024), run(64 * 1024 * GROWTH))
+        def work() -> None:
+            assert result.mask(text) == text  # no secret is in the random text
+
+        return work
+
+    assert_scales_linearly(*cpu_seconds_pair(run(128 * 1024), run(128 * 1024 * GROWTH)))
 
 
 def test_a_long_near_miss_text_scales_linearly() -> None:
+    # The small run (12 M characters, about 20 ms) is well above the noise floor, so the ratio
+    # decides. A per-position constant-factor rescan stays linear and is not what this case
+    # catches (a ratio cannot); a rescan that grows with the text is.
     result = mset(cfg(), {}, NOFILE, {"A": "a" * 8 + "b"})
 
-    def run(length: int) -> float:
+    def run(length: int) -> Callable[[], None]:
         text = "a" * length
-        return cpu_seconds(lambda: result.mask(text) == text)
 
-    assert_scales_linearly(run(2_000_000), run(2_000_000 * GROWTH))
+        def work() -> None:
+            assert result.mask(text) == text
+
+        return work
+
+    assert_scales_linearly(*cpu_seconds_pair(run(12_000_000), run(12_000_000 * GROWTH)))
 
 
 def test_near_miss_prefixes_scale_linearly() -> None:
@@ -306,11 +339,15 @@ def test_near_miss_prefixes_scale_linearly() -> None:
     secrets = {f"S{k}": "a" * k + "b" for k in range(8, 199)}
     result = mset(cfg(), {}, NOFILE, secrets)
 
-    def run(length: int) -> float:
+    def run(length: int) -> Callable[[], None]:
         text = "a" * length
-        return cpu_seconds(lambda: result.mask(text) == text, repeats=2)
 
-    assert_scales_linearly(run(5_000), run(5_000 * GROWTH))
+        def work() -> None:
+            assert result.mask(text) == text
+
+        return work
+
+    assert_scales_linearly(*cpu_seconds_pair(run(3_000), run(3_000 * GROWTH)))
 
 
 def test_random_embeddings_always_masked() -> None:

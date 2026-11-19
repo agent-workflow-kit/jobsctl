@@ -184,7 +184,9 @@ def test_hook_selectors_decide_whether_an_event_is_written(
 def test_async_hooks_mark_the_event_async(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    cfg = config_file(tmp_path, hooks={"post-held": [{"cmd": "true", "async": True}]})
+    cfg = config_file(
+        tmp_path, auto_run=False, hooks={"post-held": [{"cmd": "true", "async": True}]}
+    )
     job_id = add_job(capsys, config=cfg)
     run_cli(capsys, "--config", cfg, "--json", "hold", job_id)
     assert outbox()[0]["async"] == 1
@@ -195,6 +197,7 @@ def test_a_mixed_sync_and_async_list_writes_one_event_per_kind(
 ) -> None:
     cfg = config_file(
         tmp_path,
+        auto_run=False,
         hooks={
             "post-held": [
                 {"name": "a", "cmd": "true", "async": True},

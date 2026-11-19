@@ -260,7 +260,11 @@ def test_entries_are_selected_at_delivery_with_the_redelivering_config(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     out = tmp_path / "out"
-    cfg = config_file(tmp_path, hooks={"post-held": [{"name": "w", "cmd": "true", "async": True}]})
+    cfg = config_file(
+        tmp_path,
+        auto_run=False,  # no detached delivery may race the pending-count assert below
+        hooks={"post-held": [{"name": "w", "cmd": "true", "async": True}]},
+    )
     job_id = add_job(capsys, config=cfg)
     assert hold(capsys, cfg, job_id).code == 0
     assert outbox()[0]["async"] == 1
