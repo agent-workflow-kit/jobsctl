@@ -15,9 +15,6 @@ signaled only while the leader's recorded identity holds. Nothing here reaps the
 signal is sent once the shim reaped it (the shim does that after the sequence is done). A process
 that left the group is never signaled, except the leader itself in step 3.
 
-Group signals go through the leader's pidfd with ``PIDFD_SIGNAL_PROCESS_GROUP`` where the kernel
-has it (Linux 6.9+) and through the same re-checked ``killpg`` elsewhere (``pidfd_group``; #35).
-
 ``UNKNOWN`` (identity unreadable) and ``ERROR`` (e.g. ``EMFILE`` from ``pidfd_open``) are not
 "gone": nothing was signaled. Because the leader is the shim's unreaped child, the same PID/group
 signal sent without the identity check is safe by construction, so the sequence falls back to it
@@ -71,16 +68,10 @@ class SignalSequence:
         # the group id. A leader the caller does not hold (`_kill`) counts as gone once it is a
         # zombie, and then nothing is signaled.
         self._allow_zombie = allow_zombie
-        # Group signals try ``PIDFD_SIGNAL_PROCESS_GROUP`` first (Linux 6.9+) and fall back to the
-        # same re-checked ``killpg`` on an older kernel. The pidfd path also reaches the group of
-        # a leader that exited but is not reaped yet, even when ``allow_zombie`` is False (the
-        # pidfd cannot be redirected); the fallback honors ``allow_zombie`` as before.
+        # ``pidfd_group`` (only `_kill`, #35): group signals try ``PIDFD_SIGNAL_PROCESS_GROUP``
+        # (Linux 6.9+) and fall back to the same re-checked ``killpg``. The shim keeps plain
+        # ``killpg`` (its leader is its own unreaped child).
         self._pidfd_group = pidfd_group
-        # True once the latest group signal found nothing to signal (leader gone or replaced).
-        self.group_unreachable = False
-        # How the latest group signal went out: True through the pidfd flag, False otherwise,
-        # None while no group signal was attempted.
-        self.group_via_pidfd: bool | None = None
         self.phase = Phase.IDLE
         self.cause: str | None = None
         self.sent: list[str] = []  # for logs and tests: "term:pid", "term:group", "kill:group", ...
@@ -130,18 +121,9 @@ class SignalSequence:
             self._host,
             self._leader,
             sig,
-            allow_zombie=True if self._pidfd_group else self._allow_zombie,
+            allow_zombie=self._allow_zombie,
             use_pidfd=self._pidfd_group,
-            fallback_allow_zombie=self._allow_zombie,
         )
-        if out.method == "pidfd-group" and out.result is Result.NOT_ALIVE and self._own_child():
-            # The leader is our own unreaped child, so it cannot be gone: the pidfd path could not
-            # reach the group (a kernel that does not deliver to a zombie leader's group). Its
-            # group id is reserved, so the plain group signal is safe.
-            self._diag(f"{what}: the pidfd group signal found nothing; using killpg")
-            out = signal_group(
-                self._host, self._leader, sig, allow_zombie=self._allow_zombie, use_pidfd=False
-            )
         if self._fallback_ok(out):
             self._diag(f"{what}: identity not confirmed ({out.detail}); the group id is reserved")
             try:
@@ -151,8 +133,6 @@ class SignalSequence:
                 out = SignalOutcome(Result.NOT_ALIVE, "killpg", "gone")
             except OSError as exc:
                 out = SignalOutcome(Result.ERROR, "killpg", exc.strerror or "")
-        self.group_unreachable = out.result is Result.NOT_ALIVE
-        self.group_via_pidfd = out.method == "pidfd-group" and out.result is Result.SENT
         self._note(what, out, repeat=repeat)
 
     def _group_empty(self) -> bool:

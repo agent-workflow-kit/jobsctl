@@ -379,24 +379,26 @@ def test_group_pidfd_einval_is_not_a_fallback_for_other_errors():
     assert not any(c[0] == "killpg" for c in host.calls)
 
 
-def test_group_zombie_leader_is_signaled_through_the_pidfd_when_the_caller_allows_it():
+def test_group_zombie_leader_is_not_signaled_through_the_pidfd_when_the_caller_refuses_it():
     host = FakeHost(procs={5: proc(5, start=9, zombie=True), 11: proc(11, pgid=5)})
-    out = signal_group(
-        host, IDENT, signal.SIGKILL, use_pidfd=True, allow_zombie=True, fallback_allow_zombie=False
-    )
-    assert out.sent and out.method == "pidfd-group"
-
-
-def test_group_zombie_leader_never_reaches_killpg_when_the_fallback_refuses_zombies():
-    flag = gateway_proc.PIDFD_SIGNAL_PROCESS_GROUP
-    host = FakeHost(
-        procs={5: proc(5, start=9, zombie=True)}, pidfd_send_error={flag: oserror(errno.EINVAL)}
-    )
-    out = signal_group(
-        host, IDENT, signal.SIGKILL, use_pidfd=True, allow_zombie=True, fallback_allow_zombie=False
-    )
+    out = signal_group(host, IDENT, signal.SIGKILL, use_pidfd=True, allow_zombie=False)
     assert out.result is Result.NOT_ALIVE and out.detail == "zombie"
-    assert not any(c[0] in ("kill", "killpg") for c in host.calls)
+    assert host.sent() == []
+
+
+def test_group_pidfd_open_einval_for_a_reaped_leader_with_a_live_member_is_not_alive():
+    """On a real kernel pidfd_open of a reaped leader whose group still has members is EINVAL."""
+    host = FakeHost(procs={11: proc(11, pgid=5)})
+    out = signal_group(host, IDENT, signal.SIGKILL, use_pidfd=True)
+    assert ("pidfd_open", 5) in host.calls
+    assert out.result is Result.NOT_ALIVE and out.method == "pidfd-group"
+    assert host.sent() == []  # no signal, and no killpg fallback
+
+
+def test_the_fake_gives_esrch_for_a_reaped_pid_without_members():
+    host = FakeHost(procs={})
+    out = signal_group(host, IDENT, signal.SIGKILL, use_pidfd=True)
+    assert out.result is Result.NOT_ALIVE and host.sent() == []
 
 
 def test_group_fallback_zombie_setting_defaults_to_allow_zombie():

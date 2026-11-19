@@ -20,10 +20,10 @@ A forced end is never retried automatically (`auto_retry.plan_requeue` applies t
 only), so there is no `lost` outcome here. A `_kill` that is killed, or gives up, finalizes
 nothing: a repeated `cancel --force` or reconcile (`force_resumed`) starts another one.
 
-Group signals go through the leader's pidfd with ``PIDFD_SIGNAL_PROCESS_GROUP`` (Linux 6.9+,
-`proc_signal.signal_group`), which also reaches the members of a leader that exited but is not
-reaped yet; on an older kernel they use `killpg` after the identity re-check, and nothing more is
-signaled once the leader is gone (docs/interface.md, Shim loss).
+Group signals go through the live leader's pidfd with ``PIDFD_SIGNAL_PROCESS_GROUP`` (Linux 6.9+,
+`proc_signal.signal_group`), which closes the PID-reuse window between the identity check and the
+signal; on an older kernel they use `killpg` after the identity re-check. Nothing more is signaled
+once the leader is gone (docs/interface.md, Shim loss).
 """
 
 from __future__ import annotations
@@ -350,16 +350,19 @@ class Killer:
                         raise GaveUp("the job leader's identity stayed unreadable")
                 else:
                     unknown_since = None
-            if self._leader_state(leader) is Liveness.DEAD and started and self._no_more(seq):
-                return
+            if self._leader_state(leader) is Liveness.DEAD:
+                # No signal is sent once the leader is gone: its PID (the group id) is no longer
+                # reserved, so a group signal could reach a stranger. Unlike the shim's
+                # step-2-at-once rule, the sequence ends here: members that remain are counted
+                # as leftovers, not signaled.
+                if started:
+                    return
             try:
                 if not started:
                     seq.start("forced")
                     started = True
                 seq.advance()
                 failures = 0
-                if self._leader_state(leader) is Liveness.DEAD and self._no_more(seq):
-                    return
             except Exception as exc:
                 failures += 1
                 if failures == 1:
@@ -369,19 +372,6 @@ class Killer:
             if seq.done:
                 return
             self._sleep(POLL_SECONDS)
-
-    @staticmethod
-    def _no_more(seq: SignalSequence) -> bool:
-        """Whether signaling ends now that the leader is gone.
-
-        Once the leader is gone its PID (the group id) is no longer reserved, so a ``killpg`` could
-        reach a stranger: members that remain are counted as leftovers, not signaled. Only a group
-        signal through the leader's pidfd (``PIDFD_SIGNAL_PROCESS_GROUP``, Linux 6.9+) is still
-        safe, while the pidfd refers to the verified leader (it exited but was not reaped yet): the
-        sequence keeps stepping through it for the remaining members, and ends at the first group
-        signal that finds nothing (the leader was reaped) or that did not go through the pidfd.
-        """
-        return seq.group_unreachable or seq.group_via_pidfd is False
 
     def _leader_state(self, leader: Identity) -> Liveness:
         return check_identity(self.host, leader).state

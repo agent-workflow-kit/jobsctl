@@ -12,9 +12,9 @@ wait is bounded. Teardown kills exactly the recorded PIDs, only while their iden
 It skips, with the reason, when the kernel is older than 6.9 or does not accept the flag
 (the probe sends signal 0 with the flag to a process this test started).
 
-What it pins down, which no fake can: that the flag reaches the members; that it still reaches
-them when the leader exited but is not reaped (the case ``_kill`` relies on); that it reports
-``ESRCH`` once the leader was reaped, so nothing is signaled by a stale pidfd.
+What it pins down, which no fake can: that the flag reaches the members; what the kernel does for
+the members of a leader that exited but is not reaped (an observation: ``_kill`` does not rely on
+it); that ``pidfd_open`` of a reaped leader with a live member refuses, so nothing is signaled.
 """
 
 from __future__ import annotations
@@ -80,25 +80,19 @@ def test_the_flag_reaches_members_of_a_leader_that_exited_but_is_not_reaped(grou
         signal.SIGKILL,
         use_pidfd=True,
         allow_zombie=True,
-        fallback_allow_zombie=False,
     )
     assert out.sent and out.method == "pidfd-group", out
     assert group.wait_gone(group.member)
 
 
-def test_a_reaped_leader_gets_nothing_and_the_member_is_left_alone(group: Group) -> None:
+def test_pidfd_open_of_a_reaped_leader_with_a_live_member_refuses(group: Group) -> None:
+    """The leader is reaped but its member keeps the group id reserved: pidfd_open refuses (EINVAL
+    on a real kernel) and that reads as NOT_ALIVE. Nothing is signaled, killpg is never tried."""
     os.kill(group.leader.pid, signal.SIGKILL)
-    group.leader_proc.wait(timeout=30)  # reaped: its PID is free
-    out = signal_group(
-        default_host(),
-        group.leader,
-        signal.SIGKILL,
-        use_pidfd=True,
-        allow_zombie=True,
-        fallback_allow_zombie=False,
-    )
+    group.leader_proc.wait(timeout=30)  # reaped; the member still holds the group id
+    out = signal_group(default_host(), group.leader, signal.SIGKILL, use_pidfd=True)
     assert out.result is Result.NOT_ALIVE
-    assert group.alive(group.member)  # the group was not signaled through a stale reference
+    assert group.alive(group.member)  # the group was not signaled
 
 
 def test_the_flag_is_never_sent_for_a_wrong_identity(group: Group) -> None:

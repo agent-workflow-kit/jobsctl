@@ -75,6 +75,10 @@ class FakeHost:
         if self.pidfd_open_error is not None:
             raise self.pidfd_open_error
         if pid not in self.procs:
+            # like the kernel: a reaped process gives ESRCH, but a PID that is no process any
+            # more and still names a live group (its members keep the id reserved) gives EINVAL
+            if any(p.pgid == pid for p in self.procs.values()):
+                raise oserror(errno.EINVAL)
             raise oserror(errno.ESRCH)
         fd = self._next_fd
         self._next_fd += 1

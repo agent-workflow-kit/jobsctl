@@ -355,52 +355,57 @@ def zombify(rig: Rig, pid: int) -> Callable[[], None]:
     return go
 
 
-def test_members_are_still_signaled_through_the_pidfd_once_the_leader_exited(
-    pidfd_rig: Rig,
-) -> None:
-    pidfd_rig.host.reactions[("pidfd", LEADER, signal.SIGTERM)] = zombify(pidfd_rig, LEADER)
-    pidfd_rig.host.reactions[("pidfd-group", LEADER, signal.SIGTERM)] = pidfd_rig.die(MEMBER)
+def test_a_live_leader_gets_its_group_signals_through_the_pidfd_flag(pidfd_rig: Rig) -> None:
+    pidfd_rig.host.reactions[("pidfd-group", LEADER, signal.SIGKILL)] = pidfd_rig.die(
+        LEADER, MEMBER
+    )
     assert pidfd_rig.killer().run() == 0
     assert pidfd_rig.signals() == [
         ("pidfd_send_signal", LEADER, signal.SIGTERM, 0),
         ("pidfd_send_signal", LEADER, signal.SIGTERM, FLAG),
+        ("pidfd_send_signal", LEADER, signal.SIGKILL, FLAG),
     ]
+    assert not any(c[0] in ("kill", "killpg") for c in pidfd_rig.signals())
     assert attempt(pidfd_rig.store)["leftovers"] == 0
     assert ended(pidfd_rig)[:2] == ("canceled", "forced")
 
 
-def test_the_sequence_keeps_stepping_to_sigkill_for_members_of_an_exited_leader(
+def test_an_exited_leader_ends_the_signals_at_once_and_members_are_leftovers(
     pidfd_rig: Rig,
 ) -> None:
+    """No stepping through an exited leader (as before #35): no extra idle, members counted."""
     pidfd_rig.host.reactions[("pidfd", LEADER, signal.SIGTERM)] = zombify(pidfd_rig, LEADER)
-    pidfd_rig.host.reactions[("pidfd-group", LEADER, signal.SIGKILL)] = pidfd_rig.die(MEMBER)
-    assert pidfd_rig.killer().run() == 0
-    assert pidfd_rig.signals() == [
-        ("pidfd_send_signal", LEADER, signal.SIGTERM, 0),
-        ("pidfd_send_signal", LEADER, signal.SIGTERM, FLAG),
-        ("pidfd_send_signal", LEADER, signal.SIGKILL, FLAG),  # after the grace, not the PID
-    ]
-    assert pidfd_rig.now >= 10  # group SIGTERM at once (leader exited), SIGKILL one grace later
-    assert attempt(pidfd_rig.store)["leftovers"] == 0
-
-
-def test_a_leader_reaped_after_sigterm_ends_the_signals_and_members_are_leftovers(
-    pidfd_rig: Rig,
-) -> None:
-    pidfd_rig.host.reactions[("pidfd", LEADER, signal.SIGTERM)] = pidfd_rig.die(LEADER)
     assert pidfd_rig.killer().run() == 0
     assert pidfd_rig.signals() == [("pidfd_send_signal", LEADER, signal.SIGTERM, 0)]
+    assert pidfd_rig.now < 10  # returned without idling one kill_grace
     assert pidfd_rig.host.procs[MEMBER].pgid == LEADER  # never signaled
     assert attempt(pidfd_rig.store)["leftovers"] == 1
     assert ended(pidfd_rig)[:2] == ("canceled", "forced")
 
 
-def test_a_leader_reaped_between_group_steps_stops_the_signals(pidfd_rig: Rig) -> None:
-    pidfd_rig.host.reactions[("pidfd", LEADER, signal.SIGTERM)] = zombify(pidfd_rig, LEADER)
+def test_a_reaped_leader_with_a_live_member_is_not_alive_and_gets_nothing(
+    pidfd_rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """pidfd_open of a reaped leader whose group still has a member is EINVAL on a real kernel:
+    that reads as gone (no signal, no killpg, no error), not as an error."""
+    pidfd_rig.host.reactions[("pidfd", LEADER, signal.SIGTERM)] = pidfd_rig.die(LEADER)
+    assert pidfd_rig.killer().run() == 0
+    assert pidfd_rig.signals() == [("pidfd_send_signal", LEADER, signal.SIGTERM, 0)]
+    assert ("pidfd_open", LEADER) in pidfd_rig.host.calls
+    assert "error" not in capsys.readouterr().err
+    assert pidfd_rig.host.procs[MEMBER].pgid == LEADER
+    assert attempt(pidfd_rig.store)["leftovers"] == 1
+
+
+def test_a_reaped_leader_with_a_live_member_is_not_alive_for_the_group_step(
+    pidfd_rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The leader goes away between the liveness check and the group step."""
+    pidfd_rig.host.reactions[("pidfd", LEADER, signal.SIGTERM)] = pidfd_rig.die(LEADER)
     pidfd_rig.host.reactions[("pidfd-group", LEADER, signal.SIGTERM)] = pidfd_rig.die(LEADER)
     assert pidfd_rig.killer().run() == 0
-    assert [c[2:] for c in pidfd_rig.signals()] == [(signal.SIGTERM, 0), (signal.SIGTERM, FLAG)]
-    assert attempt(pidfd_rig.store)["leftovers"] == 1
+    assert not any(c[0] in ("kill", "killpg") for c in pidfd_rig.signals())
+    assert "error" not in capsys.readouterr().err
 
 
 def test_a_reused_leader_pid_gets_no_group_signal_through_the_pidfd(pidfd_rig: Rig) -> None:
@@ -415,23 +420,21 @@ def test_a_reused_leader_pid_gets_no_group_signal_through_the_pidfd(pidfd_rig: R
 def test_a_leader_that_left_its_group_is_not_signaled_through_the_flag(pidfd_rig: Rig) -> None:
     pidfd_rig.host.procs[LEADER] = proc(LEADER, start=START, pgid=STRANGER)
     set_running(pidfd_rig.store, pgid=LEADER)
-    pidfd_rig.host.reactions[("kill", LEADER, signal.SIGKILL)] = pidfd_rig.die(LEADER)
-    pidfd_rig.host.reactions[("pidfd", LEADER, signal.SIGKILL)] = pidfd_rig.die(LEADER)
+    pidfd_rig.host.reactions[("killpg", LEADER, signal.SIGKILL)] = pidfd_rig.die(LEADER)
     pidfd_rig.killer().run()
-    assert all(c[3] == 0 for c in pidfd_rig.signals() if c[0] == "pidfd_send_signal")
-    assert not any(c[1] == STRANGER for c in pidfd_rig.signals())
+    sent = pidfd_rig.signals()
+    assert ("killpg", LEADER, signal.SIGKILL) in sent  # addressed by PID, after the re-check
+    assert not any(c[0] == "pidfd_send_signal" and c[3] == FLAG for c in sent)  # no flag send
+    assert not any(c[0] == "killpg" and c[1] == STRANGER for c in sent)
 
 
-def test_an_old_kernel_keeps_the_existing_behavior_member_left_unsignaled(
-    old_kernel_rig: Rig,
-) -> None:
+def test_an_old_kernel_ends_the_signals_once_the_leader_exited(old_kernel_rig: Rig) -> None:
     old_kernel_rig.host.reactions[("pidfd", LEADER, signal.SIGTERM)] = zombify(
         old_kernel_rig, LEADER
     )
     assert old_kernel_rig.killer().run() == 0
     sent = old_kernel_rig.signals()
-    assert not any(c[0] in ("kill", "killpg") for c in sent)  # no unchecked fallback on a zombie
-    assert all(c[3] == 0 or c[3] == FLAG for c in sent)
+    assert sent == [("pidfd_send_signal", LEADER, signal.SIGTERM, 0)]
     assert attempt(old_kernel_rig.store)["leftovers"] == 1
     assert ended(old_kernel_rig)[:2] == ("canceled", "forced")
 

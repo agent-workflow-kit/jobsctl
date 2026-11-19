@@ -7,6 +7,7 @@ pidfd path. The strict 6.9+ checks are ``tests/test_pidfd_group_live.py``.
 
 from __future__ import annotations
 
+import os
 import signal
 import sys
 from collections.abc import Iterator
@@ -46,4 +47,14 @@ def test_a_real_group_is_not_signaled_without_use_pidfd_on_the_old_path_either(
 ) -> None:
     wrong = Identity(group.leader.boot_id, group.leader.pid, group.leader.start + 1)
     assert signal_group(default_host(), wrong, signal.SIGKILL).result is Result.NOT_ALIVE
+    assert group.alive(group.member)
+
+
+def test_a_reaped_leader_with_a_live_member_gets_nothing_on_a_real_kernel(group: Group) -> None:
+    """pidfd_open of a reaped leader whose member keeps the group id reserved is EINVAL (not
+    ESRCH) on a real kernel: it reads as NOT_ALIVE, and killpg is never tried."""
+    os.kill(group.leader.pid, signal.SIGKILL)
+    group.leader_proc.wait(timeout=30)
+    out = signal_group(default_host(), group.leader, signal.SIGKILL, use_pidfd=True)
+    assert out.result is Result.NOT_ALIVE
     assert group.alive(group.member)
