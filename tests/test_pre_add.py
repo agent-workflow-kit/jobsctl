@@ -4,22 +4,28 @@ nothing; a failing, timed-out or killed hook vetoes (fail closed)."""
 
 from __future__ import annotations
 
+import datetime as dt
 import json
+import os
+import signal
 import sqlite3
 import stat
+import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from jobsctl import pre_add
+from jobsctl import gateway, pre_add
 from jobsctl.commands import add as add_module
 from jobsctl.env_file import load_env_file
 from jobsctl.hook_run import HookResult
 from jobsctl.store_dir import resolve_state_dir
 from tests.conftest import validate_against, validate_record_file
 from tests.helpers import Result, run_cli
-from tests.hook_real import HookTracker, tracker_fixture
+from tests.hook_real import HookTracker, recorded_pids, running_pids, tracker_fixture
 
 pytestmark = pytest.mark.usefixtures("validated_records")
 
@@ -428,19 +434,12 @@ class _Fake:
         return HookResult(**fields)
 
 
-@pytest.mark.parametrize(
-    ("over", "code"),
-    [
-        ({"stopped": "SIGTERM"}, 1),
-        ({"unkillable": True}, 1),
-    ],
-)
+@pytest.mark.parametrize("over", [{"stopped": "SIGTERM"}, {"unkillable": True}])
 def test_a_stopped_or_unkillable_hook_stores_nothing(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     over: dict[str, Any],
-    code: int,
 ) -> None:
     real = pre_add.Deliverer
 
@@ -451,7 +450,7 @@ def test_a_stopped_or_unkillable_hook_stores_nothing(
 
     monkeypatch.setattr(pre_add, "Deliverer", Fake)
     res = add(capsys, config(tmp_path, {"cmd": "true"}))
-    assert res.code == code, res.out + res.err
+    assert res.code == 1, res.out + res.err
     assert error(res)["code"] == "internal" and jobs() == []
 
 
@@ -494,7 +493,8 @@ def test_a_taken_id_runs_the_hooks_again_with_a_fresh_one(
     tracker: HookTracker,
 ) -> None:
     first = add(capsys, config(tmp_path))
-    taken = jobs()[0]["id"]
+    before = [dict(row) for row in jobs()]
+    taken = before[0]["id"]
     ids = iter([taken, "jb-aaaaaaaa"])
     monkeypatch.setattr(add_module, "new_job_id", lambda: next(ids))
     log = tmp_path / "ids"
@@ -503,3 +503,195 @@ def test_a_taken_id_runs_the_hooks_again_with_a_fresh_one(
     assert first.code == 0 and res.code == 0, res.out + res.err
     assert log.read_text().split() == [taken, "jb-aaaaaaaa"]
     assert {row["id"] for row in jobs()} == {taken, "jb-aaaaaaaa"}
+    assert [dict(r) for r in jobs() if r["id"] == taken] == before  # the existing job is untouched
+    assert [r["job_id"] for r in hook_records()] == [taken, "jb-aaaaaaaa"]  # one record per run
+
+
+# -- id rounds ----------------------------------------------------------------------------------
+
+
+def test_every_round_after_the_last_hook_run_still_tries_the_store(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: HookTracker,
+) -> None:
+    assert add(capsys, config(tmp_path)).code == 0
+    taken = jobs()[0]["id"]
+    draws = iter([taken] * (add_module.MAX_HOOK_ROUNDS - 1) + ["jb-bbbbbbbb"])
+    monkeypatch.setattr(add_module, "new_job_id", lambda: next(draws))
+    log = tmp_path / "runs"
+    hook = script(tmp_path, "h", f"echo x >> {log}\n")
+    res = add(capsys, config(tmp_path, {"cmd": hook}))
+    assert res.code == 0, res.out + res.err
+    assert "jb-bbbbbbbb" in {row["id"] for row in jobs()}
+    assert len(log.read_text().split()) == add_module.MAX_HOOK_ROUNDS
+
+
+def test_an_id_that_is_always_taken_ends_in_internal_after_a_bounded_number_of_runs(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: HookTracker,
+) -> None:
+    assert add(capsys, config(tmp_path)).code == 0
+    taken = jobs()[0]["id"]
+    monkeypatch.setattr(add_module, "new_job_id", lambda: taken)
+    log = tmp_path / "runs"
+    hook = script(tmp_path, "h", f"echo x >> {log}\n")
+    res = add(capsys, config(tmp_path, {"cmd": hook}))
+    assert res.code == 1 and error(res)["code"] == "internal"
+    assert len(log.read_text().split()) == add_module.MAX_HOOK_ROUNDS
+    assert len(jobs()) == 1
+
+
+# -- the unique key re-checked at the write -----------------------------------------------------
+
+
+def inner_add(key: str, marker: Path) -> str:
+    """Hook body: the first run adds a job with `key` through a real, hook-less `jobsctl add`."""
+    env = " ".join(
+        f"{name}={os.environ[name]}"
+        for name in ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME")
+    )
+    return (
+        f"if [ ! -e {marker} ]; then touch {marker}; "
+        f"env {env} LC_ALL=C {sys.executable} -m jobsctl --json add --no-start "
+        f"--unique-key {key} --cwd /work -- true >/dev/null || exit 1; fi\n"
+    )
+
+
+def test_a_job_with_the_key_created_during_the_hooks_is_reused_not_duplicated(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], tracker: HookTracker
+) -> None:
+    hook = script(tmp_path, "racer", inner_add("k", tmp_path / "once"))
+    res = add(capsys, config(tmp_path, {"cmd": hook}), "--unique-key", "k")
+    assert res.code == 0, res.out + res.err
+    doc = res.envelope()
+    assert doc["created"] is False
+    stored = jobs()
+    assert len(stored) == 1 and doc["job"]["id"] == stored[0]["id"]
+
+
+def test_the_key_is_rechecked_when_a_taken_id_runs_the_hooks_again(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: HookTracker,
+) -> None:
+    assert add(capsys, config(tmp_path)).code == 0
+    taken = jobs()[0]["id"]
+    ids = iter([taken, "jb-cccccccc"])
+    monkeypatch.setattr(add_module, "new_job_id", lambda: next(ids))
+    hook = script(tmp_path, "racer", inner_add("k", tmp_path / "once"))
+    res = add(capsys, config(tmp_path, {"cmd": hook}), "--unique-key", "k")
+    assert res.code == 0, res.out + res.err
+    doc = res.envelope()
+    assert doc["created"] is False
+    stored = jobs()
+    assert len(stored) == 2 and doc["job"]["id"] != taken
+    assert "jb-cccccccc" not in {row["id"] for row in stored}
+
+
+# -- the clock, hook ids, interrupts, escalation size -------------------------------------------
+
+
+def test_created_at_is_taken_after_the_hooks_ran(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "ran"
+    start = dt.datetime(2030, 1, 1, tzinfo=dt.UTC)
+    later = start + dt.timedelta(hours=1)
+    monkeypatch.setattr(gateway, "utc_now", lambda: later if marker.exists() else start)
+    hook = script(tmp_path, "h", f"touch {marker}\n")
+    assert add(capsys, config(tmp_path, {"cmd": hook})).code == 0
+    assert jobs()[0]["created_at"] == "2030-01-01T01:00:00.000Z"
+
+
+def test_a_hook_id_with_escapes_and_newlines_is_sanitized_in_the_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], tracker: HookTracker
+) -> None:
+    cmd = "# \x1b[31mred\x07 \nexit 1"  # an unnamed hook's identity is its cmd
+    res = add(capsys, config(tmp_path, {"cmd": cmd}))
+    assert res.code == 11, res.out + res.err
+    err = error(res)
+    for text in (err["details"]["hook_id"], err["message"]):
+        assert "\x1b" not in text and "\x07" not in text and "\n" not in text
+    assert "red" in err["details"]["hook_id"]
+
+
+def test_sigint_during_a_hook_stops_it_and_stores_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], tracker: HookTracker
+) -> None:
+    pidfile = tmp_path / "pid"
+    hook = script(tmp_path, "slow", f"echo $$ > {pidfile}\nexec sleep 60\n")
+
+    def fire() -> None:
+        end = time.monotonic() + 20
+        while time.monotonic() < end and not (pidfile.exists() and pidfile.read_text().strip()):
+            time.sleep(0.02)
+        os.kill(os.getpid(), signal.SIGINT)  # this process: the add; the hook is running
+
+    thread = threading.Thread(target=fire)
+    thread.start()
+    try:
+        res = add(capsys, config(tmp_path, {"cmd": hook}))
+    finally:
+        thread.join()
+    assert res.code == 130, res.out + res.err
+    assert error(res)["code"] == "interrupted" and jobs() == [] and queues_seen() == []
+    assert len(hook_records()) == 1
+    assert tracker.last.popen.returncode is not None  # the leader was stopped and reaped
+    assert running_pids(recorded_pids(pidfile)) == []  # and its group is gone
+
+
+def test_several_escalations_are_joined_in_order_and_capped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], tracker: HookTracker
+) -> None:
+    hooks = [
+        {
+            "name": n,
+            "cmd": script(tmp_path, n, f"head -c 3000 /dev/zero | tr '\\0' {c} >&2\nexit 13\n"),
+        }
+        for n, c in (("a", "A"), ("b", "B"), ("c", "C"))
+    ]
+    res = add(capsys, config(tmp_path, *hooks))
+    assert res.code == 13, res.out + res.err
+    err = error(res)
+    assert err["details"]["hook_ids"] == ["a", "b", "c"]
+    assert err["message"].startswith("the pre-add hook a, b, c escalated")
+    reasons = err["message"].split(": ", 1)[1]
+    assert len(reasons.encode()) <= 4096
+    assert reasons.startswith("A") and "B" in reasons and "C" not in reasons  # cut, in order
+    assert jobs() == []
+
+
+# -- decision ids that hold a secret ------------------------------------------------------------
+
+
+def test_a_decision_id_holding_a_secret_is_dropped_and_never_logged(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], tracker: HookTracker
+) -> None:
+    env_file = tmp_path / "secrets.env"
+    env_file.write_text(f"API_TOKEN={SECRET}\n")
+    env_file.chmod(0o600)
+    body = 'echo "{\\"decision_id\\": [\\"$API_TOKEN\\", \\"ok1\\"]}"\n'
+    cfg = config(
+        tmp_path, {"cmd": script(tmp_path, "h", body)}, env_file=str(env_file),
+        mask_env=["API_TOKEN"],
+    )  # fmt: skip
+    res = add(capsys, cfg)
+    assert res.code == 0, res.out + res.err
+    assert SECRET not in (resolve_state_dir() / "log.jsonl").read_text()
+    assert hook_records()[0]["decision_ids"] == ["ok1"]
+
+
+def test_the_joined_escalation_message_is_cut_by_bytes_not_characters(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], tracker: HookTracker
+) -> None:
+    body = "printf '\\303\\251%.0s' $(seq 1 1500) >&2\nexit 13\n"  # 3000 bytes of "é"
+    hooks = [{"name": n, "cmd": script(tmp_path, n, body)} for n in ("a", "b")]
+    res = add(capsys, config(tmp_path, *hooks))
+    assert res.code == 13, res.out + res.err
+    reasons = error(res)["message"].split(": ", 1)[1]
+    assert 4000 < len(reasons.encode()) <= 4096

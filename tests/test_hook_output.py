@@ -108,6 +108,12 @@ def test_invalid_decision_ids_are_dropped_with_a_detail(value: object) -> None:
     assert got == ["ok"] and len(bad) == 1
 
 
+@pytest.mark.parametrize("value", [SECRET, f"pre-{SECRET}-post"])
+def test_a_decision_id_holding_a_masked_value_is_dropped_with_a_masked_echo(value: str) -> None:
+    got, bad = ids({"decision_id": [value, "ok1"]})
+    assert got == ["ok1"] and len(bad) == 1 and SECRET not in bad[0] and "***" in bad[0]
+
+
 def test_invalid_detail_is_sanitized_masked_and_short() -> None:
     got, bad = ids({"decision_id": [f"\x1b[31m{SECRET} line\nbreak" + "z" * 500]})
     assert got == []

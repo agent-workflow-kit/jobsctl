@@ -1,7 +1,7 @@
 """Stopping a synchronous hook when the firing command is interrupted (interface.md, Hook
 processes).
 
-A CLI command that delivers a hook itself (`hold`, `cancel`, `resolve`) wraps the delivery:
+A CLI command that delivers a hook itself (`add`, `hold`, `cancel`, `resolve`) wraps the delivery:
 
     with InterruptGuard() as guard:
         result = run_hook(..., stop=guard)
@@ -10,7 +10,8 @@ A CLI command that delivers a hook itself (`hold`, `cancel`, `resolve`) wraps th
 SIGINT, SIGHUP and SIGTERM then only record themselves; ``run_hook`` sees ``stop`` answer, stops
 the hook's group (SIGTERM, 5 seconds, SIGKILL, leader held unreaped) and returns. The command
 leaves the event undelivered (``_deliver`` delivers it later) and exits 130 (`interrupted`) for
-SIGINT, else 1 (`internal`).
+SIGINT, else 1 (`internal`). `add` runs its `pre-add` hooks the same way (``pre_add``) but has no
+event: it stores nothing.
 Used by ``delivery_cli`` around every synchronous hook a command runs.
 """
 

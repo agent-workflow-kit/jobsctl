@@ -469,7 +469,7 @@ def decide(
 
 # -- the command -----------------------------------------------------------------------------
 
-MAX_HOOK_ROUNDS = 4  # a round runs the pre-add hooks again only when their id was taken
+MAX_HOOK_ROUNDS = 4  # pre-add hook runs per add; each is followed by a store attempt
 
 
 def _dry_run(ctx: Context, req: Request, env_file: EnvFile, now: str) -> Outcome:
@@ -498,13 +498,17 @@ def _write(
         log_env_file_state(writer, ctx.config.env_file, env_file)
         log_path_state(writer, canonical)
         allowed_id: str | None = None
-        for _round in range(MAX_HOOK_ROUNDS):
+        hook_runs = 0
+        while True:
             try:
                 return _store(store, writer, ctx, req, env_file, now, allowed_id)
             except NeedsPreAddHook:
+                if hook_runs >= MAX_HOOK_ROUNDS:  # the last run's id was taken too
+                    break
                 # No transaction is open while the hooks run. The id is the one the job gets
                 # (the hooks see it as JOBSCTL_ID); a taken one (2^-40) runs them again.
                 allowed_id = new_job_id()
+                hook_runs += 1
                 run_pre_add(
                     store,
                     ctx.config,

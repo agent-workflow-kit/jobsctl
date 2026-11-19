@@ -26,6 +26,7 @@ from jobsctl.config import Config
 from jobsctl.delivery import Deliverer, EventPlan
 from jobsctl.errors import JobsctlError
 from jobsctl.hook_interrupt import InterruptGuard
+from jobsctl.hook_output import MESSAGE_LIMIT, cut_bytes
 from jobsctl.hook_payload import build_add_payload, encode_payload
 from jobsctl.hook_run import HookResult
 from jobsctl.hook_select import SelectedHook, pre_add_event_id, select_hooks
@@ -35,7 +36,6 @@ from jobsctl.textsafe import sanitize
 __all__ = ["HOOK", "run_pre_add", "selected_pre_add"]
 
 HOOK = "pre-add"
-_MESSAGE_LIMIT = 4096
 
 
 def selected_pre_add(config: Config, queue: str, labels: list[str]) -> list[SelectedHook]:
@@ -49,7 +49,7 @@ def _text(deliverer: Deliverer, text: str) -> str:
 
 def _reason(deliverer: Deliverer, result: HookResult) -> str:
     """The hook's stderr (already masked and sanitized by `run_hook`), on one line."""
-    return _text(deliverer, result.message or "")[:_MESSAGE_LIMIT]
+    return cut_bytes(_text(deliverer, result.message or ""), MESSAGE_LIMIT)
 
 
 def run_pre_add(
@@ -110,6 +110,6 @@ def run_pre_add(
         raise JobsctlError(
             "needs_human",
             f"the pre-add hook {', '.join(ids)} escalated the add to a human; nothing was added"
-            + (f": {'; '.join(reasons)[:_MESSAGE_LIMIT]}" if reasons else ""),
+            + (f": {cut_bytes('; '.join(reasons), MESSAGE_LIMIT)}" if reasons else ""),
             details={"hook_ids": ids},
         )

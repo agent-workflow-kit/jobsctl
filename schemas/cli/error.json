@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "jobsctl/cli/error.json",
   "title": "jobsctl error output (--json, non-zero exit)",
-  "description": "Every non-zero exit except the wait outcomes (12, 13, 20, 22 and 130: wait prints show.json, add --wait prints add.json) and cancel with selectors and --all exiting 20 (which prints cancel.json).",
+  "description": "Every non-zero exit except the outcomes of waiting (12, 13, 20, 22 and 130: wait prints show.json, the wait of add --wait prints add.json; an add refused by a pre-add hook, exit 11 or 13, prints this error object) and cancel with selectors and --all exiting 20 (which prints cancel.json).",
   "type": "object",
   "properties": {
     "error": {

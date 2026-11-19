@@ -21,6 +21,7 @@ __all__ = [
     "MAX_DECISION_IDS",
     "MESSAGE_LIMIT",
     "Capture",
+    "cut_bytes",
     "excerpt",
     "parse_decision_ids",
 ]
@@ -58,7 +59,7 @@ class Capture:
         return self.seen > len(self._buf)
 
 
-def _cut_bytes(text: str, limit: int) -> str:
+def cut_bytes(text: str, limit: int) -> str:
     raw = text.encode("utf-8")
     if len(raw) <= limit:
         return text
@@ -75,7 +76,7 @@ def excerpt(capture: Capture, limit: int, mask: Mask) -> str:
     if capture.truncated:
         raw = raw[: raw.rfind(b"\n") + 1]
     text = raw.decode("utf-8", errors="backslashreplace")
-    return _cut_bytes(sanitize(text, mask=mask), limit)
+    return cut_bytes(sanitize(text, mask=mask), limit)
 
 
 _MAX_DEPTH = 32
@@ -110,7 +111,7 @@ def _clean_for_warning(value: object, mask: Mask) -> str:
         except RecursionError:
             text = _NESTED
         text = mask(text[:CAPTURE_LIMIT])
-    return _cut_bytes(sanitize(text, inline=True), 64)
+    return cut_bytes(sanitize(text, inline=True), 64)
 
 
 def parse_decision_ids(capture: Capture, mask: Mask) -> tuple[list[str], list[str]]:
@@ -119,8 +120,9 @@ def parse_decision_ids(capture: Capture, mask: Mask) -> tuple[list[str], list[st
     Stdout must be one JSON object; anything else (plain text, a list, truncated or malformed
     JSON, invalid UTF-8) yields no ids and no warning, since a hook may print what it likes.
     `decision_id` is a string or a list of strings; every value must match the decision-id
-    grammar or is dropped with a detail (a sanitized, masked, shortened echo, never the raw
-    value). Duplicates are kept once, in order; at most `MAX_DECISION_IDS` are kept.
+    grammar and hold no masked value or is dropped with a detail (a sanitized, masked, shortened
+    echo, never the raw value). Duplicates are kept once, in order; at most `MAX_DECISION_IDS`
+    are kept.
     """
     if capture.truncated or not capture.data.strip():
         return [], []
@@ -135,7 +137,11 @@ def parse_decision_ids(capture: Capture, mask: Mask) -> tuple[list[str], list[st
     ids: list[str] = []
     invalid: list[str] = []
     for value in candidates:
-        if not isinstance(value, str) or DECISION_ID_RE.fullmatch(value) is None:
+        if (
+            not isinstance(value, str)
+            or DECISION_ID_RE.fullmatch(value) is None
+            or mask(value) != value  # holds a masked value: never logged
+        ):
             invalid.append(_clean_for_warning(value, mask))
         elif value in ids:
             continue
