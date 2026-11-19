@@ -863,7 +863,7 @@ Every TUI action is a CLI command.
 - **macOS:** identity through `libproc` and `sysctl` (`kern.bootsessionuuid`); no subreaper, so [leftovers](#leftovers) are counted by probing the job's process group and the shim's direct children (an orphan that left the group goes to `launchd` and is not found); no pidfds, so signals to processes jobsctl did not spawn are checked immediately before sending, and `PR_SET_DUMPABLE` does not exist. Holding the job leader unreaped reads its zombie state and wait status from libproc, because macOS has no `waitid`. None of the macOS paths has been run on a Mac ([macOS checklist](macos-checklist.md)).
 - **Hidden `/proc`:** with `hidepid=2` (or `invisible`) on `/proc`, other users' processes are inconclusive, never dead: a missing `/proc/<pid>` reads as unknown and a group probe is incomplete. The shim then records `leftovers` as a lower bound ([Leftovers](#leftovers)).
 - **Cron:** cron's environment is minimal and its `python3` may be older than 3.12; [`cron install`](#cron-install--cron-uninstall) writes the absolute path of `jobsctl`, an explicit `PATH` and the `XDG_*` directories set at install.
-- **Requirements:** Python ≥ 3.12; SQLite ≥ 3.35.
+- **Requirements:** Python ≥ 3.12 (CI runs 3.12, 3.13 and 3.14); SQLite ≥ 3.35.
 
 ## Residual risks
 
