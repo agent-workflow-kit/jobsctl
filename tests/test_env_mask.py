@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 import string
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from jobsctl import env_canonical as ec
@@ -235,32 +236,81 @@ def test_secrets_that_prefix_each_other_deeply() -> None:
     assert result.mask("a" * 900 + "bcccccccc") == "a" * 101 + "***"
 
 
-def test_masking_is_fast_on_hostile_inputs() -> None:
-    # Before the trie matcher, the many-secrets case alone took more than 100 s.
+def cpu_seconds(work: Callable[[], object], repeats: int = 3) -> float:
+    """The least process CPU time of `repeats` runs of `work`: unlike wall-clock time it does not
+    grow with how busy the host is, and the minimum drops one-off stalls."""
+    best = float("inf")
+    for _ in range(repeats):
+        start = time.process_time()
+        work()
+        best = min(best, time.process_time() - start)
+    return best
+
+
+# Each case grows its input by GROWTH. Linear work grows by about GROWTH, quadratic work by about
+# GROWTH**2; the bound sits between them. The floor keeps a fast small run from making the bound
+# tighter than timer noise.
+GROWTH = 4
+MAX_RATIO = 7
+NOISE_FLOOR = 0.02
+
+
+def assert_scales_linearly(small: float, large: float) -> None:
+    assert large < MAX_RATIO * max(small, NOISE_FLOOR), (small, large)
+
+
+def test_masking_scales_linearly_with_the_number_of_secrets() -> None:
+    # Before the trie matcher, many secrets took more than 100 s (a scan per secret).
     rng = random.Random(5)
     alphabet = string.ascii_letters + string.digits
-    secrets = {f"S{i}": "".join(rng.choices(alphabet, k=9)) for i in range(50_000)}
-    text = "".join(rng.choices(alphabet, k=256 * 1024))
-    start = time.monotonic()
-    result = mset(cfg(), {}, NOFILE, secrets)
-    assert result.mask(text + " " + secrets["S7"]).endswith(" ***")
-    assert time.monotonic() - start < 10
+    text = "".join(rng.choices(alphabet, k=64 * 1024))
 
-    start = time.monotonic()
+    def run(count: int) -> float:
+        secrets = {f"S{i}": "".join(rng.choices(alphabet, k=9)) for i in range(count)}
+
+        def work() -> None:
+            result = mset(cfg(), {}, NOFILE, secrets)
+            assert result.mask(text + " " + secrets["S7"]).endswith(" ***")
+
+        return cpu_seconds(work, repeats=2)
+
+    assert_scales_linearly(run(2_500), run(2_500 * GROWTH))
+
+
+def test_masking_scales_linearly_with_the_text_length() -> None:
+    rng = random.Random(6)
+    alphabet = string.ascii_letters + string.digits
+    result = mset(
+        cfg(), {}, NOFILE, {f"S{i}": "".join(rng.choices(alphabet, k=9)) for i in range(5_000)}
+    )
+
+    def run(length: int) -> float:
+        text = "".join(rng.choices(alphabet, k=length))
+        return cpu_seconds(lambda: result.mask(text))
+
+    assert_scales_linearly(run(64 * 1024), run(64 * 1024 * GROWTH))
+
+
+def test_a_long_near_miss_text_scales_linearly() -> None:
     result = mset(cfg(), {}, NOFILE, {"A": "a" * 8 + "b"})
-    text = "a" * 2_000_000
-    assert result.mask(text) == text
-    assert time.monotonic() - start < 10
+
+    def run(length: int) -> float:
+        text = "a" * length
+        return cpu_seconds(lambda: result.mask(text) == text)
+
+    assert_scales_linearly(run(2_000_000), run(2_000_000 * GROWTH))
 
 
-def test_near_miss_prefixes_are_fast() -> None:
+def test_near_miss_prefixes_scale_linearly() -> None:
     # 190 values that share a long prefix with the text and never complete
     secrets = {f"S{k}": "a" * k + "b" for k in range(8, 199)}
     result = mset(cfg(), {}, NOFILE, secrets)
-    text = "a" * 20_000
-    start = time.process_time()
-    assert result.mask(text) == text
-    assert time.process_time() - start < 5
+
+    def run(length: int) -> float:
+        text = "a" * length
+        return cpu_seconds(lambda: result.mask(text) == text, repeats=2)
+
+    assert_scales_linearly(run(5_000), run(5_000 * GROWTH))
 
 
 def test_random_embeddings_always_masked() -> None:

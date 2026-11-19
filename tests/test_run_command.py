@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import os
 import signal
+import time
 from pathlib import Path
 from typing import Any
 
@@ -254,19 +255,24 @@ def test_loop_reaps_its_own_shim_children_each_iteration(
     job = add_job(capsys, config=cfg)
     sleeps: list[float] = []
     reaped: list[int] = []
+    runners: list[Runner] = []
     real_reap = Runner.reap
 
     def counting_reap(self: Runner, result: Any) -> None:
+        runners.append(self)
         real_reap(self, result)
         reaped.append(len(self.children))
 
     def sleep(seconds: float) -> None:
         sleeps.append(seconds)
         if len(sleeps) == 1:
-            # wait for the shim (this process's child) to exit; poll by its handle only
-            import time
-
-            time.sleep(1.5)
+            # Wait until the shim (this process's child) has exited, however long a loaded host
+            # takes to start it: the next pass must find it exited. Poll only the loop's own
+            # handles, bounded so a shim that never ends fails the test instead of hanging it.
+            deadline = time.monotonic() + 60
+            while any(c.popen.poll() is None for c in runners[0].children):
+                assert time.monotonic() < deadline, "the shim did not exit within 60 s"
+                time.sleep(0.05)
         if len(sleeps) == 7:
             os.kill(os.getpid(), signal.SIGTERM)
 

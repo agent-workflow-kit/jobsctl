@@ -19,8 +19,11 @@ def test_a_spawned_deliver_runs_async_hooks_and_exits(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     out = tmp_path / "out"
+    # auto_run off: `hold` must not start its own background pass (and through it a second
+    # `_deliver`), which would race this test's `_deliver` for the event and the lease.
     cfg = config_file(
         tmp_path,
+        auto_run=False,
         hooks={"post-held": [{"name": "w", "cmd": recorder(out), "async": True}]},
     )
     job_id = add_job(capsys, config=cfg)
