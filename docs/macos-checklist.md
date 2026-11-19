@@ -317,3 +317,29 @@ Mac: <model/arch>   macOS: <version>   Python: <x.y.z>   SQLite: <x.y.z>   Volum
 
 Surprises / decisions needed:
 ```
+
+## Linux 6.9+ real-kernel check (pending)
+
+Owner: the maintainer, on a Linux 6.9 or later host (not this one: it runs 5.15, where the flag is refused
+with `EINVAL` and only the `killpg` fallback runs). Issue #35 (`PIDFD_SIGNAL_PROCESS_GROUP`) is not accepted
+until this was run.
+
+```bash
+make live-pidfd
+# or
+JOBSCTL_LIVE_PIDFD=1 uv run pytest -m live tests/test_pidfd_group_live.py -v -rA
+```
+
+It starts its own process groups only and signals them by recorded identity (`tests/kill_guard.py` guards
+every signal). It skips with a reason on an older kernel. It must show four passes and no skip, and check:
+
+| Check | Test |
+|---|---|
+| The flag reaches the leader and every member | `test_the_flag_reaches_every_member_and_the_leader` |
+| It still reaches the members of a leader that exited but is not reaped (what `_kill` relies on) | `test_the_flag_reaches_members_of_a_leader_that_exited_but_is_not_reaped` |
+| A reaped leader gives `ESRCH`, the group is not signaled | `test_a_reaped_leader_gets_nothing_and_the_member_is_left_alone` |
+| A wrong identity sends nothing | `test_the_flag_is_never_sent_for_a_wrong_identity` |
+
+If the second one fails (the kernel does not deliver to an unreaped zombie leader's group), nothing unsafe
+happens (`_kill` then ends as before and records the members as leftovers); record the result on #35 and decide
+whether to drop the `_kill` stepping after the leader exits.

@@ -15,6 +15,9 @@ signaled only while the leader's recorded identity holds. Nothing here reaps the
 signal is sent once the shim reaped it (the shim does that after the sequence is done). A process
 that left the group is never signaled, except the leader itself in step 3.
 
+Group signals go through the leader's pidfd with ``PIDFD_SIGNAL_PROCESS_GROUP`` where the kernel
+has it (Linux 6.9+) and through the same re-checked ``killpg`` elsewhere (``pidfd_group``; #35).
+
 ``UNKNOWN`` (identity unreadable) and ``ERROR`` (e.g. ``EMFILE`` from ``pidfd_open``) are not
 "gone": nothing was signaled. Because the leader is the shim's unreaped child, the same PID/group
 signal sent without the identity check is safe by construction, so the sequence falls back to it
