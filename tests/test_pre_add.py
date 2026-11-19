@@ -230,7 +230,7 @@ def test_a_timeout_vetoes_and_the_group_is_stopped(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], tracker: HookTracker
 ) -> None:
     hook = script(tmp_path, "slow", "exec sleep 60\n")
-    res = add(capsys, config(tmp_path, {"cmd": hook, "timeout": 1}))
+    res = add(capsys, config(tmp_path, {"cmd": hook, "timeout": "1s"}))
     assert res.code == 11, res.out + res.err
     assert jobs() == []
     assert hook_records()[0]["outcome"] == "timeout"
@@ -293,12 +293,10 @@ def test_a_unique_key_hit_runs_no_hook_and_creates_nothing(
 ) -> None:
     marker = tmp_path / "ran"
     hook = script(tmp_path, "count", f"echo x >> {marker}\nexit 0\n")
-    cfg = config(tmp_path, {"cmd": hook})
-    first = add(capsys, cfg, "--unique-key", "k")
+    first = add(capsys, config(tmp_path, {"cmd": hook}), "--unique-key", "k")
     assert first.code == 0 and marker.read_text() == "x\n"
     veto = script(tmp_path, "veto", "exit 1\n")
-    cfg2 = config(tmp_path, {"cmd": veto})
-    again = add(capsys, cfg2, "--unique-key", "k")
+    again = add(capsys, config(tmp_path, {"cmd": veto}), "--unique-key", "k")
     assert again.code == 0, again.out + again.err  # idempotent: the existing job, no hook
     doc = again.envelope()
     assert doc["created"] is False and doc["job"]["id"] == jobs()[0]["id"]
@@ -312,12 +310,11 @@ def test_a_unique_key_that_frees_up_before_the_write_still_runs_the_hook(
     """A veto cannot be skipped because a holder existed earlier: the hook runs whenever a job
     would actually be created."""
     veto = script(tmp_path, "veto", "exit 1\n")
-    cfg = config(tmp_path, {"cmd": veto})
     first = add(capsys, config(tmp_path), "--unique-key", "k")
     assert first.code == 0
     job_id = jobs()[0]["id"]
     assert run_cli(capsys, "--json", "cancel", job_id).code == 0  # the key is free again
-    res = add(capsys, cfg, "--unique-key", "k")
+    res = add(capsys, config(tmp_path, {"cmd": veto}), "--unique-key", "k")
     assert res.code == 11 and len(jobs()) == 1
 
 
