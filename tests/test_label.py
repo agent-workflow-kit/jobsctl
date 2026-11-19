@@ -320,3 +320,20 @@ def test_dry_run_leaves_the_state_directory_as_found(capsys: pytest.CaptureFixtu
     before = sorted(p.name for p in state.iterdir())
     change(run(capsys, "label", "add", JOB, "b=2", "--dry-run"))
     assert sorted(p.name for p in state.iterdir()) == before
+
+
+def test_a_value_secret_overlapping_a_longer_secret_from_the_key_does_not_name_the_key(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        json.dumps({"mask_env": ["S1", "S2"], "env": {"inherit": ["S1", "S2"]}}), encoding="utf-8"
+    )
+    monkeypatch.setenv("S1", JOINED)
+    monkeypatch.setenv("S2", "value12345")
+    seed_job(JOB)
+    res = run(capsys, "--config", str(cfg), "label", "add", JOB, JOINED)
+    assert res.code == 2
+    assert res.envelope()["error"]["details"] == {"code": "secret_in_label"}
+    assert "tok.en" not in res.out + res.err
+    assert stored() == [] and label_records() == []

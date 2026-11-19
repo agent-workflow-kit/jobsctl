@@ -72,3 +72,30 @@ def test_a_registered_pid_passes_the_guard() -> None:
     kill_guard.allow(FABRICATED)
     kill(FABRICATED, signal.SIGTERM)
     assert calls == [(FABRICATED, signal.SIGTERM)]
+
+
+def test_a_real_grandchild_is_a_descendant_and_an_unrelated_pid_is_not() -> None:
+    """The parent walk goes through the platform host: a process we did not spawn directly (a
+    child shell's `sleep`) is ours; PID 1 never is."""
+    child = subprocess.Popen(
+        ["sh", "-c", "sleep 600 & echo $!; wait"],
+        stdout=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        text=True,
+    )
+    grandchild = 0
+    try:
+        assert child.stdout is not None
+        grandchild = int(child.stdout.readline())
+        assert grandchild not in kill_guard._allowed  # only the walk can vouch for it
+        assert kill_guard._descendant_of_us(grandchild) is True
+        assert kill_guard._permitted(grandchild) is True
+        assert kill_guard._descendant_of_us(1) is False
+        assert kill_guard._permitted(1) is False
+    finally:
+        if grandchild:
+            os.kill(grandchild, signal.SIGKILL)  # a descendant: the guard lets it through
+        child.kill()
+        child.wait(timeout=15)
+        if child.stdout is not None:
+            child.stdout.close()

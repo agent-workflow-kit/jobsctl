@@ -34,8 +34,8 @@ FAKE_SHIM = textwrap.dedent(
     #!{python}
     import json, os, sys, time
     records, stop = {records!r}, {stop!r}
-    listing = {{}}
-    for name in os.listdir("/proc/self/fd"):
+    listing = {{}}  # empty where there is no /proc/self/fd (macOS): tests that read it skip
+    for name in os.listdir("/proc/self/fd") if os.path.isdir("/proc/self/fd") else []:
         try:
             listing[name] = os.readlink("/proc/self/fd/" + name)
         except OSError:

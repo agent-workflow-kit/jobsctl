@@ -388,7 +388,7 @@ $ jobsctl --json add --env API_TOKEN=x -- true
 {"error": {"code": "usage", "message": "--env API_TOKEN is a secret variable; use --pass-env API_TOKEN", "details": {"code": "secret_in_env", "variable": "API_TOKEN"}}}
 [exit 2]
 $ jobsctl add --label note=<secret> -- true
-jobsctl: error: the value of --label note contains a secret value
+jobsctl: error: the value of label note contains a secret value
 [exit 2]
 ```
 

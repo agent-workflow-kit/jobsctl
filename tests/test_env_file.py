@@ -11,6 +11,7 @@ import pytest
 
 from jobsctl import env_file as ef
 from jobsctl import gateway
+from tests.capabilities import needs_prctl
 
 SRC = str(Path(__file__).resolve().parent.parent / "src")
 
@@ -335,6 +336,7 @@ def test_hook_ignored_line_is_last_duplicate(secret_dir: Path) -> None:
 # dumpable
 
 
+@needs_prctl
 def test_prctl_dumpable_cleared_in_loading_process(secret_dir: Path) -> None:
     path = write(secret_dir, "A=1\n")
     code = (
@@ -345,8 +347,6 @@ def test_prctl_dumpable_cleared_in_loading_process(secret_dir: Path) -> None:
         "ef.load_env_file(sys.argv[2], check_ancestors_from=sys.argv[3]);"
         "print(before, libc.prctl(3, 0, 0, 0, 0))"
     )
-    if not sys.platform.startswith("linux"):
-        pytest.skip("Linux only")
     done = gateway.run(
         [sys.executable, "-c", code, SRC, str(path), str(secret_dir.parent)], timeout=60
     )

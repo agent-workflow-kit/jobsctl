@@ -53,7 +53,7 @@
                 "secret_in_env_name",
                 "secret_in_pass_env_name"
               ],
-              "description": "usage from add: secret_in_argv (with index), secret_in_env (with variable), secret_in_queue, secret_in_unique_key, secret_in_cwd, secret_in_label (with label, unless the key itself holds the secret), or secret_in_actor, secret_in_decision_id, secret_in_env_name, secret_in_pass_env_name (no further details: the name is the secret); from label add and label remove: secret_in_label (with label for a value hit, without it for a key hit)."
+              "description": "usage from add: secret_in_argv (with index), secret_in_env (with variable), secret_in_queue, secret_in_unique_key, secret_in_cwd, secret_in_label (also from label add; label is present only for a value hit, absent for a key hit or a joined hit), or secret_in_actor, secret_in_decision_id, secret_in_env_name, secret_in_pass_env_name (no further details: the name is the secret)."
             },
             "index": {
               "type": "integer",
@@ -66,7 +66,7 @@
             },
             "label": {
               "$ref": "../defs.json#/$defs/label_key",
-              "description": "secret_in_label: the key of the label whose value holds a secret; never the value (from add, label add and label remove). Absent when the key itself holds the secret."
+              "description": "secret_in_label: the key of the label whose value holds a secret; never the value (from add and label add). Absent for a key hit, a joined key=value hit, or a secret that starts in the key."
             }
           },
           "additionalProperties": {},
