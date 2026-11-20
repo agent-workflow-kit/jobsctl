@@ -23,6 +23,7 @@ Safety invariants, in pipeline order:
 from __future__ import annotations
 
 import codecs
+import sys
 from bisect import bisect_left
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -65,7 +66,27 @@ def render_tail(
     withholds what later output could still change (see the module docstring), so the start of
     a secret still being written is never shown.
     """
-    text = _decode(window, final)  # step 2
+    return render_decoded(
+        _decode(window, final),  # step 2
+        dropped=dropped,
+        masking=masking,
+        tail_bytes=tail_bytes,
+        tail_lines=tail_lines,
+        final=final,
+    )
+
+
+def render_decoded(
+    text: str,
+    *,
+    dropped: bool,
+    masking: MaskingSet,
+    tail_bytes: int,
+    tail_lines: int,
+    final: bool,
+) -> RenderedTail:
+    """Steps 1 and 3 to 6 on `text`, the window already decoded (step 2): what `render_tail`
+    does after decoding. A caller that decodes incrementally (`output_log`) starts here."""
     if not final:
         text = text[: incomplete_escape_start(text)]
     strips = _loose_strips(masking)
@@ -88,6 +109,97 @@ def render_tail(
     masked = replace_spans(text[start:end], _clip(spans, start, end))  # step 4
     text, cut = _cut(escape_unsafe(masked), tail_bytes, tail_lines)  # steps 5 and 6
     return RenderedTail(text, dropped or cut)
+
+
+@dataclass(frozen=True)
+class StableRender:
+    text: str
+    consumed: int  # characters of the input that `text` accounts for (the rest is to be kept)
+
+
+def render_stable(text: str, masking: MaskingSet) -> StableRender:
+    """The part of `text` that later output cannot change, rendered (steps 3 to 5, no cut), and
+    how many characters of `text` it used.
+
+    This is the live flush of `render_tail` (the end rules of the module docstring) with one
+    more rule, because the caller drops what was consumed and renders the rest again later:
+    the cut never falls inside a masked value found in the raw text (a stray escape introducer
+    before a secret, say, would otherwise be consumed and leave the secret's rest without its
+    first character) nor inside one found in the stripped text.
+    """
+    text = text[: incomplete_escape_start(text)]
+    stripped, origin, raw, spans = _analyse(text, masking)
+    end = _live_end(stripped, masking, spans)
+    return _stable(stripped, origin, raw, spans, end)
+
+
+def render_forced(text: str, masking: MaskingSet) -> StableRender:
+    """`render_stable` for a text that has no stable end yet but must be flushed (too long):
+    everything except the last (longest masked value) characters, which is kept as it could
+    still be the start of a secret (counted in the escape-stripped text, so escape sequences
+    after a secret's start cannot push it out). Nothing from an unfinished escape sequence on
+    is used. `consumed` is 0 when no cut is safe (the caller gives up on its output)."""
+    text = text[: incomplete_escape_start(text)]  # an open string escape may hide a secret's rest
+    stripped, origin, raw, spans = _analyse(text, masking)
+    end = max(len(stripped) - max(masking.longest_bytes, 1), 0)
+    return _stable(stripped, origin, raw, spans, end)
+
+
+def render_final(text: str, masking: MaskingSet) -> str:
+    """All of `text` (the end of a stream), rendered: steps 3 to 5, no cut."""
+    return render_decoded(
+        text, dropped=False, masking=masking, tail_bytes=sys.maxsize, tail_lines=sys.maxsize,
+        final=True,
+    ).text  # fmt: skip
+
+
+def _analyse(text: str, masking: MaskingSet) -> tuple[str, list[int], Spans, Spans]:
+    """`text` stripped of escapes, each character's index in `text`, the masked values found in
+    the raw text (spans of `text`) and those of the stripped text (spans of it, with the raw
+    ones located in it)."""
+    strips = _loose_strips(masking)
+    raw = _merge(masking.spans(text) + _decoded_spans(text, strips, masking))
+    stripped, origin, _ = _strip_split(text, 0, strip_escapes_mapped)
+    spans = _merge(masking.spans(stripped) + _locate(raw, origin))
+    return stripped, origin, raw, spans
+
+
+def _before_span(end: int, spans: Spans) -> int:
+    """`end`, moved back to the start of a masked value it would cut."""
+    for start, stop in spans:
+        if start < end < stop:
+            return start
+        if start >= end:
+            break
+    return end
+
+
+def _stable(
+    stripped: str,
+    origin: list[int],
+    raw: Spans,
+    spans: Spans,
+    end: int,
+) -> StableRender:
+    """Settle a cut `end` (an index of `stripped`) on one that neither a stripped nor a raw
+    masked value contains, and render what is before it. The cut is just after the last kept
+    character and never takes the escape characters that follow it: a stray introducer there
+    can be part of what a later secret is found through, so it stays in the pending text."""
+    while True:
+        end = _before_span(end, spans)
+        cut = origin[end - 1] + 1 if end > 0 else 0
+        for start, stop in raw:
+            if start < cut < stop:
+                cut = start
+                break
+            if start >= cut:
+                break
+        settled = bisect_left(origin, cut)
+        if settled == end:
+            break
+        end = settled
+    masked = replace_spans(stripped[:end], _clip(spans, 0, end))
+    return StableRender(escape_unsafe(masked), cut)
 
 
 def _strip_split(text: str, head: int, strip: Strip) -> tuple[str, list[int], int]:
@@ -188,7 +300,9 @@ def _live_end(text: str, masking: MaskingSet, spans: Spans) -> int:
     One character of `text` is at least one byte of a masked value's characters, so
     `longest_bytes - 1` characters cover every incomplete value at the end. A later byte can only
     change text after the last newline (`\\r` rewrites and escape sequences do not reach back
-    across a newline), so everything before the end is final.
+    across a newline), so everything before the end is final. The exception is a string escape
+    (OSC, DCS...) that spans a newline: the stream may then differ from the whole-stream render
+    (a stream equals `render_final` only without one); no masked value leaks either way.
     """
     end = text.rfind("\n") + 1
     end = min(end, max(len(text) - max(masking.longest_bytes - 1, 0), 0))

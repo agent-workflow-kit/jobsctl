@@ -25,6 +25,13 @@ tail_bytes: 16384
 tail_lines: 200
 # How often a running job's tail is written to the database.
 tail_flush_interval: 5s
+# Keep the whole output of each attempt in <state dir>/output/<id>.<n>.log (0600), masked and
+# sanitized like the tail; off by default. Masking is best-effort: the file can hold secrets that
+# are not masked (see "Residual risks" in docs/interface.md). Per queue overridable. The file is
+# stopped with a marker line at full_output_max_bytes of text (1..1073741824; the marker
+# line, about 80 bytes, comes on top) and deleted with its job.
+full_output_log: false
+full_output_max_bytes: 16777216
 # Variables whose values are masked as *** in output tails and hook output, besides every
 # --pass-env and env_file variable (values under 8 characters are not masked). `add` refuses
 # these names with --env, and argv or --env values containing a masked value.
@@ -126,6 +133,8 @@ queues: {}
 #     kill_grace: 1m    # default: the global value
 #     tail_bytes: 16384 # default: the global value
 #     tail_lines: 200   # default: the global value
+#     full_output_log: true        # default: the global value
+#     full_output_max_bytes: 1048576  # default: the global value
 #   reviews:
 #     cap: 3
 #   respond:

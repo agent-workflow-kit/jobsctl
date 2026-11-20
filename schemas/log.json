@@ -44,7 +44,8 @@
         "config_invalid",
         "runner_stuck",
         "reconcile",
-        "pass"
+        "pass",
+        "full_output_log_stopped"
       ]
     },
     "job_id": {
@@ -540,6 +541,51 @@
               ]
             }
           ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "full_output_log_stopped"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "required": [
+          "details"
+        ],
+        "properties": {
+          "details": {
+            "type": "object",
+            "required": [
+              "reason",
+              "bytes_written"
+            ],
+            "properties": {
+              "reason": {
+                "enum": [
+                  "cap_reached",
+                  "open_failed",
+                  "disk_full",
+                  "write_failed",
+                  "overflow",
+                  "internal"
+                ],
+                "description": "Why the full output log stopped (interface: Full output log)."
+              },
+              "bytes_written": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Bytes of text written to the file before it stopped."
+              }
+            },
+            "additionalProperties": false
+          }
         }
       }
     }

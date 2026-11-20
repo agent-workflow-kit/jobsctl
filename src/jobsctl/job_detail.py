@@ -17,6 +17,7 @@ from typing import Any, Literal
 from jobsctl.config import Config
 from jobsctl.errors import JobsctlError
 from jobsctl.job_view import attempt_object, current_attempt, job_object
+from jobsctl.output_log import find_log
 from jobsctl.output_store import load_tail, tail_bytes
 from jobsctl.store_db import Tx
 from jobsctl.textsafe import sanitize
@@ -40,12 +41,27 @@ def output_object(tx: Tx, job_id: str, n: int, *, quiet: bool = False) -> dict[s
         return None
     if stored is None:
         return None
-    return {
-        "tail": stored.snapshot.text,
-        "bytes_seen": stored.snapshot.bytes_seen,
-        "truncated": stored.snapshot.truncated,
-        "updated_at": stored.updated_at,
-    }
+    return _with_log(
+        tx,
+        job_id,
+        n,
+        {
+            "tail": stored.snapshot.text,
+            "bytes_seen": stored.snapshot.bytes_seen,
+            "truncated": stored.snapshot.truncated,
+            "updated_at": stored.updated_at,
+        },
+    )
+
+
+def _with_log(tx: Tx, job_id: str, n: int, output: dict[str, Any]) -> dict[str, Any]:
+    """`output` plus `log` (the full output log's path, size and whether the cap stopped it)
+    when the attempt has a log file; otherwise `output` unchanged, so nothing differs while the
+    feature is off."""
+    found = find_log(tx.store.paths, job_id, n)
+    if found is not None:
+        output["log"] = {"path": found.path, "bytes": found.bytes, "truncated": found.truncated}
+    return output
 
 
 def shown_output_object(tx: Tx, job_id: str, n: int) -> dict[str, Any] | None:
@@ -57,14 +73,19 @@ def shown_output_object(tx: Tx, job_id: str, n: int) -> dict[str, Any] | None:
     row = tx.one("SELECT * FROM outputs WHERE job_id = ? AND n = ?", [job_id, n])
     if row is None:
         return None
-    return {
-        "tail": sanitize(
-            tail_bytes(row["tail"], bool(row["compressed"])).decode("utf-8", "backslashreplace")
-        ),
-        "bytes_seen": row["bytes_seen"],
-        "truncated": bool(row["truncated"]),
-        "updated_at": row["updated_at"],
-    }
+    return _with_log(
+        tx,
+        job_id,
+        n,
+        {
+            "tail": sanitize(
+                tail_bytes(row["tail"], bool(row["compressed"])).decode("utf-8", "backslashreplace")
+            ),
+            "bytes_seen": row["bytes_seen"],
+            "truncated": bool(row["truncated"]),
+            "updated_at": row["updated_at"],
+        },
+    )
 
 
 def require_attempt(tx: Tx, job_id: str, attempt: int) -> None:

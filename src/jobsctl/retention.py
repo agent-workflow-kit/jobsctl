@@ -37,6 +37,7 @@ from typing import Final
 
 from jobsctl import gateway
 from jobsctl.log_writer import RecordWriter
+from jobsctl.output_log import LOG_FILE_RE
 from jobsctl.store_db import Store, Tx
 from jobsctl.store_dir import StatePaths
 from jobsctl.store_schema import TERMINAL_STATUSES
@@ -52,6 +53,9 @@ ORPHAN_SCAN_CAP: Final = 10000  # shims/ entries looked at per orphan sweep
 
 _ID_GLOB = "jb-" + "[a-z2-7]" * 8
 _FILE_RE = re.compile(r"(jb-[a-z2-7]{8})(?:\.log|\.[0-9]+\.result(?:\.tmp-[0-9a-f]{16})?)")
+# Directories holding a job's files, with the pattern of their names (group 1 is the job id): the
+# shim's diagnostics and result files, and the full output logs (D55).
+_JOB_FILE_DIRS: Final = (("shims", _FILE_RE), ("output", LOG_FILE_RE))
 _TERMINAL_SQL = ", ".join(f"'{s}'" for s in TERMINAL_STATUSES)
 
 
@@ -164,38 +168,53 @@ def _unlink(fd: int, name: str) -> bool:
 
 
 def remove_job_files(paths: StatePaths, ids: Collection[str]) -> None:
-    """Remove `shims/<id>.log` and `shims/<id>.<n>.result` of pruned jobs (best effort), found
-    by listing the directory."""
+    """Remove `shims/<id>.log` and `shims/<id>.<n>.result` of pruned jobs, and their full output
+    logs `output/<id>.<n>.log[.truncated]` (best effort), found by listing the directories."""
     wanted = set(ids)
-    with _anchored(paths, "shims") as fd:
-        if fd is None:
-            return
-        try:
-            with os.scandir(fd) as entries:
-                names = [
-                    entry.name
-                    for entry in entries
-                    if (m := _FILE_RE.fullmatch(entry.name)) and m.group(1) in wanted
-                ]
-        except OSError:
-            return
-        for name in names:
-            _unlink(fd, name)
+    for sub, pattern in _JOB_FILE_DIRS:
+        with _anchored(paths, sub) as fd:
+            if fd is None:
+                continue
+            try:
+                with os.scandir(fd) as entries:
+                    names = [
+                        entry.name
+                        for entry in entries
+                        if (m := pattern.fullmatch(entry.name)) and m.group(1) in wanted
+                    ]
+            except OSError:
+                continue
+            for name in names:
+                _unlink(fd, name)
 
 
 def sweep_orphans(
     store: Store, *, cap: int = ORPHAN_SCAN_CAP, out_of_time: Callable[[], bool] | None = None
 ) -> int:
-    """Remove job files in `shims/` whose id is in `pruned_ids` (left by a crash between a
-    commit and the removal); looks at no more than `cap` matching entries. Returns the count."""
-    with _anchored(store.paths, "shims") as fd:
+    """Remove job files in `shims/` and `output/` whose id is in `pruned_ids` (left by a crash
+    between a commit and the removal); looks at no more than `cap` matching entries per
+    directory. Returns the count."""
+    removed = 0
+    for sub, pattern in _JOB_FILE_DIRS:
+        removed += _sweep_dir(store, sub, pattern, cap, out_of_time)
+    return removed
+
+
+def _sweep_dir(
+    store: Store,
+    sub: str,
+    pattern: re.Pattern[str],
+    cap: int,
+    out_of_time: Callable[[], bool] | None,
+) -> int:
+    with _anchored(store.paths, sub) as fd:
         if fd is None:
             return 0
         found: list[tuple[str, str]] = []
         try:
             with os.scandir(fd) as entries:
                 for entry in entries:
-                    m = _FILE_RE.fullmatch(entry.name)
+                    m = pattern.fullmatch(entry.name)
                     if m:
                         if len(found) >= cap:
                             break

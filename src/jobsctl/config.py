@@ -126,6 +126,7 @@ EnvPattern = Annotated[str, Str(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,127}\*?$")]
 Cap = Annotated[int, Field(ge=0, le=INT_MAX)]
 TailBytes = Annotated[int, Field(ge=1, le=262144)]
 TailLines = Annotated[int, Field(ge=1, le=INT_MAX)]
+FullOutputMaxBytes = Annotated[int, Field(ge=1, le=1 << 30)]
 Text128K = Annotated[
     str, AfterValidator(_no_nul), AfterValidator(_utf8), AfterValidator(_at_most_128k)
 ]
@@ -231,6 +232,8 @@ class QueueConfig(_Model):
     kill_grace: Annotated[int | None, BeforeValidator(_seconds)] = None
     tail_bytes: Annotated[TailBytes | None, BeforeValidator(_not_null)] = None
     tail_lines: Annotated[TailLines | None, BeforeValidator(_not_null)] = None
+    full_output_log: Annotated[bool | None, BeforeValidator(_not_null)] = None
+    full_output_max_bytes: Annotated[FullOutputMaxBytes | None, BeforeValidator(_not_null)] = None
 
 
 @dataclass(frozen=True)
@@ -245,6 +248,8 @@ class QueueSettings:
     kill_grace: int
     tail_bytes: int
     tail_lines: int
+    full_output_log: bool
+    full_output_max_bytes: int
 
 
 @dataclass(frozen=True)
@@ -267,6 +272,8 @@ class Config(_Model):
     tail_bytes: TailBytes = 16384
     tail_lines: TailLines = 200
     tail_flush_interval: Duration = 5
+    full_output_log: bool = False
+    full_output_max_bytes: FullOutputMaxBytes = 16 * 1024 * 1024
     mask_env: Annotated[list[EnvName], AfterValidator(_unique)] = Field(default_factory=list)
     retention: OptionalDuration = 30 * 86400
     env: EnvConfig = Field(default_factory=EnvConfig)
@@ -295,6 +302,14 @@ class Config(_Model):
             kill_grace=entry.kill_grace if entry.kill_grace is not None else self.kill_grace,
             tail_bytes=entry.tail_bytes if entry.tail_bytes is not None else self.tail_bytes,
             tail_lines=entry.tail_lines if entry.tail_lines is not None else self.tail_lines,
+            full_output_log=(
+                entry.full_output_log if entry.full_output_log is not None else self.full_output_log
+            ),
+            full_output_max_bytes=(
+                entry.full_output_max_bytes
+                if entry.full_output_max_bytes is not None
+                else self.full_output_max_bytes
+            ),
         )
 
     def unknown_queue_selectors(

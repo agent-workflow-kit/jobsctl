@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from jobsctl.env_mask import MaskingSet
+from jobsctl.output_log import FullOutputLog
 from jobsctl.output_tail import render_tail
 
 WINDOW_MARGIN: Final = 4096
@@ -25,8 +26,16 @@ class TailSnapshot:
 
 
 class OutputCapture:
-    def __init__(self, masking: MaskingSet, *, tail_bytes: int, tail_lines: int) -> None:
+    def __init__(
+        self,
+        masking: MaskingSet,
+        *,
+        tail_bytes: int,
+        tail_lines: int,
+        log: FullOutputLog | None = None,
+    ) -> None:
         self._masking = masking
+        self._log = log
         self._tail_bytes = tail_bytes
         self._tail_lines = tail_lines
         self.window_size = tail_bytes + masking.longest_bytes + WINDOW_MARGIN
@@ -43,6 +52,8 @@ class OutputCapture:
         if not isinstance(data, bytes | bytearray | memoryview):
             raise TypeError("output is bytes")
         self.bytes_seen += len(data)
+        if self._log is not None:
+            self._log.feed(bytes(data))  # never raises: a log failure stops the log only
         if len(data) >= self.window_size:
             self.dropped = self.dropped or len(data) > self.window_size or bool(self._buf)
             self._buf = bytearray(data[len(data) - self.window_size :])
@@ -52,6 +63,11 @@ class OutputCapture:
         if excess > 0:
             del self._buf[:excess]
             self.dropped = True
+
+    def close_log(self) -> None:
+        """Write the rest of the full output log (after the drain) and close it."""
+        if self._log is not None:
+            self._log.finish()
 
     def snapshot(self, *, final: bool) -> TailSnapshot:
         """The masked, sanitized tail. A live snapshot (`final=False`) withholds the end of the

@@ -294,7 +294,7 @@ The entry runs one `jobsctl run` pass every minute. It uses the absolute path of
 
 ### Output, timeouts and kill grace
 
-Each attempt keeps a masked, sanitized tail (default last 16 KiB or 200 lines, whichever is smaller; written to the database every `tail_flush_interval`). Full output is not stored; have the job write its own log file if you need it. A queue or job timeout (`timeout`, `add --timeout DURATION|none`) starts counting when the job enters `running` and ends it `failed` (`timeout`) after the signal sequence. `kill_grace` (default 30 s) is the wait per signal step ([Timeouts](docs/interface.md#timeouts), [Signal sequence](docs/interface.md#signal-sequence)).
+Each attempt keeps a masked, sanitized tail (default last 16 KiB or 200 lines, whichever is smaller; written to the database every `tail_flush_interval`). Full output is stored only if you opt in with `full_output_log: true` (per queue overridable): a masked, sanitized file per attempt under `<state dir>/output/`, capped by `full_output_max_bytes` and deleted with its job ([Full output log](docs/interface.md#full-output-log)); otherwise have the job write its own log file if you need it. A queue or job timeout (`timeout`, `add --timeout DURATION|none`) starts counting when the job enters `running` and ends it `failed` (`timeout`) after the signal sequence. `kill_grace` (default 30 s) is the wait per signal step ([Timeouts](docs/interface.md#timeouts), [Signal sequence](docs/interface.md#signal-sequence)).
 
 ### Hooks and the pre-start gate
 
