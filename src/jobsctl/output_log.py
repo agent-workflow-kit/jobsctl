@@ -51,6 +51,10 @@ def marker_line(max_bytes: int) -> str:
     return f"[jobsctl: full output log truncated at {max_bytes} bytes (full_output_max_bytes)]\n"
 
 
+def _reason(exc: OSError) -> str:
+    return "disk_full" if exc.errno in (errno.ENOSPC, errno.EDQUOT, errno.EFBIG) else "write_failed"
+
+
 def log_name(job_id: str, attempt: int, *, truncated: bool = False) -> str:
     """The file name for a job id and attempt number; both are checked, so no job data can
     steer the path."""
@@ -71,6 +75,8 @@ def _open_output_dir(paths: StatePaths, *, create: bool) -> int:
                 os.mkdir(paths.output.name, 0o700, dir_fd=root)
             except FileExistsError:
                 pass
+            else:  # a restrictive umask can leave the new directory unopenable
+                os.chmod(paths.output.name, 0o700, dir_fd=root, follow_symlinks=False)
         fd = os.open(paths.output.name, _DIR_FLAGS, dir_fd=root)
     finally:
         os.close(root)
@@ -181,11 +187,7 @@ class FullOutputLog:
         except StreamOverflow:
             self._stop("overflow")
         except OSError as exc:
-            self._stop(
-                "disk_full"
-                if exc.errno in (errno.ENOSPC, errno.EDQUOT, errno.EFBIG)
-                else "write_failed"
-            )
+            self._stop(_reason(exc))
         except Exception:  # the log must never fail the job
             self._stop("internal")
 
@@ -195,11 +197,7 @@ class FullOutputLog:
             try:
                 self._write(self._masker.finish())
             except OSError as exc:
-                self._stop(
-                    "disk_full"
-                    if exc.errno in (errno.ENOSPC, errno.EDQUOT, errno.EFBIG)
-                    else "write_failed"
-                )
+                self._stop(_reason(exc))
             except Exception:
                 self._stop("internal")
         self._close()
@@ -239,17 +237,24 @@ class FullOutputLog:
         except OSError as exc:
             self._close()
             self._stopped = True
-            self._on_stop(
-                "disk_full" if exc.errno in (errno.ENOSPC, errno.EDQUOT) else "open_failed", 0
-            )
+            try:
+                self._on_stop(
+                    "disk_full" if exc.errno in (errno.ENOSPC, errno.EDQUOT) else "open_failed", 0
+                )
+            except Exception:  # reporting is best effort
+                pass
             raise _Stopped from exc
 
     def _truncate(self) -> None:
         """The cap is reached: the marker, then no more writing; the name says so."""
         marker = marker_line(self._max)
         tail = marker if self._ends_with_newline else "\n" + marker
+        reason = "cap_reached"
         try:
             self._put(tail.encode("utf-8"))
+        except OSError as exc:  # the rename below is still tried: it is what `show` reads
+            reason = _reason(exc)
+        try:
             if self._dir_fd is not None:
                 os.rename(
                     self._name,
@@ -257,15 +262,20 @@ class FullOutputLog:
                     src_dir_fd=self._dir_fd,
                     dst_dir_fd=self._dir_fd,
                 )
-        finally:
-            self._stop("cap_reached")
+        except OSError as exc:
+            if reason == "cap_reached":
+                reason = _reason(exc)
+        self._stop(reason)
 
     def _stop(self, reason: str) -> None:
         if self._stopped:
             return
         self._stopped = True
         self._close()
-        self._on_stop(reason, self._written)
+        try:
+            self._on_stop(reason, self._written)
+        except Exception:  # reporting is best effort: it never fails the log's caller
+            pass
 
     def _close(self) -> None:
         for attr in ("_fd", "_dir_fd"):

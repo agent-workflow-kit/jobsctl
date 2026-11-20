@@ -130,17 +130,19 @@ def render_stable(text: str, masking: MaskingSet) -> StableRender:
     text = text[: incomplete_escape_start(text)]
     stripped, origin, raw, spans = _analyse(text, masking)
     end = _live_end(stripped, masking, spans)
-    return _stable(stripped, origin, raw, spans, end, len(text))
+    return _stable(stripped, origin, raw, spans, end)
 
 
 def render_forced(text: str, masking: MaskingSet) -> StableRender:
     """`render_stable` for a text that has no stable end yet but must be flushed (too long):
     everything except the last (longest masked value) characters, which is kept as it could
-    still be the start of a secret. An unfinished escape sequence may be cut. `consumed` is 0
-    when no cut is safe (the caller gives up on its output)."""
-    limit = max(len(text) - max(masking.longest_bytes, 1), 0)
+    still be the start of a secret (counted in the escape-stripped text, so escape sequences
+    after a secret's start cannot push it out). Nothing from an unfinished escape sequence on
+    is used. `consumed` is 0 when no cut is safe (the caller gives up on its output)."""
+    text = text[: incomplete_escape_start(text)]  # an open string escape may hide a secret's rest
     stripped, origin, raw, spans = _analyse(text, masking)
-    return _stable(stripped, origin, raw, spans, bisect_left(origin, limit), limit)
+    end = max(len(stripped) - max(masking.longest_bytes, 1), 0)
+    return _stable(stripped, origin, raw, spans, end)
 
 
 def render_final(text: str, masking: MaskingSet) -> str:
@@ -178,14 +180,14 @@ def _stable(
     raw: Spans,
     spans: Spans,
     end: int,
-    limit: int,
 ) -> StableRender:
     """Settle a cut `end` (an index of `stripped`) on one that neither a stripped nor a raw
-    masked value contains, and render what is before it. `limit` is the cut when `end` is the
-    end of the stripped text."""
+    masked value contains, and render what is before it. The cut is just after the last kept
+    character and never takes the escape characters that follow it: a stray introducer there
+    can be part of what a later secret is found through, so it stays in the pending text."""
     while True:
         end = _before_span(end, spans)
-        cut = min(origin[end], limit) if end < len(origin) else limit
+        cut = origin[end - 1] + 1 if end > 0 else 0
         for start, stop in raw:
             if start < cut < stop:
                 cut = start
@@ -298,7 +300,9 @@ def _live_end(text: str, masking: MaskingSet, spans: Spans) -> int:
     One character of `text` is at least one byte of a masked value's characters, so
     `longest_bytes - 1` characters cover every incomplete value at the end. A later byte can only
     change text after the last newline (`\\r` rewrites and escape sequences do not reach back
-    across a newline), so everything before the end is final.
+    across a newline), so everything before the end is final. The exception is a string escape
+    (OSC, DCS...) that spans a newline: the stream may then differ from the whole-stream render
+    (a stream equals `render_final` only without one); no masked value leaks either way.
     """
     end = text.rfind("\n") + 1
     end = min(end, max(len(text) - max(masking.longest_bytes - 1, 0), 0))

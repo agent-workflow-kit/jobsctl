@@ -68,7 +68,7 @@
       "minimum": 1,
       "maximum": 1073741824,
       "default": 16777216,
-      "description": "Size cap of one attempt's full output log; per queue overridable."
+      "description": "Cap on the text written to one attempt's full output log (the file can exceed it by the marker line, about 80 bytes); per queue overridable."
     },
     "tail_flush_interval": {
       "type": "string",

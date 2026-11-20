@@ -230,7 +230,10 @@ class Shim:
         try:
             action()
         except Exception as exc:  # a log that is not written never stops the supervision
-            self._diag(f"a log record was not written ({type(exc).__name__})")
+            try:
+                self._diag(f"a log record was not written ({type(exc).__name__})")
+            except Exception:  # stderr may be full or closed as well
+                pass
 
     def _log(
         self, event: str, view: ClaimView, *, level: str = "info", message: str, **details: Any
@@ -252,7 +255,7 @@ class Shim:
     def _log_stopped(self, view: ClaimView, reason: str, written: int) -> None:
         """The full output log stopped (the cap, a full disk, an unsafe path...): the job goes
         on, its tail is unaffected."""
-        self._diag(f"the full output log stopped ({reason})")
+        self._best_effort(lambda: self._diag(f"the full output log stopped ({reason})"))
         self._log(
             "full_output_log_stopped",
             view,

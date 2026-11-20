@@ -291,3 +291,89 @@ def test_an_overflow_stops_the_log_instead_of_writing_unsafe_text(paths: StatePa
     assert [r for r, _ in stops] == ["overflow"]
     if log.path.exists():
         assert "abcdefgh" not in log.path.read_text()
+
+
+def _capped(paths: StatePaths, stops: list[tuple[str, int]]) -> FullOutputLog:
+    log = make(paths, stops, max_bytes=20)
+    log.feed(b"0123456789\n" * 5)
+    log.finish()
+    return log
+
+
+def test_a_failing_marker_write_reports_its_reason_and_still_renames(
+    paths: StatePaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = output_log._os_write
+    calls: list[int] = []
+
+    def flaky(fd: int, data: memoryview) -> int:
+        calls.append(len(data))
+        if b"[jobsctl" in bytes(data):
+            raise OSError(errno.ENOSPC, "full")
+        return real(fd, data)
+
+    monkeypatch.setattr(output_log, "_os_write", flaky)
+    stops: list[tuple[str, int]] = []
+    _capped(paths, stops)
+    assert [r for r, _ in stops] == ["disk_full"]
+    assert (paths.output / f"{JOB}.1.log.truncated").exists()
+    assert find_log(paths, JOB, 1) is not None and find_log(paths, JOB, 1).truncated  # type: ignore[union-attr]
+
+
+def test_a_failing_rename_reports_write_failed_and_does_not_raise(
+    paths: StatePaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failing(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.EIO, "io")
+
+    monkeypatch.setattr(output_log.os, "rename", failing)
+    stops: list[tuple[str, int]] = []
+    log = _capped(paths, stops)
+    assert [r for r, _ in stops] == ["write_failed"]
+    assert log.path.read_text().endswith(marker_line(20))
+
+
+def test_an_on_stop_hook_that_raises_never_propagates(paths: StatePaths) -> None:
+    def boom(reason: str, written: int) -> None:
+        raise OSError(errno.ENOSPC, "diag")
+
+    log = FullOutputLog(paths, JOB, 1, MASKING, max_bytes=20, on_stop=boom)
+    log.feed(b"0123456789\n" * 5)
+    log.finish()
+    log.finish()
+    assert not log.active
+    chain = masking_set_of(["abcdefgh", "efghijkl", "ijklmnop", "mnopabcd"])
+    over = FullOutputLog(paths, "jb-bbbbbbbb", 1, chain, max_pending=40, on_stop=boom)
+    for _ in range(100):
+        over.feed(b"abcdefghijklmnop" * 4)  # an overflow stop
+    over.finish()
+    assert not over.active
+
+
+def test_an_on_stop_hook_that_raises_does_not_break_a_failed_write(
+    paths: StatePaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(reason: str, written: int) -> None:
+        raise OSError(errno.ENOSPC, "diag")
+
+    def failing(fd: int, data: object) -> int:
+        raise OSError(errno.ENOSPC, "full")
+
+    monkeypatch.setattr(output_log, "_os_write", failing)
+    log = FullOutputLog(paths, JOB, 1, MASKING, on_stop=boom)
+    log.feed(b"x\n" * 10)
+    log.finish()
+
+
+@pytest.mark.parametrize("umask", [0o777, 0o577, 0o277])
+def test_a_new_output_directory_is_usable_under_a_restrictive_umask(
+    paths: StatePaths, umask: int
+) -> None:
+    os.umask(umask)
+    stops: list[tuple[str, int]] = []
+    log = make(paths, stops)
+    log.feed(b"hello\n")
+    log.finish()
+    assert stops == []
+    assert mode(paths.output) == 0o700 and mode(log.path) == 0o600
+    assert log.path.read_text() == "hello\n"

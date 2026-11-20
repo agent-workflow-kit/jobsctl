@@ -2994,6 +2994,16 @@
           "type": "integer",
           "minimum": 1,
           "description": "Absent: the global tail_lines."
+        },
+        "full_output_log": {
+          "type": "boolean",
+          "description": "Absent: the global full_output_log."
+        },
+        "full_output_max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1073741824,
+          "description": "Absent: the global full_output_max_bytes."
         }
       },
       "additionalProperties": false,

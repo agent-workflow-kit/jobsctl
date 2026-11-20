@@ -8,9 +8,11 @@ import stat
 from collections.abc import Iterator
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from jsonschema import ValidationError as JsonSchemaError
 from pydantic import ValidationError
 
 from jobsctl import output_log
@@ -216,3 +218,35 @@ def test_defaults() -> None:
     cfg = Config()
     settings = cfg.queue("anything")
     assert settings.full_output_log is False and settings.full_output_max_bytes == 16 * 1024 * 1024
+
+
+def test_a_log_stopped_report_with_stderr_on_a_full_disk_does_not_raise(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_claimed(store, ["true"], queue="q")
+    shim = make_shim(store, Config.model_validate({"env_file": ENV_FILE[0]}))
+    view = SimpleNamespace(queue="q", attempt=1)
+
+    class Full:
+        def write(self, text: str) -> int:
+            raise OSError(errno.ENOSPC, "no space")
+
+        def flush(self) -> None:
+            raise OSError(errno.ENOSPC, "no space")
+
+    monkeypatch.setattr("sys.stderr", Full())
+    shim._log_stopped(view, "disk_full", 0)  # type: ignore[arg-type]
+
+
+def test_the_stopped_record_details_are_pinned_by_the_log_schema(store: Store) -> None:
+    run_job(
+        store,
+        "yes 0123456789abcdef | head -c 20000",
+        {"full_output_log": True, "full_output_max_bytes": 100},
+    )
+    [rec] = log_records("full_output_log_stopped")
+    validate_against("log.json", rec)
+    for bad in ({**rec["details"], "reason": "nope"}, {"reason": "cap_reached"},
+                {**rec["details"], "extra": 1}):  # fmt: skip
+        with pytest.raises(JsonSchemaError):
+            validate_against("log.json", {**rec, "details": bad})

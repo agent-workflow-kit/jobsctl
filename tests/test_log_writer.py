@@ -121,9 +121,13 @@ def test_log_records_validate(writer: RecordWriter, store: Store) -> None:
     writer.log(
         "label", fields={"job_id": JOB, "queue": "q", "actor": "human:me", "decision_ids": []}
     )
+    writer.log("full_output_log_stopped", level="warn", fields=STOPPED)
     writer.log("env_file_unsafe", level="warn", fields={"message": "mode 0644"})
     writer.log("unique_key_reused", fields={"job_id": JOB, "details": {"argv_sha256": "0" * 64}})
-    for event in sorted(LOG_EVENTS - {"transition", "reorder", "hook_ran", "reconcile", "label"}):
+    for event in sorted(
+        LOG_EVENTS
+        - {"transition", "reorder", "hook_ran", "reconcile", "label", "full_output_log_stopped"}
+    ):
         writer.log(event, level="error")
     for rec in records(store, "log.jsonl"):
         validate_against("log.json", rec)
@@ -814,12 +818,14 @@ HOOK_RAN: dict[str, Any] = {
 }
 LABEL: dict[str, Any] = {"job_id": JOB, "queue": "q", "actor": "human:me", "decision_ids": []}
 RECONCILE: dict[str, Any] = {"job_id": None, "finding": "pruned", "action": "deleted"}
+STOPPED: dict[str, Any] = {"details": {"reason": "cap_reached", "bytes_written": 0}}
 MINIMAL: dict[str, dict[str, Any]] = {
     "transition": TRANSITION,
     "reorder": LABEL,
     "label": LABEL,
     "hook_ran": HOOK_RAN,
     "reconcile": RECONCILE,
+    "full_output_log_stopped": STOPPED,
 }
 
 
