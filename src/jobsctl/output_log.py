@@ -76,7 +76,11 @@ def _open_output_dir(paths: StatePaths, *, create: bool) -> int:
             except FileExistsError:
                 pass
             else:  # a restrictive umask can leave the new directory unopenable
-                os.chmod(paths.output.name, 0o700, dir_fd=root, follow_symlinks=False)
+                try:
+                    os.chmod(paths.output.name, 0o700, dir_fd=root, follow_symlinks=False)
+                except (OSError, NotImplementedError):
+                    # no nofollow chmod here; following is harmless right after our own mkdir
+                    os.chmod(paths.output.name, 0o700, dir_fd=root)
         fd = os.open(paths.output.name, _DIR_FLAGS, dir_fd=root)
     finally:
         os.close(root)

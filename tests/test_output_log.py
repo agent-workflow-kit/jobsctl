@@ -7,6 +7,7 @@ import os
 import stat
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -64,6 +65,25 @@ def test_a_restrictive_umask_does_not_remove_owner_bits(paths: StatePaths) -> No
     log.feed(b"hello\n")
     log.finish()
     assert mode(paths.output) == 0o700 and mode(log.path) == 0o600
+    assert log.path.read_text() == "hello\n"
+
+
+def test_chmod_without_nofollow_support_falls_back(
+    paths: StatePaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_chmod = os.chmod
+
+    def chmod(*args: Any, **kwargs: Any) -> None:
+        if kwargs.get("follow_symlinks") is False:
+            raise NotImplementedError("no AT_SYMLINK_NOFOLLOW chmod")
+        real_chmod(*args, **kwargs)
+
+    monkeypatch.setattr(os, "chmod", chmod)
+    os.umask(0o277)
+    log = make(paths)
+    log.feed(b"hello\n")
+    log.finish()
+    assert mode(paths.output) == 0o700
     assert log.path.read_text() == "hello\n"
 
 
