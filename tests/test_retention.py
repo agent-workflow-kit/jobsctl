@@ -808,3 +808,66 @@ def test_a_result_temp_file_left_by_a_dead_shim_is_removed_with_its_job(store: S
     (store.paths.shims / f"{jid(1)}.2.result.tmp-short").write_text("x")  # not ours: kept
     run(store)
     assert os.listdir(store.paths.shims) == [f"{jid(1)}.2.result.tmp-short"]
+
+
+# -- full output logs (D55) --------------------------------------------------------------------
+
+
+def log_files(job: str) -> list[str]:
+    return [f"{job}.1.log", f"{job}.2.log.truncated", f"{job}.30.log"]
+
+
+def make_output_dir(store: Store) -> Path:
+    out = store.paths.output
+    out.mkdir(mode=0o700)
+    return out
+
+
+def test_prune_removes_the_output_logs_of_pruned_jobs_only(store: Store) -> None:
+    out = make_output_dir(store)
+    add_job(store, jid(1), attempts=2)
+    add_job(store, jid(2), age=DAY, attempts=1)
+    for name in [*log_files(jid(1)), *log_files(jid(2)), "other.log", f"{jid(1)}.log"]:
+        (out / name).write_text("x")
+    run(store)
+    assert sorted(os.listdir(out)) == sorted([*log_files(jid(2)), "other.log", f"{jid(1)}.log"])
+
+
+def test_prune_without_an_output_directory_is_fine(store: Store) -> None:
+    add_job(store, jid(1))
+    assert not store.paths.output.exists()
+    run(store)
+    assert not store.paths.output.exists()
+
+
+def test_output_log_symlinks_are_removed_but_never_followed(store: Store, tmp_path: Path) -> None:
+    out = make_output_dir(store)
+    add_job(store, jid(1), attempts=1)
+    target = tmp_path / "precious"
+    target.write_text("keep")
+    os.symlink(target, out / f"{jid(1)}.1.log")
+    run(store)
+    assert os.listdir(out) == [] and target.read_text() == "keep"
+
+
+def test_a_replaced_output_directory_is_not_followed(store: Store, tmp_path: Path) -> None:
+    out = make_output_dir(store)
+    add_job(store, jid(1), attempts=1)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / f"{jid(1)}.1.log").write_text("keep")
+    out.rmdir()
+    os.symlink(outside, out)
+    run(store)
+    assert (outside / f"{jid(1)}.1.log").read_text() == "keep"
+
+
+def test_orphan_output_logs_of_pruned_ids_are_swept(store: Store) -> None:
+    out = make_output_dir(store)
+    add_job(store, jid(2), age=DAY)  # live job: untouched
+    with store.write() as tx:
+        tx.execute("INSERT INTO pruned_ids (id) VALUES (?)", [jid(1)])
+    for name in (*log_files(jid(1)), f"{jid(2)}.1.log", f"{jid(3)}.1.log"):
+        (out / name).write_text("x")
+    assert retention.sweep_orphans(store, cap=100) == 3
+    assert sorted(os.listdir(out)) == sorted([f"{jid(2)}.1.log", f"{jid(3)}.1.log"])

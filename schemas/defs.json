@@ -2601,6 +2601,31 @@
         "updated_at": {
           "$ref": "#/$defs/ts",
           "description": "When the tail was last flushed."
+        },
+        "log": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Absolute path of the attempt's full output log file (mode 0600). Built from the state directory, the job id and the attempt number."
+            },
+            "bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "The file's size now (a running job's log still grows)."
+            },
+            "truncated": {
+              "type": "boolean",
+              "description": "true when the log stopped at full_output_max_bytes: later output is not in the file."
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "bytes",
+            "truncated"
+          ],
+          "description": "Present only when the attempt has a full output log file (config full_output_log). The file's content is untrusted, masked and sanitized like the tail; masking is best-effort (interface: Residual risks)."
         }
       },
       "additionalProperties": false,

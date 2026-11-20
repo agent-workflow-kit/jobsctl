@@ -31,7 +31,7 @@ LOG_EVENTS: Final = frozenset(
         "env_file_line_ignored", "env_file_line_invalid", "path_entry_dropped",
         "pass_env_undefined", "missing_env", "unique_key_reused", "hook_ran",
         "invalid_decision_id", "unknown_queue_selector", "config_invalid", "runner_stuck",
-        "reconcile", "pass",
+        "reconcile", "pass", "full_output_log_stopped",
     }
 )  # fmt: skip
 AUDIT_ACTIONS: Final = frozenset(

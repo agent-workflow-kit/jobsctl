@@ -44,7 +44,8 @@
         "config_invalid",
         "runner_stuck",
         "reconcile",
-        "pass"
+        "pass",
+        "full_output_log_stopped"
       ]
     },
     "job_id": {

@@ -54,6 +54,7 @@ from jobsctl.leases import (
 from jobsctl.leftovers import Leftovers, count_leftovers
 from jobsctl.log_writer import RecordWriter
 from jobsctl.output_capture import OutputCapture, TailSnapshot
+from jobsctl.output_log import FullOutputLog
 from jobsctl.pre_start import PreStart, Verdict
 from jobsctl.proc_host import Host, default_host
 from jobsctl.proc_identity import Identity, Liveness, check_identity
@@ -246,6 +247,19 @@ class Shim:
                     "details": details,
                 },
             )
+        )
+
+    def _log_stopped(self, view: ClaimView, reason: str, written: int) -> None:
+        """The full output log stopped (the cap, a full disk, an unsafe path...): the job goes
+        on, its tail is unaffected."""
+        self._diag(f"the full output log stopped ({reason})")
+        self._log(
+            "full_output_log_stopped",
+            view,
+            level="warn",
+            message=f"the full output log stopped: {reason}",
+            reason=reason,
+            bytes_written=written,
         )
 
     def _retrying(self, action: Callable[[], Any], seconds: float) -> Any:
@@ -597,8 +611,18 @@ class Shim:
             self._fail(view, "spawn_failed", exit_record=SPAWN_FAILED_EXIT)
             return 0
         settings = self.config.queue(view.queue)
+        log = None
+        if settings.full_output_log:
+            log = FullOutputLog(
+                self.store.paths,
+                self.job_id,
+                view.attempt,
+                masking,
+                max_bytes=settings.full_output_max_bytes,
+                on_stop=lambda reason, written: self._log_stopped(view, reason, written),
+            )
         capture = OutputCapture(
-            masking, tail_bytes=settings.tail_bytes, tail_lines=settings.tail_lines
+            masking, tail_bytes=settings.tail_bytes, tail_lines=settings.tail_lines, log=log
         )
         if self.terminated:  # from the hooks on, SIGTERM ends the job `terminated`
             self._fail(view, "terminated", exit_record=None)
@@ -782,6 +806,7 @@ class Shim:
         )
         if leftovers.count or not leftovers.complete:
             self._log_leftovers(view, leftovers)
+        job.capture.close_log()
         tail = job.capture.snapshot(final=True)
         natural = natural_outcome(record)
         outcome = self._sequence_outcome(job) or natural

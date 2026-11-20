@@ -89,4 +89,8 @@ def show_text(job: dict[str, Any]) -> str:
         lines.append(f"output{flags}:")
         text = sanitize(output["tail"])
         lines.extend(TAIL_PREFIX + line for line in text.rstrip("\n").split("\n"))
+        log = output.get("log")
+        if log is not None:
+            stopped = " (stopped at the size cap)" if log["truncated"] else ""
+            lines.append(f"full output log: {clean(log['path'])} ({log['bytes']} bytes){stopped}")
     return "\n".join(lines) + "\n"
