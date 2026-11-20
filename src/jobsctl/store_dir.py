@@ -36,6 +36,12 @@ class StatePaths:
     def diag(self) -> Path:
         return self.root / "diag"
 
+    @property
+    def output(self) -> Path:
+        """Full output logs (D55); created by the first shim that writes one, never by
+        `prepare_state_dir`, so a state directory that never used the feature has none."""
+        return self.root / "output"
+
 
 def resolve_state_dir(environ: Mapping[str, str] | None = None) -> Path:
     """``$XDG_STATE_HOME/jobsctl``, else ``~/.local/state/jobsctl``.

@@ -70,7 +70,8 @@ def test_invalid_utf8_becomes_backslash_x_whatever_the_split() -> None:
 
 def test_output_is_released_at_newlines_not_held_to_the_end() -> None:
     masker = StreamMasker(MASKING)
-    assert "line one\n" in masker.feed(b"line one\npart")
+    pad = "p" * 40
+    assert masker.feed(f"line one\n{pad}\npart".encode()).startswith("line one\n")
     assert masker.feed(b"ial") == ""
 
 
