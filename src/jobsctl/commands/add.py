@@ -26,11 +26,12 @@ from jobsctl.env_file import EnvFile, load_env_file
 from jobsctl.env_logging import log_env_file_state, log_path_state
 from jobsctl.env_mask import MaskingSet, check_label_secrets, masking_values
 from jobsctl.errors import ExitCode, JobsctlError, usage_error
-from jobsctl.ids import generate_job_id
+from jobsctl.ids import generate_job_id, new_job_id
 from jobsctl.job_view import job_object, job_row
 from jobsctl.log_records import argv_sha256
 from jobsctl.log_writer import RecordWriter
 from jobsctl.order import head_position, tail_position
+from jobsctl.pre_add import run_pre_add, selected_pre_add
 from jobsctl.store_db import OpenMode, Store, Tx
 from jobsctl.store_dir import resolve_state_dir
 from jobsctl.store_ops import insert_job
@@ -354,11 +355,50 @@ def _reuse(
     return out
 
 
+class NeedsPreAddHook(Exception):
+    """A job would be created, and `hooks.pre-add` selects hooks that have not allowed this exact
+    add (yet, or under the id they saw: it is taken). Raised inside the write transaction, which
+    rolls back; `_write` runs the hooks and decides again."""
+
+
+def _label_texts(req: Request) -> list[str]:
+    return [f"{key}={value}" for key, value in req.labels]
+
+
+def _payload_fields(req: Request) -> dict[str, Any]:
+    return {
+        "queue": req.queue,
+        "argv": req.argv,
+        "cwd": req.cwd,
+        "env_names": list(req.env),
+        "pass_env": req.pass_env,
+        "labels": _label_texts(req),
+        "unique_key": req.unique_key,
+        "priority": req.priority,
+        "pinned": req.pin,
+        "top": req.top,
+        "overrides": req.overrides,
+        "actor": req.actor,
+        "decision_ids": req.decision_ids,
+    }
+
+
 def decide(
-    tx: Tx | None, ctx: Context, req: Request, env_file: EnvFile, now: str, *, write: bool
+    tx: Tx | None,
+    ctx: Context,
+    req: Request,
+    env_file: EnvFile,
+    now: str,
+    *,
+    write: bool,
+    allowed_id: str | None = None,
 ) -> Outcome:
     """Decide and, with `write`, store. `tx` is a write transaction (`write`), a read
-    transaction (dry run) or `None` (dry run with no state directory yet: nothing exists)."""
+    transaction (dry run) or `None` (dry run with no state directory yet: nothing exists).
+
+    With `write`, when `hooks.pre-add` selects hooks for the job that would be created, the
+    hooks must have allowed it as `allowed_id` (the id they saw), else `NeedsPreAddHook`. A
+    unique-key hit and every refusal before this point run no hook."""
     held = _holder(tx, req.unique_key)
     if held is not None:
         assert tx is not None
@@ -373,8 +413,13 @@ def decide(
     if not write:
         return out
     assert tx is not None
+    if selected_pre_add(ctx.config, req.queue, _label_texts(req)):
+        if allowed_id is None or _taken(tx, allowed_id):
+            raise NeedsPreAddHook
+        job_id = allowed_id
+    else:
+        job_id = generate_job_id(lambda candidate: _taken(tx, candidate))
     position = head_position(tx, req.queue) if req.top else tail_position(tx, req.queue)
-    job_id = generate_job_id(lambda candidate: _taken(tx, candidate))
     if not insert_job(tx, _job_values(req, job_id, position, now)):
         raced = _holder(tx, req.unique_key)  # the partial index decided: reuse that job
         if raced is None:
@@ -424,6 +469,8 @@ def decide(
 
 # -- the command -----------------------------------------------------------------------------
 
+MAX_HOOK_ROUNDS = 4  # pre-add hook runs per add; each is followed by a store attempt
+
 
 def _dry_run(ctx: Context, req: Request, env_file: EnvFile, now: str) -> Outcome:
     """The same decisions with nothing written: the database is opened read-only, and nothing is
@@ -450,31 +497,63 @@ def _write(
         writer = RecordWriter(store, masking=masking)
         log_env_file_state(writer, ctx.config.env_file, env_file)
         log_path_state(writer, canonical)
-        with store.write() as tx:
-            out = decide(tx, ctx, req, env_file, now, write=True)
-            records = list(out.log)
+        allowed_id: str | None = None
+        hook_runs = 0
+        while True:
+            try:
+                return _store(store, writer, ctx, req, env_file, now, allowed_id)
+            except NeedsPreAddHook:
+                if hook_runs >= MAX_HOOK_ROUNDS:  # the last run's id was taken too
+                    break
+                # No transaction is open while the hooks run. The id is the one the job gets
+                # (the hooks see it as JOBSCTL_ID); a taken one (2^-40) runs them again.
+                allowed_id = new_job_id()
+                hook_runs += 1
+                run_pre_add(
+                    store,
+                    ctx.config,
+                    selected_pre_add(ctx.config, req.queue, _label_texts(req)),
+                    job_id=allowed_id,
+                    payload_fields=_payload_fields(req),
+                )
+                now = format_timestamp(gateway.utc_now())  # the hooks may have taken a while
+        raise JobsctlError("internal", "no free job id after several pre-add hook rounds")
 
-            def log_all() -> None:
-                # The job is committed by now: a failed log append must not fail the command
-                # (a retry would add the job again). Failures before or during the commit
-                # still propagate. The warning names no value: only the exception's type.
-                failed = 0
-                last = ""
-                for event, fields, level in records:
-                    try:
-                        writer.log(event, level=level, fields={**fields, "actor": req.actor})
-                    except Exception as exc:
-                        failed += 1
-                        last = type(exc).__name__
-                if failed:
-                    sys.stderr.write(
-                        f"jobsctl: warning: the job was added but appending to log.jsonl "
-                        f"failed ({last}); {failed} log record(s) were not written\n"
-                    )
-                    sys.stderr.flush()
 
-            tx.after_commit(log_all)
-        return out
+def _store(
+    store: Store,
+    writer: RecordWriter,
+    ctx: Context,
+    req: Request,
+    env_file: EnvFile,
+    now: str,
+    allowed_id: str | None,
+) -> Outcome:
+    with store.write() as tx:
+        out = decide(tx, ctx, req, env_file, now, write=True, allowed_id=allowed_id)
+        records = list(out.log)
+
+        def log_all() -> None:
+            # The job is committed by now: a failed log append must not fail the command
+            # (a retry would add the job again). Failures before or during the commit
+            # still propagate. The warning names no value: only the exception's type.
+            failed = 0
+            last = ""
+            for event, fields, level in records:
+                try:
+                    writer.log(event, level=level, fields={**fields, "actor": req.actor})
+                except Exception as exc:
+                    failed += 1
+                    last = type(exc).__name__
+            if failed:
+                sys.stderr.write(
+                    f"jobsctl: warning: the job was added but appending to log.jsonl "
+                    f"failed ({last}); {failed} log record(s) were not written\n"
+                )
+                sys.stderr.flush()
+
+        tx.after_commit(log_all)
+    return out
 
 
 def _warn_human(ctx: Context, req: Request, out: Outcome) -> None:
@@ -550,7 +629,8 @@ def add(ctx: Context) -> int:
     canonical = build_canonical_env(ctx.config, dict(os.environ))
     masking = masking_values(ctx.config, canonical, env_file)
     check_secrets(req, masking, ctx.config.mask_env, env_file)
-    # TODO(#34): the pre-add hook runs here (1.x). Pre-start hooks run in the shim, not here.
+    # The pre-add hook runs inside `_write`, once a job would really be created: after the
+    # unique-key lookup and strict_queues, before the insert (not for `--dry-run`).
     now = format_timestamp(gateway.utc_now())
     if args.dry_run:
         out = _dry_run(ctx, req, env_file, now)

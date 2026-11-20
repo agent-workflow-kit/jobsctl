@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "jobsctl/cli/error.json",
   "title": "jobsctl error output (--json, non-zero exit)",
-  "description": "Every non-zero exit except the wait outcomes (12, 13, 20, 22 and 130: wait prints show.json, add --wait prints add.json) and cancel with selectors and --all exiting 20 (which prints cancel.json).",
+  "description": "Every non-zero exit except the outcomes of waiting (12, 13, 20, 22 and 130: wait prints show.json, the wait of add --wait prints add.json; an add refused by a pre-add hook, exit 11 or 13, prints this error object) and cancel with selectors and --all exiting 20 (which prints cancel.json).",
   "type": "object",
   "properties": {
     "error": {
@@ -67,6 +67,21 @@
             "label": {
               "$ref": "../defs.json#/$defs/label_key",
               "description": "secret_in_label: the key of the label whose value holds a secret; never the value (from add and label add). Absent for a key hit, a joined key=value hit, or a secret that starts in the key."
+            },
+            "hook_id": {
+              "$ref": "../defs.json#/$defs/hook_id",
+              "maxLength": 256,
+              "description": "vetoed: the identity of the pre-add hook that vetoed the add (masked and sanitized)."
+            },
+            "hook_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "../defs.json#/$defs/hook_id",
+                "maxLength": 256
+              },
+              "minItems": 1,
+              "uniqueItems": true,
+              "description": "needs_human from add: the identities of the pre-add hooks that escalated it (masked and sanitized); absent for the other needs_human errors."
             }
           },
           "additionalProperties": {},
@@ -219,6 +234,30 @@
             "properties": {
               "code": {
                 "const": "usage"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "vetoed"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "required": [
+                  "hook_id"
+                ]
               }
             }
           }

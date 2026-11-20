@@ -31,6 +31,7 @@ INT_MAX: Final = 2**31 - 1  # SQLite-safe bound for integer settings
 MAX_TEXT_BYTES: Final = 131072  # an env.set value or hook cmd, as UTF-8 (the --env cap)
 
 HOOK_NAMES: Final = (
+    "pre-add",
     "pre-start",
     "post-start",
     "post-finish",
@@ -163,8 +164,8 @@ class _HookEntry(_Model):
 
 
 class PreHookEntry(_HookEntry):
-    """A `pre-start` hook: `async` and `include_output` are post-hook fields, so they are unknown
-    keys here."""
+    """A `pre-add` or `pre-start` hook: `async` and `include_output` are post-hook fields, so they
+    are unknown keys here."""
 
 
 class PostHookEntry(_HookEntry):
@@ -197,6 +198,7 @@ PostHooks = Annotated[list[PostHookEntry], AfterValidator(_unique_names)]
 
 
 class HooksConfig(_Model):
+    pre_add: PreHooks = Field(default_factory=list, alias="pre-add")
     pre_start: PreHooks = Field(default_factory=list, alias="pre-start")
     post_start: PostHooks = Field(default_factory=list, alias="post-start")
     post_finish: PostHooks = Field(default_factory=list, alias="post-finish")

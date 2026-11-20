@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from .config import HOOK_NAMES, Config, PostHookEntry, PreHookEntry
 
-__all__ = ["SelectedHook", "matches", "pre_start_event_id", "select_hooks"]
+__all__ = ["SelectedHook", "matches", "pre_add_event_id", "pre_start_event_id", "select_hooks"]
 
 AnyEntry = PreHookEntry | PostHookEntry
 
@@ -54,3 +54,8 @@ def select_hooks(
 def pre_start_event_id(claim_id: str, hook_index: int) -> str:
     """`pre-start` is not an outbox event: its `event_id` is `<claim_id>:pre-start:<index>`."""
     return f"{claim_id}:pre-start:{hook_index}"
+
+
+def pre_add_event_id(job_id: str, hook_index: int) -> str:
+    """`pre-add` is not an outbox event: its `event_id` is `pre-add:<proposed job id>:<index>`."""
+    return f"pre-add:{job_id}:{hook_index}"

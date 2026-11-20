@@ -200,7 +200,7 @@
         "timeout",
         null
       ],
-      "description": "hook_ran: allow, escalate, veto (pre-start), failed or timeout."
+      "description": "hook_ran: allow, escalate, veto (pre-add or pre-start), failed or timeout."
     },
     "exit": {
       "type": [

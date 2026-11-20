@@ -157,6 +157,16 @@ def test_decision_ids_come_from_json_stdout(tracker: HookTracker, state_dir: Pat
     assert all(len(w.detail.encode()) <= 64 for w in res.warnings)
 
 
+def test_a_decision_id_holding_a_masked_value_is_dropped_for_pre_start(
+    tracker: HookTracker, state_dir: Path
+) -> None:
+    res = run(f"""echo '{{"decision_id": ["{SECRET}", "ok1"]}}'""", state_dir, hook="pre-start")
+    assert res.decision_ids == ("ok1",)
+    assert [w.code for w in res.warnings] == ["invalid_decision_id"]
+    assert SECRET not in json.dumps(res.log_fields("jb-abcdefgh"))
+    assert all(SECRET not in w.detail for w in res.warnings)
+
+
 def test_decision_ids_are_kept_for_a_vetoing_hook_too(
     tracker: HookTracker, state_dir: Path
 ) -> None:

@@ -177,6 +177,13 @@
     "hooks": {
       "type": "object",
       "properties": {
+        "pre-add": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pre_hook_entry"
+          },
+          "default": []
+        },
         "pre-start": {
           "type": "array",
           "items": {

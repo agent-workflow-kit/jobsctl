@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from jobsctl.config import Config
-from jobsctl.hook_select import matches, pre_start_event_id, select_hooks
+from jobsctl.hook_select import matches, pre_add_event_id, pre_start_event_id, select_hooks
 
 
 def cfg(entries: list[dict[str, object]]) -> Config:
@@ -55,7 +55,12 @@ def test_select_keeps_configured_index_and_order() -> None:
 
 def test_select_unknown_hook_is_a_programming_error() -> None:
     with pytest.raises(KeyError):
-        select_hooks(Config(), "pre-add", "q", [])
+        select_hooks(Config(), "pre-stop", "q", [])
+
+
+def test_pre_add_is_a_known_hook_with_its_own_event_id() -> None:
+    assert select_hooks(Config(), "pre-add", "q", []) == []
+    assert pre_add_event_id("jb-abcdefgh", 1) == "pre-add:jb-abcdefgh:1"
 
 
 def test_pre_start_event_id() -> None:

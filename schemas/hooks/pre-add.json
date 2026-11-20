@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jobsctl/hooks/pre-add.json",
+  "title": "jobsctl pre-add hook payload",
+  "description": "The JSON document a pre-add hook gets on stdin from `add`, before the job is stored. The job does not exist yet: object_id and job.id are the id it gets if the add goes ahead, previous_status and attempt are null, and job carries the request (no status, rank or attempt fields). It has the top-level shape of payload.json. Variable values are never included, only names.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "jobsctl"
+    },
+    "hook": {
+      "const": "pre-add"
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^pre-add:jb-[a-z2-7]{8}:[0-9]+$",
+      "description": "pre-add:<proposed job id>:<hook index>; a pre-add run is not an outbox event and is never redelivered."
+    },
+    "object_type": {
+      "const": "job"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/job_id",
+      "description": "The id the job gets if the add goes ahead; a vetoed add's id names no job."
+    },
+    "repo": {
+      "type": "null",
+      "description": "Always null: jobsctl has no repo notion; policies match on labels."
+    },
+    "labels": {
+      "$ref": "../defs.json#/$defs/labels"
+    },
+    "previous_status": {
+      "type": "null",
+      "description": "The job does not exist yet."
+    },
+    "job": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "../defs.json#/$defs/job_id"
+        },
+        "queue": {
+          "$ref": "../defs.json#/$defs/queue"
+        },
+        "argv": {
+          "$ref": "../defs.json#/$defs/argv"
+        },
+        "cwd": {
+          "$ref": "../defs.json#/$defs/abs_path"
+        },
+        "env_names": {
+          "$ref": "../defs.json#/$defs/env_names",
+          "description": "The names of the --env entries; values are never in a payload."
+        },
+        "pass_env": {
+          "$ref": "../defs.json#/$defs/env_names",
+          "description": "The --pass-env names."
+        },
+        "labels": {
+          "$ref": "../defs.json#/$defs/labels"
+        },
+        "unique_key": {
+          "oneOf": [
+            {
+              "$ref": "../defs.json#/$defs/unique_key"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "priority": {
+          "$ref": "../defs.json#/$defs/priority"
+        },
+        "pinned": {
+          "type": "boolean",
+          "description": "--pin."
+        },
+        "top": {
+          "type": "boolean",
+          "description": "--top."
+        },
+        "overrides": {
+          "$ref": "../defs.json#/$defs/job_base/properties/overrides"
+        },
+        "actor": {
+          "$ref": "../defs.json#/$defs/actor"
+        },
+        "decision_ids": {
+          "$ref": "../defs.json#/$defs/decision_ids",
+          "description": "The --decision-id values given to add."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "queue",
+        "argv",
+        "cwd",
+        "env_names",
+        "pass_env",
+        "labels",
+        "unique_key",
+        "priority",
+        "pinned",
+        "top",
+        "overrides",
+        "actor",
+        "decision_ids"
+      ]
+    },
+    "attempt": {
+      "type": "null",
+      "description": "The job has no attempt."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tool",
+    "hook",
+    "event_id",
+    "object_type",
+    "object_id",
+    "repo",
+    "labels",
+    "previous_status",
+    "job",
+    "attempt"
+  ]
+}

@@ -25,12 +25,14 @@ _JOB_ID_RE = re.compile(r"^jb-[a-z2-7]{8}\Z")
 
 
 class ExitCode(enum.IntEnum):
-    """Every exit code jobsctl uses. It never exits 11 (a veto ends a job inside its shim)."""
+    """Every exit code jobsctl uses. Exit 11 is only `add` vetoed by a `pre-add` hook (a `pre-start`
+    veto ends a job inside its shim and is no exit code of any command)."""
 
     OK = 0
     INTERNAL = 1
     USAGE = 2
     NOT_FOUND = 10
+    VETOED = 11
     FAILED = 12
     NEEDS_HUMAN = 13
     REFUSED = 20
@@ -49,6 +51,7 @@ ERROR_EXIT: dict[str, int] = {
     "cancel_pending": ExitCode.FAILED,
     "version_skew": ExitCode.FAILED,
     "interrupted": ExitCode.INTERRUPTED,
+    "vetoed": ExitCode.VETOED,
     "needs_human": ExitCode.NEEDS_HUMAN,
     "refused": ExitCode.REFUSED,
     "ambiguous": ExitCode.AMBIGUOUS,
