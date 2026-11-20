@@ -702,3 +702,43 @@ def test_the_joined_escalation_message_is_cut_by_bytes_not_characters(
     assert res.code == 13, res.out + res.err
     reasons = error(res)["message"].split(": ", 1)[1]
     assert 4000 < len(reasons.encode()) <= 4096
+
+
+def test_a_long_unnamed_cmd_is_cut_in_the_veto_and_escalation_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], tracker: HookTracker
+) -> None:
+    pad = "é" * 2000  # multi-byte, so the cut must stay UTF-8 safe
+    veto = add(capsys, config(tmp_path, {"cmd": f"exit 1 # {pad}"}))
+    assert veto.code == 11, veto.out + veto.err
+    err = error(veto)
+    assert len(err["details"]["hook_id"].encode()) <= 256
+    assert len(err["message"].encode()) < 512
+    esc = add(capsys, config(tmp_path, {"cmd": f"exit 13 # {pad}"}))
+    assert esc.code == 13, esc.out + esc.err
+    err = error(esc)
+    assert all(len(i.encode()) <= 256 for i in err["details"]["hook_ids"])
+    assert len(err["message"].encode()) < 512
+    assert jobs() == []
+
+
+def test_a_signal_after_the_last_hook_check_still_ends_the_add_interrupted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = pre_add.InterruptGuard
+
+    class Late(real):  # type: ignore[valid-type, misc]
+        reads = 0
+
+        @property
+        def signum(self) -> int | None:
+            Late.reads += 1
+            return None if Late.reads == 1 else signal.SIGINT  # arrives after the loop's check
+
+        @signum.setter
+        def signum(self, value: int | None) -> None:  # pyright: ignore[reportIncompatibleVariableOverride]
+            pass
+
+    monkeypatch.setattr(pre_add, "InterruptGuard", Late)
+    res = add(capsys, config(tmp_path, {"cmd": "true"}))
+    assert res.code == 130, res.out + res.err
+    assert error(res)["code"] == "interrupted" and jobs() == []

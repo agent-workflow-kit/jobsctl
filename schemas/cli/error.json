@@ -70,12 +70,14 @@
             },
             "hook_id": {
               "$ref": "../defs.json#/$defs/hook_id",
+              "maxLength": 256,
               "description": "vetoed: the identity of the pre-add hook that vetoed the add (masked and sanitized)."
             },
             "hook_ids": {
               "type": "array",
               "items": {
-                "$ref": "../defs.json#/$defs/hook_id"
+                "$ref": "../defs.json#/$defs/hook_id",
+                "maxLength": 256
               },
               "minItems": 1,
               "uniqueItems": true,

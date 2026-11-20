@@ -36,6 +36,7 @@ from jobsctl.textsafe import sanitize
 __all__ = ["HOOK", "run_pre_add", "selected_pre_add"]
 
 HOOK = "pre-add"
+IDENTITY_LIMIT = 256  # an unnamed hook's identity is its whole cmd: bound what an error shows
 
 
 def selected_pre_add(config: Config, queue: str, labels: list[str]) -> list[SelectedHook]:
@@ -45,6 +46,18 @@ def selected_pre_add(config: Config, queue: str, labels: list[str]) -> list[Sele
 
 def _text(deliverer: Deliverer, text: str) -> str:
     return sanitize(deliverer.env.masking.mask(text), inline=True)
+
+
+def _identity(deliverer: Deliverer, hook_id: str) -> str:
+    return cut_bytes(_text(deliverer, hook_id), IDENTITY_LIMIT)
+
+
+def _interrupted(signum: int | None, stopped: str | None) -> JobsctlError:
+    name = signal.Signals(signum).name if signum else str(stopped)
+    code = "interrupted" if signum == signal.SIGINT else "internal"
+    return JobsctlError(
+        code, f"interrupted by {name} while running a pre-add hook; nothing was added"
+    )
 
 
 def _reason(deliverer: Deliverer, result: HookResult) -> str:
@@ -89,14 +102,10 @@ def run_pre_add(
             if result.unkillable:
                 raise JobsctlError("internal", "a pre-add hook outlived SIGKILL; nothing was added")
             if result.stopped is not None or guard.signum is not None:
-                name = signal.Signals(guard.signum).name if guard.signum else str(result.stopped)
-                code = "interrupted" if guard.signum == signal.SIGINT else "internal"
-                raise JobsctlError(
-                    code, f"interrupted by {name} while running a pre-add hook; nothing was added"
-                )
+                raise _interrupted(guard.signum, result.stopped)
             if result.vetoes:
                 reason = _reason(deliverer, result)
-                shown = _text(deliverer, result.hook_id)
+                shown = _identity(deliverer, result.hook_id)
                 raise JobsctlError(
                     "vetoed",
                     f"the pre-add hook {shown} vetoed the add" + (f": {reason}" if reason else ""),
@@ -104,8 +113,11 @@ def run_pre_add(
                 )
             if result.escalates:
                 escalated.append(result)
+        # a signal after the last hook's check but before the guard is left must not be lost
+        if guard.signum is not None:
+            raise _interrupted(guard.signum, None)
     if escalated:
-        ids = [_text(deliverer, r.hook_id) for r in escalated]
+        ids = [_identity(deliverer, r.hook_id) for r in escalated]
         reasons = [r for r in (_reason(deliverer, x) for x in escalated) if r]
         raise JobsctlError(
             "needs_human",
