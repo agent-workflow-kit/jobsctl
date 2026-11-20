@@ -8,7 +8,9 @@ crontab's exact bytes to a file before touching it and writes them back in a ``f
 removes the crontab when there was none), then checks the restore byte for byte. Everything else
 is private: the state and config directories (written into the cron entry as ``XDG_*``), the job
 and its marker files live under pytest's temporary directory, and ``auto_run: false`` keeps any
-trigger but cron from starting the job. The test starts no process it does not wait for.
+trigger but cron from starting the job. The job's final status is polled (30 s deadline) after
+its marker appears, because the shim records it a moment after the job's last act. The test
+starts no process it does not wait for.
 """
 
 from __future__ import annotations
