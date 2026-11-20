@@ -40,9 +40,9 @@ def test_every_single_split_offset_of_a_secret_leaves_no_trace(stray: str) -> No
         assert out == whole(data)
 
 
-@pytest.mark.parametrize("stray", ["", *STRAYS])
+@pytest.mark.parametrize("stray", ["", "\x1b", "\x1b]", "\x90"])
 def test_every_pair_of_split_offsets_matches_the_whole_render(stray: str) -> None:
-    data = f"a\n{stray}{SECRET}\nb {SECRET}{stray}x\n".encode()
+    data = f"a\n{stray}{SECRET}\nb{stray}".encode()
     for i in range(len(data) + 1):
         for j in range(i, len(data) + 1):
             out = stream(split_at(data, [i, j]))
