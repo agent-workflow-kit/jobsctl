@@ -43,6 +43,10 @@ _ID_RE: Final = re.compile(r"jb-[a-z2-7]{8}")
 _DIR_FLAGS: Final = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
+def _os_write(fd: int, data: memoryview) -> int:
+    return os.write(fd, data)
+
+
 def marker_line(max_bytes: int) -> str:
     return f"[jobsctl: full output log truncated at {max_bytes} bytes (full_output_max_bytes)]\n"
 
@@ -222,7 +226,7 @@ class FullOutputLog:
         assert self._fd is not None
         view = memoryview(data)
         while view:
-            n = os.write(self._fd, view)
+            n = _os_write(self._fd, view)
             view = view[n:]
         self._written += len(data)
         self._ends_with_newline = data.endswith(b"\n")
