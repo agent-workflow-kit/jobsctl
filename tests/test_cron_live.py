@@ -28,6 +28,7 @@ from jobsctl import gateway
 pytestmark = pytest.mark.live
 
 WAIT_FOR_CRON = 180.0
+WAIT_FOR_STATUS = 30.0
 
 
 def _jobsctl_script() -> Path:
@@ -35,6 +36,15 @@ def _jobsctl_script() -> Path:
     if not script.exists():
         pytest.skip(f"no jobsctl console script next to {sys.executable}")
     return script
+
+
+def _status(state: Path, job_id: str) -> str | None:
+    db = sqlite3.connect(f"file:{state / 'jobsctl' / 'state.db'}?mode=ro", uri=True)
+    try:
+        row = db.execute("SELECT status FROM jobs WHERE id = ?", [job_id]).fetchone()
+    finally:
+        db.close()
+    return None if row is None else str(row[0])
 
 
 def _restore(original: bytes | None) -> None:
@@ -94,13 +104,20 @@ def test_a_real_cron_pass_starts_a_queued_job_and_its_shim_outlives_the_pass(
         # proves the shim (not the pass) saw the job through.
         assert marker.exists(), "cron did not start the job in time"
 
-        # `show` is not implemented yet: read the status from the private database.
-        db = sqlite3.connect(f"file:{state / 'jobsctl' / 'state.db'}?mode=ro", uri=True)
-        try:
-            row = db.execute("SELECT status FROM jobs WHERE id = ?", [job_id]).fetchone()
-        finally:
-            db.close()
-        assert row == ("done",)
+        # The job's last act is the marker, so the shim records `done` a moment later: poll the
+        # status (read from the private database) with a bounded deadline instead of reading it
+        # the instant the marker appears. A shim that never records it fails after the deadline.
+        status_deadline = time.monotonic() + WAIT_FOR_STATUS
+        status: str | None = None
+        while True:
+            status = _status(state, job_id)
+            if status == "done" or time.monotonic() >= status_deadline:
+                break
+            time.sleep(0.25)
+        assert status == "done", (
+            f"{WAIT_FOR_STATUS:.0f} s after the job's marker appeared its status is {status!r}, "
+            "not 'done': the shim did not record the end of the job"
+        )
     finally:
         try:
             cleanup = jobsctl("cron", "uninstall")
