@@ -721,24 +721,48 @@ def test_a_long_unnamed_cmd_is_cut_in_the_veto_and_escalation_errors(
     assert jobs() == []
 
 
+@pytest.mark.parametrize(
+    ("seam", "signum", "code"),
+    [
+        ("after_last_check", signal.SIGINT, 130),
+        ("at_release", signal.SIGINT, 130),
+        ("at_release", signal.SIGTERM, 1),
+    ],
+)
 def test_a_signal_after_the_last_hook_check_still_ends_the_add_interrupted(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    seam: str,
+    signum: int,
+    code: int,
 ) -> None:
-    real = pre_add.InterruptGuard
+    # The guard's installed handler, called as the OS would call it: the signal is recorded.
+    def arrives() -> None:
+        handler = signal.getsignal(signum)
+        assert callable(handler)
+        handler(signum, None)
 
-    class Late(real):  # type: ignore[valid-type, misc]
-        reads = 0
+    if seam == "after_last_check":  # the one hook's check is done; the loop reads `vetoes` next
+        real_vetoes = HookResult.vetoes
 
-        @property
-        def signum(self) -> int | None:
-            Late.reads += 1
-            return None if Late.reads == 1 else signal.SIGINT  # arrives after the loop's check
+        def vetoes(self: HookResult) -> bool:
+            monkeypatch.setattr(HookResult, "vetoes", real_vetoes)  # once
+            arrives()
+            return bool(real_vetoes.fget(self))  # type: ignore[union-attr]
 
-        @signum.setter
-        def signum(self, value: int | None) -> None:  # pyright: ignore[reportIncompatibleVariableOverride]
-            pass
+        monkeypatch.setattr(HookResult, "vetoes", property(vetoes))
+    else:  # the signal lands as the guard is released, after the loop's last read
+        real_guard = pre_add.InterruptGuard
 
-    monkeypatch.setattr(pre_add, "InterruptGuard", Late)
+        class AtRelease(real_guard):  # type: ignore[valid-type, misc]
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+                arrives()
+                super().__exit__(exc_type, exc, tb)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pre_add, "InterruptGuard", AtRelease)
+
     res = add(capsys, config(tmp_path, {"cmd": "true"}))
-    assert res.code == 130, res.out + res.err
-    assert error(res)["code"] == "interrupted" and jobs() == []
+    assert res.code == code, res.out + res.err
+    assert error(res)["code"] == ("interrupted" if signum == signal.SIGINT else "internal")
+    assert jobs() == [] and queues_seen() == []

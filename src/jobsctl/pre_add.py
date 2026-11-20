@@ -113,9 +113,12 @@ def run_pre_add(
                 )
             if result.escalates:
                 escalated.append(result)
-        # a signal after the last hook's check but before the guard is left must not be lost
-        if guard.signum is not None:
-            raise _interrupted(guard.signum, None)
+    # After the guard is released, a signal it recorded (one that landed after the last hook's
+    # check, up to the restore of the handlers) must not be lost: it ends the add here, before
+    # anything is stored. A signal after the restore takes the default disposition, before the
+    # store's commit, so nothing is stored either way.
+    if guard.signum is not None:
+        raise _interrupted(guard.signum, None)
     if escalated:
         ids = [_identity(deliverer, r.hook_id) for r in escalated]
         reasons = [r for r in (_reason(deliverer, x) for x in escalated) if r]
