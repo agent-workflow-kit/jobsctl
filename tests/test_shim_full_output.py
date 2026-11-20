@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from jobsctl import output_log
 from jobsctl import shim as shim_module
@@ -196,11 +197,19 @@ def test_a_binary_flood_is_valid_utf8_text_in_the_file(store: Store) -> None:
     (out_dir() / OUT).read_bytes().decode("utf-8")
 
 
-def test_invalid_values_of_the_new_keys_are_refused() -> None:
-    for bad in ({"full_output_max_bytes": 0}, {"full_output_max_bytes": 1 << 31},
-                {"full_output_log": "yes"}, {"queues": {"q": {"full_output_log": None}}}):  # fmt: skip
-        with pytest.raises(Exception):
-            Config.model_validate(bad)
+BAD_VALUES: list[dict[str, Any]] = [
+    {"full_output_max_bytes": 0},
+    {"full_output_max_bytes": 1 << 31},
+    {"full_output_log": "yes"},
+    {"queues": {"q": {"full_output_log": None}}},
+    {"queues": {"q": {"full_output_max_bytes": None}}},
+]
+
+
+@pytest.mark.parametrize("bad", BAD_VALUES)
+def test_invalid_values_of_the_new_keys_are_refused(bad: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        Config.model_validate(bad)
 
 
 def test_defaults() -> None:
